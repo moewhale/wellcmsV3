@@ -2018,6 +2018,10 @@ class WellRTE {
     const sel = window.getSelection();
     if (!sel.isCollapsed) return;
     const range = sel.getRangeAt(0);
+
+    // 在 <pre> / <code> 等受保护容器内，禁用 Markdown 自动转换
+    if (this.isInsidePre(range)) return;
+
     const node = range.startContainer;
 
     // Text up to cursor
@@ -2157,6 +2161,10 @@ class WellRTE {
   applyInlineFormat(type, content, deleteLen) {
     const sel = window.getSelection();
     const range = sel.getRangeAt(0);
+
+    // 在 <pre> / <code> 等受保护容器内，禁用行内格式化
+    if (this.isInsidePre(range)) return;
+
     // Delete trigger chars (**text**)
     const node = range.startContainer;
     const start = range.startOffset - deleteLen;
@@ -2718,6 +2726,13 @@ class WellRTE {
 
     // 3. Markdown
     const text = (e.clipboardData || window.clipboardData).getData("text");
+
+    // 在 <pre> / <code> 等受保护容器内粘贴时，禁用自动 Markdown / URL 转换
+    const sel = window.getSelection();
+    if (sel.rangeCount > 0 && this.isInsidePre(sel.getRangeAt(0))) {
+      return;
+    }
+
     if (this.isMarkdown(text)) {
       e.preventDefault();
       const html = this.markdownToHtml(text);
@@ -3392,6 +3407,32 @@ class WellRTE {
   }
 
   /**
+   * 判断节点是否位于 <pre> 或 <code> 等受保护容器内
+   * @param {Node|Range} nodeOrRange
+   * @returns {boolean}
+   */
+  isInsidePre(nodeOrRange) {
+    if (!nodeOrRange) return false;
+    let node;
+    if (nodeOrRange instanceof Range) {
+      node = nodeOrRange.commonAncestorContainer;
+    } else if (nodeOrRange.nodeType === Node.TEXT_NODE) {
+      node = nodeOrRange.parentElement;
+    } else {
+      node = nodeOrRange;
+    }
+    const protectedTags = ['PRE', 'CODE', 'SAMP', 'KBD'];
+    while (node && node !== this.editorEl) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        if (protectedTags.includes(node.tagName)) return true;
+        if (node.getAttribute('contenteditable') === 'false') return true;
+      }
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  /**
    * 判断字符串是否为 URL
    * @param {string} str
    * @returns {boolean}
@@ -3399,9 +3440,24 @@ class WellRTE {
   isUrl(str) {
     if (!str || typeof str !== 'string') return false;
     const s = str.trim();
+    // 必须显式以协议或 www. 开头，避免文件名/配置片段被误判
+    if (!/^(https?|ftp|mailto):\/\/|^www\./i.test(s)) return false;
+    // 排除包含空格或常见非法字符的字符串
+    if (/[\s<>{}\\|^`]/.test(s)) return false;
     try {
-      const url = new URL(s.startsWith('http') ? s : 'https://' + s);
-      return url.hostname.includes('.');
+      // mailto 单独校验
+      if (s.toLowerCase().startsWith('mailto:')) {
+        return /^mailto:[^@\s]+@[^@\s]+\.[^@\s]+$/i.test(s);
+      }
+      const url = new URL(s.startsWith('http') || s.startsWith('ftp') ? s : 'https://' + s);
+      const host = url.hostname.toLowerCase();
+      // hostname 必须包含至少一个点，且格式为 x.y 或 x.y.z
+      if (!host || !/^[^.]+(\.[^.]+)+$/.test(host)) return false;
+      // TLD 至少 2 个字符
+      const parts = host.split('.');
+      const tld = parts[parts.length - 1];
+      if (!tld || tld.length < 2) return false;
+      return true;
     } catch {
       return false;
     }
