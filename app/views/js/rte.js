@@ -2096,19 +2096,10 @@ class WellRTE {
       }
     }
 
-    // Check for `code`<space> (since user asked for `code` conversion)
-    // Usually backticks trigger without space, but here we trigger on input
-    if (e.data === "`") {
-      // Look for `code` pattern ending in `
-      // Note: data is inserted, so text includes current `
-      const codeMatch = text.match(/`(.+?)`$/);
-      if (codeMatch) {
-        const content = codeMatch[1];
-        const fullLen = codeMatch[0].length;
-        this.applyInlineFormat("code", content, fullLen);
-        return;
-      }
-    }
+    // 工业级修复：禁用行内单反引号 `code` 的输入时自动转换，
+    // 避免 PHP 代码（如 `$this->responseFormatter->jsonResponseFormat()`）
+    // 在编辑过程中被误拆、丢失反引号或样式异常。
+    // 三反引号代码块 ```php ... ``` 仍由 markdownToHtml() / paste 路径处理为 <pre><code>。
 
     // _italic_ (immediate on closing underscore, require preceding space/start)
     if (e.data === "_") {
@@ -3178,11 +3169,16 @@ class WellRTE {
     });
 
     // 2. Extract Inline Code
-    html = html.replace(/`([^`]+)`/g, (match, code) => {
-      return addPlaceholder(
-        `<code>${code.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code>`,
-      );
-    });
+    // 工业级修复：禁用行内单反引号 `code` 的自动转换，避免 PHP 代码（如
+    // `$this->responseFormatter->jsonResponseFormat()`）在粘贴/渲染过程中
+    // 被误拆、丢失反引号或样式异常。
+    // 三反引号代码块 ```php ... ``` 仍由下面的 Code Block（fence）逻辑处理。
+    //
+    // html = html.replace(/`([^`]+)`/g, (match, code) => {
+    //   return addPlaceholder(
+    //     `<code>${code.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code>`,
+    //   );
+    // });
 
     // 3. Normalize Newlines (after extracting code, so we don't break code blocks)
     html = html.replace(/\r\n/g, "\n").replace(/\n{2,}/g, "\n");
