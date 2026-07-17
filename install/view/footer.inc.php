@@ -9,7 +9,7 @@
         </div>
         </div>
 
-        <script>
+        <script data-cfasync="false">
             const currentStep = <?php echo (int)($_GET['step'] ?? 1); ?>;
 
             // 更新进度条
