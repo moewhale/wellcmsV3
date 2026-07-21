@@ -352,8 +352,8 @@ CREATE TABLE `well_scheduler_tasks` (
     `completed_at` int(11) UNSIGNED NOT NULL DEFAULT '0' COMMENT '完成时间戳',
     `heartbeat_at` int(11) UNSIGNED NOT NULL DEFAULT '0' COMMENT 'Worker 最后心跳时间戳',
     PRIMARY KEY (`id`),
-    INDEX `idx_status_scheduled` (`status`, `scheduled_at`),
-    UNIQUE INDEX `idx_dedupe_key` (`dedupe_key`),
-    INDEX `idx_heartbeat` (`heartbeat_at`),
-    INDEX `idx_created_at` (`created_at`)
+    KEY `idx_status_scheduled` (`status`, `scheduled_at`),
+    UNIQUE KEY `idx_dedupe_key` (`dedupe_key`),
+    KEY `idx_heartbeat` (`heartbeat_at`),
+    KEY `idx_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT charSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
