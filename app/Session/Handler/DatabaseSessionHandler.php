@@ -15,6 +15,8 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
     private $sessionService;
     /** @var \App\Services\Auth\SessionDataService */
     private $sessionDataService = null;
+    /** @var \Framework\Core\Container */
+    private $container;
     /** @var \Framework\Cache\Interfaces\CacheInterface */
     private $cache = null;
     /** @var array */
@@ -28,16 +30,26 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
     /** @var int */
     private $maxLifetime;
 
-    public function __construct(\App\Services\Auth\SessionService $sessionService, \App\Services\Auth\SessionDataService $sessionDataService, \Framework\Cache\Interfaces\CacheInterface $cache, array $cacheConfig, array $sessionConfig)
+    public function __construct(\App\Services\Auth\SessionService $sessionService, \Framework\Core\Container $container, \Framework\Cache\Interfaces\CacheInterface $cache, array $cacheConfig, array $sessionConfig)
     {
         $this->sessionService = $sessionService;
-        $this->sessionDataService = $sessionDataService;
+        $this->container = $container;
+        if (defined('SWOOLE_MODE') && \SWOOLE_MODE) $this->getSessionDataService();
         $this->cache = $cache;
         $this->cacheConfig = $cacheConfig;
         $this->writeCacheOn = (bool)($sessionConfig['session_write_cache_on'] ?? false);
         $this->delayUpdate = (int)($sessionConfig['delay_update'] ?? 30);
         $this->timeWindow = (int)($sessionConfig['time_window'] ?? 60);
         $this->maxLifetime = (int)($sessionConfig['online_hold_time'] ?? 1800);
+    }
+
+    private function getSessionDataService(): \App\Services\Auth\SessionDataService
+    {
+        if ($this->sessionDataService !== null) {
+            return $this->sessionDataService;
+        }
+        $resolved = $this->container->get(\App\Services\Auth\SessionDataService::class);
+        return $this->sessionDataService = $this->sessionDataService ?? $resolved;
     }
 
     /**
@@ -99,7 +111,7 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
                 function () use ($session_id) {
                     $result = $this->sessionService->read($session_id);
                     if (!empty($result) && 1 === (int)$result['bigdata']) {
-                        $sessionData = $this->sessionDataService->read($session_id);
+                        $sessionData = $this->getSessionDataService()->read($session_id);
                         return array_merge($result, $sessionData);
                     }
                     return $result;
@@ -115,7 +127,7 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
 
         $result = $this->sessionService->read($session_id);
         if (!empty($result) && 1 === (int)$result['bigdata']) {
-            $result = $this->sessionDataService->read($session_id);
+            $result = $this->getSessionDataService()->read($session_id);
         }
 
         return (string)($result['data'] ?? '');
@@ -153,17 +165,43 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
         $now = time();
         $len = strlen($session_data);
 
-        // 获取现有数据
-        $result = $this->sessionService->read($session_id);
+        $refreshDataCache = false;
+        $storedSession = null;
+        if ($this->writeCacheOn && !empty($this->cacheConfig['stores']) && $this->cache) {
+            $result = $this->cache->cacheWithLock(
+                'SessionHandler:' . $session_id,
+                'lock:Session:' . $session_id,
+                function () use ($session_id, &$storedSession) {
+                    $storedSession = $this->sessionService->read($session_id);
+                    if (!empty($storedSession) && 1 === (int)$storedSession['bigdata']) {
+                        $storedSessionData = $this->getSessionDataService()->read($session_id);
+                        return array_merge($storedSession, $storedSessionData);
+                    }
+                    return $storedSession;
+                },
+                5,
+                $this->maxLifetime
+            );
+            // 缓存命中时，未捕获的 URL/UA 仍使用数据库当前元数据。
+            $storedSession = $storedSession ?? $this->sessionService->read($session_id);
+        } else {
+            $storedSession = $this->sessionService->read($session_id);
+            $result = $storedSession;
+            $expiry = $now - $this->maxLifetime;
+            if (!empty($result) && $result['updated_at'] <= $expiry && 1 === (int)$result['bigdata']) {
+                $storedSessionData = $this->getSessionDataService()->read($session_id);
+                $result = array_merge($result, $storedSessionData);
+            }
+        }
 
         $sessionData = [
             'id' => (string)$session_id,
             'user_id' => (int)$userId,
             'request_count' => 1,
-            'url' => (string)($capturedUrl ?? ($result['url'] ?? '')), // SSOT: 仅在有新捕获时更新，否则保留现有的
+            'url' => (string)($capturedUrl ?? ($storedSession['url'] ?? '')), // SSOT: 仅在有新捕获时更新，否则保留现有的
             'ip' => $capturedIp ?? \Framework\Utils\IpHelper::ip() ?? '0.0.0.0',
             'ip_count' => 0,
-            'useragent' => (string)($capturedUa ?? ($result['useragent'] ?? '')),
+            'useragent' => (string)($capturedUa ?? ($storedSession['useragent'] ?? '')),
             'data' => (string)$session_data,
             'bigdata' => 0,
             'created_at' => $now,
@@ -175,35 +213,10 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
             $sessionData['url'] = mb_substr($sessionData['url'], 0, 64, 'UTF-8');
         }
 
-        if ($this->writeCacheOn && !empty($this->cacheConfig['stores']) && $this->cache) {
-            $result = $this->cache->cacheWithLock(
-                'SessionHandler:' . $session_id,
-                'lock:Session:' . $session_id,
-                function () use ($session_id) {
-                    $result = $this->sessionService->read($session_id);
-                    if (!empty($result) && 1 === (int)$result['bigdata']) {
-                        $sessionData = $this->sessionDataService->read($session_id);
-                        return array_merge($result, $sessionData);
-                    }
-                    return $result;
-                },
-                5,
-                $this->maxLifetime
-            );
-        } else {
-            $result = $this->sessionService->read($session_id);
-            $expiry = time() - $this->maxLifetime;
-            // 判断是否会话过期
-            if (!empty($result) && $result['updated_at'] <= $expiry && 1 === (int)$result['bigdata']) {
-                $sessionData = $this->sessionDataService->read($session_id);
-                $result = array_merge($result, $sessionData);
-            }
-        }
-
         if (empty($result)) {
             if ($len > 255) {
                 try {
-                    $this->sessionDataService->insert(['id' => $session_id, 'updated_at' => $now, 'data' => $session_data]);
+                    $this->getSessionDataService()->insert(['id' => $session_id, 'updated_at' => $now, 'data' => $session_data]);
                     $sessionData['bigdata'] = 1;
                     $sessionData['data'] = '';
                 } catch (\Throwable $e) {
@@ -219,7 +232,7 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
             return true;
         }
 
-        unset($sessionData['created_at'], $sessionData['created_at_fmt'],$sessionData['updated_at_fmt']);
+        unset($sessionData['created_at']);
 
         // 请求间隔时间，在规定时间内小于限制请求次数，中间件自动加入和黑名单并缓存
         $timeElapsed = $now - $result['start_date'];
@@ -230,67 +243,68 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
         } else {
             unset($sessionData['start_date']);
             $sessionData['request_count'] = $result['request_count'] + 1;
+            $sessionData['ip_count'] = $result['ip_count'];
         }
 
-        list($ip, $ip2bin) = \Framework\Utils\IpHelper::normalizeIp($sessionData['ip']);
-        if ($ip2bin !== $result['ip']) {
-            $sessionData['ip_count'] = $result['ip_count'] + 1;
+        list($ip) = \Framework\Utils\IpHelper::normalizeIp($sessionData['ip']);
+        $sessionData['ip'] = $ip;
+        if ($ip !== $result['ip']) {
+            ++$sessionData['ip_count'];
         }
 
         // 延迟更新逻辑，小于30秒非重要数据不进行更新()
-        $delayOn = $this->delayUpdate > 0 && ($now - ($result['updated_at'] ?? 0) < $this->delayUpdate);
+        $delayOn = $this->delayUpdate > 0 && ($now - ($storedSession['updated_at'] ?? 0) < $this->delayUpdate);
 
         // 启用延迟更新后，同个URL请求，过滤不重要的数据。
-        if ($delayOn && $sessionData['url'] === ($result['url'] ?? '')) unset($sessionData['url'], $sessionData['updated_at'], $sessionData['start_date'], $sessionData['useragent'], $sessionData['request_count']);
+        if ($delayOn && $sessionData['url'] === ($storedSession['url'] ?? '')) unset($sessionData['url'], $sessionData['updated_at'], $sessionData['start_date'], $sessionData['useragent'], $sessionData['request_count']);
 
         if ($len <= 255) {
-            $sessionData['bigdata'] = 0;
-            $diff = array_diff_assoc($sessionData, $result);
+            $diff = array_diff_assoc($sessionData, $storedSession);
 
-            // update
-            $affected = 0;
             if (!empty($diff)) {
                 try {
                     $affected = $this->sessionService->update($session_id, $diff);
                 } catch (\Throwable $e) {
                     $affected = 0;
                 }
-            }
 
-            // 若update未命中，自动insert
-            if ($affected === 0) {
-                try {
-                    $this->sessionService->insert($sessionData);
-                } catch (\Throwable $e) {
-                    // ignore二次插入异常
+                // 若update未命中，自动insert
+                if ($affected === 0) {
+                    try {
+                        $this->sessionService->insert($sessionData);
+                    } catch (\Throwable $e) {
+                        // ignore二次插入异常
+                    }
                 }
             }
 
-            if ($result && 1 === (int)$result['bigdata']) $this->sessionDataService->delete($session_id);
+            if ($result && 1 === (int)$result['bigdata']) $this->getSessionDataService()->delete($session_id);
         } else {
             $sessionData['bigdata'] = 1;
             $sessionData['data'] = '';
-            $diff = array_diff_assoc($sessionData, $result);
+            $diff = array_diff_assoc($sessionData, $storedSession);
 
             // $session_data
-            // [核心改进] 先写数据表，再写主表，防止 bigdata=1 时数据未就绪
-            if (empty($result) || 0 === (int)$result['bigdata']) {
+            // 先写数据表，再写主表，防止 bigdata=1 时数据未就绪
+            if (0 === (int)$result['bigdata']) {
                 try {
-                    $this->sessionDataService->insert(['id' => $session_id, 'updated_at' => $now, 'data' => $session_data]);
+                    $this->getSessionDataService()->insert(['id' => $session_id, 'updated_at' => $now, 'data' => $session_data]);
                 } catch (\Throwable $e) {
                     // 可能是并发冲突或残留记录，尝试更新
-                    $this->sessionDataService->update($session_id, ['updated_at' => $now, 'data' => $session_data]);
+                    $this->getSessionDataService()->update($session_id, ['updated_at' => $now, 'data' => $session_data]);
                 }
             } else {
                 try {
-                    $this->sessionDataService->update($session_id, ['updated_at' => $now, 'data' => $session_data]);
+                    $largeDataWritten = $this->getSessionDataService()->update($session_id, ['updated_at' => $now, 'data' => $session_data]);
                 } catch (\Throwable $e) {
                     // 极端情况下主键丢失，尝试找回
-                    $this->sessionDataService->insert(['id' => $session_id, 'updated_at' => $now, 'data' => $session_data]);
+                    $largeDataWritten = $this->getSessionDataService()->insert(['id' => $session_id, 'updated_at' => $now, 'data' => $session_data]);
                 }
+                // 上传链路保护：仅大表成功写入且主表无差异时补齐完整会话缓存，保留新增、删除和消费结果。
+                $refreshDataCache = $largeDataWritten > 0 && empty($diff);
             }
 
-            // [核心改进] 后写主表
+            // 后写主表
             if (!empty($diff)) {
                 try {
                     $this->sessionService->update($session_id, $diff);
@@ -306,7 +320,7 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
             $sessionData['data'] = $session_data;
         }
 
-        if ($this->writeCacheOn && !empty($this->cacheConfig['stores']) && $this->cache) {
+        if (($this->writeCacheOn || $refreshDataCache) && !empty($this->cacheConfig['stores']) && $this->cache) {
             $sessionData['updated_at'] = $now;
             $this->cache->set('SessionHandler:' . $session_id, array_merge($result, $sessionData), $this->maxLifetime);
         }
@@ -316,8 +330,7 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
 
     public function destroy($session_id): bool{
         $this->sessionService->delete($session_id);
-        $this->sessionDataService->delete($session_id);
-        if (!empty($this->cacheConfig['stores'])) $this->cache->delete($session_id);
+        $this->getSessionDataService()->delete($session_id);
         return true;
     }
 
@@ -325,28 +338,25 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
     {
         $expiry = time() - $maxlifetime;
         $batch = 5000;
-        $page = 1;
-        $toDel = [];
+        $count = 0;
+        $cursor = '';
 
         do {
-            $rows = $this->sessionService->find(['updated_at' => ['<' => $expiry]], [], $page, $batch);
+            $condition = ['updated_at' => ['<' => $expiry]];
+            if ($cursor !== '') $condition['id'] = ['>' => $cursor];
+            $rows = $this->sessionService->find($condition, ['id' => 1], 1, $batch, 'id', ['id']);
             if (empty($rows)) break;
 
+            $toDel = [];
             foreach ($rows as $row) {
                 $toDel[] = $row['id'];
-                if (!empty($this->cacheConfig['stores'])) {
-                    $this->cache->delete('SessionHandler:' . $row['id']);
-                    $this->cache->delete($row['id']);
-                }
             }
-            $page++;
-        } while (count($rows) === $batch);
-
-        $count = count($toDel);
-        if (!empty($toDel)) {
             $this->sessionService->delete($toDel);
-            $this->sessionDataService->delete($toDel);
-        }
+            $this->getSessionDataService()->delete($toDel);
+            $count += count($toDel);
+            // 主从读取也按已处理 ID 前进，不依赖删除立即反映到从库。
+            $cursor = end($toDel);
+        } while (count($rows) === $batch);
 
         return $count;
     }
@@ -357,7 +367,7 @@ class DatabaseSessionHandler implements \Framework\Session\SessionHandlerInterfa
         $session = $this->sessionService->readByCache($sessionId);
         if ($session) {
             if (1 === (int)$session['bigdata']) {
-                $sessionData = $this->sessionDataService->read($sessionId);
+                $sessionData = $this->getSessionDataService()->read($sessionId);
                 $this->setState('sessionData', array_merge($session, $sessionData));
                 return $sessionData['data'] ?? '';
             }

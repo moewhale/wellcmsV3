@@ -10,7 +10,8 @@ namespace App\Controllers\Admin;
 use Framework\Cache\Interfaces\CacheInterface;
 use Framework\Http\Interfaces\ResponseInterface;
 use Framework\Http\Psr7\RequestUtils;
-use Framework\Utils\DirectoryHelper;
+use Framework\Utils\Runtime;
+use App\Core\Compile;
 use App\Controllers\Base\BaseController;
 use App\Traits\Admin\AdminTrait;
 
@@ -70,8 +71,11 @@ class OtherController extends BaseController
 
         // hook src_admin_controller_AdminOther_postCache_start.php
 
+        $reloadRequired = false;
         if ($memoryCache) {
-            $cache->clear();
+            if (!$cache->clear()) {
+                throw new \RuntimeException('Unable to clear application memory cache');
+            }
 
             // 如果配置了 Redis 缓存，同时清理 scheduler 残留的 dedupeKey（通过连接池）
             try {
@@ -101,20 +105,29 @@ class OtherController extends BaseController
                     $instance->clearStates();
                 }
             }
+            $reloadRequired = true;
         }
 
         if ($temporaryDirectory) {
-            DirectoryHelper::rmdirRecursive($this->appConfig['tmp_path']);
+            Compile::flushCache();
+            // Swoole 热重载不会重跑 Master 启动段；后台清理后同步重建启动级固定缓存。
+            // classmap.php 仍由 GenerateClassmapJob 独立生成，避免请求内全目录扫描。
+            $containerCache = rtrim($this->appConfig['tmp_path'], '/\\')
+                . DIRECTORY_SEPARATOR . 'container.php';
+            Compile::init($containerCache);
 
-            DirectoryHelper::rmdirRecursive(APP_PATH . 'public/static/');
             // 同步清理 OPcache
             if (function_exists('opcache_get_status') && opcache_get_status(false)) {
                 opcache_reset();
             }
+            $reloadRequired = true;
         }
 
         // hook src_admin_controller_AdminOther_postCache_end.php
 
+        if ($reloadRequired) {
+            Runtime::reload();
+        }
         return $this->successMessage($this->language->get('clear_success'), 0, $this->urlGenerator->url('admin/other/clearCache'), 2);
     }
 

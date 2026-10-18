@@ -154,11 +154,10 @@ class AuthController extends \App\Controllers\Base\BaseController
             $postCode = RequestUtils::param('code', '');
             if (!$postCode) return $this->errorMessage($this->language->get('verification_code_is_empty'), 'code');
 
-            $sessionData = $this->userSession->get('verifyEmail', '');
-            $sess_email = $sessionData['email'] ?? '';
-            $sess_email && $sess_email = strtolower($sess_email);
-            $sess_code = $sessionData['code'] ?? '';
-            if (!$sess_code || !$sess_email || $email != $sess_email || strtoupper($postCode) != $sess_code) return $this->errorMessage($this->language->get('comparison_data_error'), 8);
+            $verificationService = $this->emailVerificationService();
+            if (!$verificationService->verify($this->userSession, 'verifyEmail', $email, $postCode)) {
+                return $this->errorMessage($this->language->get('comparison_data_error'), 8);
+            }
         }
 
         // hook app_Controllers_Frontend_AuthController_postSignUp_middle.php
@@ -182,7 +181,7 @@ class AuthController extends \App\Controllers\Base\BaseController
         $userId = $this->userService->insert($userData);
         if (empty($userId)) return $this->errorMessage($this->language->get('failed_to_create_user'), -1);
 
-        $this->userSession->delete('verifyEmail');
+        $this->emailVerificationService()->consume($this->userSession, 'verifyEmail');
 
         // hook app_Controllers_Frontend_AuthController_postSignUp_after.php
         $userId = (int)$userId;
@@ -199,6 +198,7 @@ class AuthController extends \App\Controllers\Base\BaseController
     {
         $user = $request->getAttribute('user', []);
         $extra = [];
+        $codeSignInEnabled = $this->isCodeSignInEnabled();
 
         // hook app_Controllers_Frontend_AuthController_signIn_start.php
 
@@ -232,8 +232,9 @@ class AuthController extends \App\Controllers\Base\BaseController
             'page_link_string' => $page_link_string,
             'action' => $this->urlGenerator->url('auth/postSignIn'),
             'verify_email_on' => $this->appConfig['verify_email_on'],
-            'signIn_by_code' => $this->appConfig['signIn_by_code'],
+            'signIn_by_code' => $codeSignInEnabled,
             'signIn_by_username' => $this->appConfig['signIn_by_username'],
+            'user_resetpw_on' => $this->isPasswordResetEnabled(),
             'signIn_input' => $signIn_input,
             'language' => [
                 'sign_in_to' => $this->language->get('sign_in_to'),
@@ -259,8 +260,8 @@ class AuthController extends \App\Controllers\Base\BaseController
         ];
 
         // 邮件验证
-        if ($this->appConfig['signIn_by_code'] && $this->appConfig['verify_email_on']) {
-            $data['verify_code_link'] = $this->urlGenerator->url('auth/postVerifyCode', ['verifyKey' => 'verifysignIn']);
+        if ($codeSignInEnabled) {
+            $data['verify_code_link'] = $this->urlGenerator->url('auth/postVerifyCode', ['verifyKey' => 'codeSignIn']);
             $data['language']['verification_code'] = $this->language->get('verification_code');
             $data['language']['send_verification_code'] = $this->language->get('send_verification_code');
             $data['language']['send_successfully'] = $this->language->get('send_success');
@@ -277,7 +278,8 @@ class AuthController extends \App\Controllers\Base\BaseController
     {
         // hook app_Controllers_Frontend_AuthController_postSignIn_start.php
 
-        if (empty($this->appConfig['signIn_by_username']) && empty($this->appConfig['signIn_by_code'])) return $this->errorMessage($this->language->get('sign_in_is_not_enabled'), 9, '/');
+        $codeSignInEnabled = $this->isCodeSignInEnabled();
+        if (empty($this->appConfig['signIn_by_username']) && !$codeSignInEnabled) return $this->errorMessage($this->language->get('sign_in_is_not_enabled'), 9, '/');
 
         $user = $request->getAttribute('user', []);
         if (!empty($user['id'])) return $this->errorMessage($this->language->get('already_sign_in'), 2, '/');
@@ -288,7 +290,7 @@ class AuthController extends \App\Controllers\Base\BaseController
         // hook app_Controllers_Frontend_AuthController_postSignIn_before.php
 
         // 邮件验证码登录
-        if (1 == $this->appConfig['signIn_by_code'] && $this->appConfig['verify_email_on']) {
+        if ($codeSignInEnabled) {
             $post_code = RequestUtils::param('code', '');
             if (!$post_code) return $this->errorMessage($this->language->get('verification_code_is_empty'), 'code');
 
@@ -298,21 +300,20 @@ class AuthController extends \App\Controllers\Base\BaseController
             $msg = $this->validateEmail($email);
             if ($msg !== 'success') return $this->errorMessage($msg, 'email');
 
-            $sessionData = $this->userSession->get('codeSignIn', '');
-            $sess_email = $sessionData['email'] ?? '';
-            $sess_code = $sessionData['code'] ?? '';
-            if (!$sess_code || !$sess_email || $email != strtolower($sess_email) || strtoupper($post_code) != $sess_code) return $this->errorMessage($this->language->get('verification_code_error'), 7);
+            $verificationService = $this->emailVerificationService();
+            if (!$verificationService->verify($this->userSession, 'codeSignIn', $email, $post_code)) {
+                return $this->errorMessage($this->language->get('verification_code_error'), 7);
+            }
 
             $user = $this->userService->readByEmail($email);
             if (empty($user)) return $this->errorMessage($this->language->get('email_not_exists'), 'email');
 
-            $this->userSession->delete('codeSignIn');
         }
 
         // hook app_Controllers_Frontend_AuthController_postSignIn_center.php
 
         // 密码登录
-        if (0 == $this->appConfig['signIn_by_code']) {
+        if (!$codeSignInEnabled) {
             $username = RequestUtils::param('username', '');
             if (!$username) return $this->errorMessage($this->language->get('username_is_empty'), 'username');
 
@@ -364,11 +365,18 @@ class AuthController extends \App\Controllers\Base\BaseController
         // hook app_Controllers_Frontend_AuthController_postSignIn_after.php
 
         $result = $this->userService->update((int)$user['id'], $update);
+        if (!$result) return $this->errorMessage($this->language->get('update_failed'), -1);
+
         // 防止 Session fixation
         $this->userSession->regenerate();
         $token = $this->userService->tokenSet((int)$user['id'], $tokenLifetime);
+        if (!$token) return $this->errorMessage($this->language->get('update_failed'), -1);
+
         $user = $this->userService->safe($user);
         $this->userSession->set('user_id', $user['id']);
+        if ($codeSignInEnabled) {
+            $this->emailVerificationService()->consume($this->userSession, 'codeSignIn');
+        }
 
         // hook app_Controllers_Frontend_AuthController_postSignIn_end.php
 
@@ -386,6 +394,21 @@ class AuthController extends \App\Controllers\Base\BaseController
 
         $key = RequestUtils::param('key', '');
         if (!$key) return $this->errorMessage($this->language->get('token_key_is_empty'), 6);
+
+        $verificationService = $this->emailVerificationService();
+        if (!$verificationService->isAllowedPurpose($key)) {
+            return $this->errorMessage($this->language->get('illegal_operation'), 15);
+        }
+
+        if ('verifyEmail' === $key && empty($this->appConfig['auth_sign_up_on'])) {
+            return $this->errorMessage($this->language->get('not_enabled'), 9, '/');
+        }
+        if ('codeSignIn' === $key && !$this->isCodeSignInEnabled()) {
+            return $this->errorMessage($this->language->get('not_enabled'), 9, '/');
+        }
+        if ('resetPassword' === $key && !$this->isPasswordResetEnabled()) {
+            return $this->errorMessage($this->language->get('not_enabled'), 9, '/');
+        }
 
         $email = RequestUtils::param('email', '');
         if (!$email) return $this->errorMessage($this->language->get('email_is_empty'), 'email');
@@ -426,20 +449,15 @@ class AuthController extends \App\Controllers\Base\BaseController
         }
 
         // hook app_Controllers_Frontend_AuthController_postVerifyCode_before.php
-        $sessionData = $this->userSession->get($key, []);
-        $lastTime = $sessionData['time'] ?? 0;
-        $elapsed = time() - $lastTime;
-        $cooldown = 60; // 60秒冷却时间
-
-        if ($elapsed < $cooldown) {
+        $remainingCooldown = $verificationService->remainingCooldown($this->userSession, $key);
+        if ($remainingCooldown > 0) {
             return $this->errorMessage(
-                $this->language->get('please_wait_a_moment', ['n' => $cooldown - $elapsed]),
+                $this->language->get('please_wait_a_moment', ['n' => $remainingCooldown]),
                 429
             );
         }
 
-        $code = SafeHelper::randomSixDigit();
-        $this->userSession->set($key, ['email' => $email, 'code' => $code, 'time' => time()]);
+        $code = (string)SafeHelper::randomSixDigit();
 
         // hook app_Controllers_Frontend_AuthController_postVerifyCode_after.php
 
@@ -452,7 +470,14 @@ class AuthController extends \App\Controllers\Base\BaseController
         $mailService = $this->container->get(\App\Services\System\MailService::class);
         $result = $mailService->send($email, $subject, $body);
 
-        if (($result['status'] ?? '') !== 'success') return $this->errorMessage($result['message'], 12);
+        if (($result['status'] ?? '') !== 'success') {
+            $mailMessage = (string)($result['message'] ?? 'configuration_error');
+            $publicMessages = ['mailbox_not_configured', 'configuration_error', 'mail_connection_failed', 'mail_authentication_failed', 'mail_send_failed'];
+            $publicMessage = in_array($mailMessage, $publicMessages, true) ? $mailMessage : 'mail_send_failed';
+            return $this->errorMessage($this->language->get($publicMessage), 12);
+        }
+
+        $verificationService->store($this->userSession, $key, $email, $code);
 
         return $this->successMessage($this->language->get('send_success'), 0);
     }
@@ -469,10 +494,12 @@ class AuthController extends \App\Controllers\Base\BaseController
     // 重置密码
     public function resetPassword(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
+        if (!$this->isPasswordResetEnabled()) return $this->errorMessage($this->language->get('not_enabled'), 9, '/');
+
         $user = $request->getAttribute('user', []);
         if (!empty($user['id'])) return $this->errorMessage($this->language->get('already_sign_in'), 2, '/', 2);
 
-        $userId = $this->userSession->get('reset_verified_user_id');
+        $userId = $this->emailVerificationService()->resetAuthorizedUserId($this->userSession);
         $step = $userId ? 2 : 1;
 
         $userToken = $this->getUserToken();
@@ -521,6 +548,8 @@ class AuthController extends \App\Controllers\Base\BaseController
     // 重置密码 - 步骤1：身份验证
     public function postResetVerify(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
+        if (!$this->isPasswordResetEnabled()) return $this->errorMessage($this->language->get('not_enabled'), 9, '/');
+
         $email = RequestUtils::param('email', '');
         $code = RequestUtils::param('code', '');
 
@@ -534,17 +563,14 @@ class AuthController extends \App\Controllers\Base\BaseController
         if (6 == $user['group_id']) return $this->errorMessage($this->language->get('user_is_banned'), 6);
 
         // 验证验证码
-        $sessionData = $this->userSession->get('resetPassword', []);
-        $sess_email = $sessionData['email'] ?? '';
-        $sess_code = $sessionData['code'] ?? '';
-
-        if (!$sess_code || !$sess_email || strtolower($email) != strtolower($sess_email) || strtoupper($code) != $sess_code) {
+        $verificationService = $this->emailVerificationService();
+        if (!$verificationService->verify($this->userSession, 'resetPassword', $email, $code)) {
             return $this->errorMessage($this->language->get('comparison_data_error'), 8);
         }
 
-        // 身份核验通过，记录User ID到Session
-        $this->userSession->set('reset_verified_user_id', (int)$user['id']);
-        $this->userSession->delete('resetPassword'); // 清理验证码
+        // 身份核验通过，记录带时效的 User ID 到 Session，并一次性消费验证码
+        $verificationService->storeResetAuthorization($this->userSession, (int)$user['id']);
+        $verificationService->consume($this->userSession, 'resetPassword');
 
         return $this->successMessage($this->language->get('operation_success'), 0, $this->urlGenerator->url('auth/resetPassword'));
     }
@@ -552,7 +578,10 @@ class AuthController extends \App\Controllers\Base\BaseController
     // 重置密码 - 步骤2：设置新密码
     public function postResetPassword(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
-        $userId = (int)$this->userSession->get('reset_verified_user_id');
+        if (!$this->isPasswordResetEnabled()) return $this->errorMessage($this->language->get('not_enabled'), 9, '/');
+
+        $verificationService = $this->emailVerificationService();
+        $userId = $verificationService->resetAuthorizedUserId($this->userSession);
         if (!$userId) return $this->errorMessage($this->language->get('illegal_operation'), 15, $this->urlGenerator->url('auth/resetPassword'));
 
         $password = RequestUtils::param('password', '');
@@ -560,11 +589,12 @@ class AuthController extends \App\Controllers\Base\BaseController
 
         if (!$password) return $this->errorMessage($this->language->get('password_is_empty'), 'password');
         if (mb_strlen($password) < 6) return $this->errorMessage($this->language->get('password_length_error'), 'password');
+        if (!SafeHelper::isValidPassword($password)) return $this->errorMessage($this->language->get('password_format'), 'password');
         if ($password !== $repeatPassword) return $this->errorMessage($this->language->get('repeat_password_incorrect'), 'repeatPassword');
 
         $user = $this->userService->read($userId);
         if (empty($user)) {
-            $this->userSession->delete('reset_verified_user_id');
+            $verificationService->clearResetAuthorization($this->userSession);
             return $this->errorMessage($this->language->get('user_not_exists'), -1, $this->urlGenerator->url('auth/resetPassword'));
         }
 
@@ -576,22 +606,35 @@ class AuthController extends \App\Controllers\Base\BaseController
         ];
 
         if ($this->userService->update($userId, $updateData)) {
-            $this->userSession->delete('reset_verified_user_id');
+            $verificationService->clearResetAuthorization($this->userSession);
             return $this->successMessage($this->language->get('save_success'), 0, $this->urlGenerator->url('auth/signIn'));
         }
 
         return $this->errorMessage($this->language->get('update_failed'), -1);
     }
 
+    private function emailVerificationService(): \App\Services\Auth\EmailVerificationService
+    {
+        return $this->container->get(\App\Services\Auth\EmailVerificationService::class);
+    }
+
+    private function isCodeSignInEnabled(): bool
+    {
+        return !empty($this->appConfig['signIn_by_code'])
+            && !empty($this->appConfig['verify_email_on']);
+    }
+
+    private function isPasswordResetEnabled(): bool
+    {
+        return !empty($this->appConfig['user_resetpw_on'])
+            && !empty($this->appConfig['verify_email_on']);
+    }
+
     // 生成Token
     private function getUserToken(): string
     {
-        $userAgent = RequestUtils::server('HTTP_USER_AGENT');
-        $queryString = RequestUtils::server('QUERY_STRING');
-        return (string)\Framework\Utils\SecurityHelper::generateToken(
-            $this->appConfig['auth_key'] ?? '',
-            ['long_ip' => $this->ip, 'user_agent' => $userAgent, 'query_string' => $queryString, 'time' => time()]
-        );
+        $this->tokenService->captureContext($this->request);
+        return $this->tokenService->generateToken();
     }
 
     // hook app_Controllers_Frontend_AuthController_end.php

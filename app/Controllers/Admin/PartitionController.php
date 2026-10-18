@@ -15,16 +15,11 @@ use Framework\Database\Partition\PartitionManager;
 /**
  * 分区管理后台控制器。
  *
- * 路由（遵循铁律 #24）：
  *   GET  /admin/PartitionStatus         → index()
  *   POST /admin/PostPartitionMaintain   → postMaintain()
  *
  * 权限（路由 meta 声明）：
  *   requiresUserPerm => ['role' => ['administer', 'setting']]
- *
- * 遵守构造函数复用铁律：不覆盖 __construct，依赖从容器获取。
- *
- * PHP 7.2 兼容：不使用 typed properties / union types / named arguments。
  */
 class PartitionController extends BaseController
 {
@@ -136,7 +131,7 @@ class PartitionController extends BaseController
                         $scheduledAt = strtotime('+1 day 03:00');
                     }
                     $dedupeKey = 'job:partition:maintain:daily:' . gmdate('Ymd');
-                    $taskManage->createTask(array(
+                    $dispatch = $taskManage->createTask(array(
                         'className'   => \App\Jobs\PartitionMaintainJob::class,
                         'methodName'  => 'handle',
                         'args'        => array(),
@@ -146,8 +141,29 @@ class PartitionController extends BaseController
                         'maxRetries'  => 2,
                         'retryDelay'  => 60,
                     ));
+                    if (!\Framework\Scheduler\TaskDispatchResult::isAccepted($dispatch)) {
+                        try {
+                            $logger = $this->container->get(\Framework\Logger\LoggerInterface::class);
+                            $logger->warning('PartitionController maintenance schedule pending', array(
+                                'outcome' => \Framework\Scheduler\TaskDispatchResult::outcome($dispatch),
+                                'code' => \Framework\Scheduler\TaskDispatchResult::code($dispatch)
+                                    ?? 'TASK_DISPATCH_UNKNOWN',
+                                'task_id' => \Framework\Scheduler\TaskDispatchResult::taskId($dispatch),
+                            ));
+                        } catch (\Throwable $logError) {
+                            // 最佳努力日志不得反向改变已完成的分区维护结果。
+                        }
+                    }
                 } catch (\Throwable $e) {
                     // Scheduler/TaskManage 不可用时（无 Redis）不阻塞主流程
+                    try {
+                        $logger = $this->container->get(\Framework\Logger\LoggerInterface::class);
+                        $logger->warning('PartitionController maintenance schedule unavailable', array(
+                            'exception' => get_class($e),
+                        ));
+                    } catch (\Throwable $logError) {
+                        // 最佳努力日志不得反向改变已完成的分区维护结果。
+                    }
                 }
             }
 
@@ -170,15 +186,11 @@ class PartitionController extends BaseController
             if ($this->container) {
                 $logger = $this->container->get(\Framework\Logger\LoggerInterface::class);
                 $logger->error('PartitionController.postMaintain failed', array(
-                    'error' => $e->getMessage(),
+                    'exception' => $e,
                 ));
             }
 
-            return $this->responseFormatter->jsonResponseFormat(array(
-                'status' => 'error',
-                'code' => 500,
-                'message' => $e->getMessage(),
-            ));
+            throw $e;
         }
         // hook app_Controllers_Admin_PartitionController_postMaintain_end.php
     }

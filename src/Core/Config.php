@@ -15,7 +15,7 @@ class Config
     /**
      * 从目录中加载所有 PHP 配置文件：
      *   - 文件名（不含 .php）作为 $items 的一级键
-     *   - include 返回值必须是数组
+     *   - 所有已声明分组必需，include 返回值必须是非空数组
      */
     public static function loadDir(): self
     {
@@ -25,9 +25,10 @@ class Config
             'db' => 'config/Database.php',
             'i18n' => 'config/I18n.php',
             'logger' => 'config/Logger.php',
+            'plugin' => 'config/Plugin.php',
+            'scheduler' => 'config/Scheduler.php',
             'session' => 'config/Session.php',
             'upload' => 'config/Upload.php',
-            'plugin' => 'config/Plugin.php',
             'view' => 'config/View.php',
         ];
 
@@ -35,11 +36,21 @@ class Config
         foreach ($array as $key => $file) {
             $basePath = \defined('APP_PATH') ? \APP_PATH : \dirname(__DIR__, 2) . '/';
             $configFile = $basePath . $file;
-            if (!file_exists($configFile)) continue;
-            $data = include $configFile;
-            if (is_array($data)) {
-                $cfg->items[$key] = $data;
+            if (!is_file($configFile)) {
+                throw new \Framework\Exception\Infra\ConfigException('Configuration file is missing or is not a regular file: ' . $file);
             }
+            try {
+                $data = include $configFile;
+            } catch (\Throwable $e) {
+                throw new \Framework\Exception\Infra\ConfigException('Failed to load configuration file: ' . $file, 0, $e);
+            }
+            if (!is_array($data)) {
+                throw new \Framework\Exception\Infra\ConfigException('Configuration file must return an array: ' . $file . ' (returned ' . gettype($data) . ')');
+            }
+            if ($data === []) {
+                throw new \Framework\Exception\Infra\ConfigException('Configuration file returned an empty array: ' . $file);
+            }
+            $cfg->items[$key] = $data;
         }
 
         return $cfg;

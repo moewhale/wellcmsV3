@@ -35,25 +35,31 @@ class RecoveryEngine
     /** @var EventBus|null */
     private $eventBus;
 
+    /** @var RedisTaskQueue */
+    private $queue;
+
     /**
      * @param TaskStorageInterface                $storage        v3.2 修改
      * @param \Framework\Cache\Drivers\RedisCache $redis
      * @param ZombieDetectorInterface|null        $zombieDetector v3.2 新增
      * @param \Framework\Scheduler\Logger|null    $logger         v3.2 新增
      * @param EventBus|null                       $eventBus
+     * @param RedisTaskQueue|null                 $queue
      */
     public function __construct(
         TaskStorageInterface $storage,
         \Framework\Cache\Drivers\RedisCache $redis,
         ?ZombieDetectorInterface $zombieDetector = null,
         ?\Framework\Scheduler\Logger $logger = null,
-        ?EventBus $eventBus = null
+        ?EventBus $eventBus = null,
+        ?RedisTaskQueue $queue = null
     ) {
         $this->storage       = $storage;
         $this->redis         = $redis;
         $this->zombieDetector = $zombieDetector;
         $this->logger        = $logger ?? new \Framework\Scheduler\Logger();
         $this->eventBus      = $eventBus;
+        $this->queue         = $queue ?? new RedisTaskQueue($redis);
     }
 
     /**
@@ -73,21 +79,10 @@ class RecoveryEngine
 
         foreach ($tasks as $task) {
             try {
-                // 直接写 Redis（Hash + ZSET），绕过装饰器链
-                $json = json_encode($task->toArray(), JSON_UNESCAPED_UNICODE);
-                if ($json === false) {
-                    $this->logger->log('json_encode failed for task ' . $task->id, 'ERROR');
+                if (!$this->claimTask($task)) {
                     continue;
                 }
-
-                $this->redis->hSet('scheduler:queue:hash', $task->id, $json);
-
-                // 计算 score（复用 RedisTaskQueue 的编码逻辑）
-                $ts    = $task->scheduledAt & ((1 << 42) - 1);
-                $prio  = max(0, min($task->priority, (1 << 22) - 1));
-                $score = ($ts << 22) | $prio;
-                $this->redis->zAdd('scheduler:queue:zset', [$score => $task->id]);
-
+                $this->queue->restore($task);
                 $count++;
             } catch (\Throwable $e) {
                 $this->logger->log('recoverAll: failed to restore task '
@@ -106,6 +101,59 @@ class RecoveryEngine
         }
 
         return $count;
+    }
+
+    private function claimTask(Task $task): bool
+    {
+        if ($task->dedupeKey === '') {
+            return true;
+        }
+
+        $key = 'scheduler:dedupe:' . $task->dedupeKey;
+        $claim = TaskDedupeClaim::encode($task->id, $task->createdAt);
+        $stored = $this->redis->get($key, null);
+        if ($stored === null) {
+            return $this->redis->setNx($key, $claim, 2592000);
+        }
+
+        if (TaskDedupeClaim::isLegacy($stored)) {
+            return $this->redis->compareSet($key, $stored, $claim, 2592000);
+        }
+
+        $decoded = TaskDedupeClaim::decode($stored);
+        if ($decoded === null) {
+            return false;
+        }
+        if ($decoded['taskId'] === $task->id) {
+            return true;
+        }
+
+        if ($this->queue->hasActiveTask($decoded['taskId'], $task->dedupeKey)
+            || $this->hasActiveStoredTask($decoded['taskId'], $task->dedupeKey)
+        ) {
+            return false;
+        }
+
+        $expected = is_string($stored)
+            ? $stored
+            : TaskDedupeClaim::encode($decoded['taskId'], (int)$decoded['claimedAt']);
+        return $this->redis->compareSet($key, $expected, $claim, 2592000);
+    }
+
+    private function hasActiveStoredTask(string $taskId, string $dedupeKey): bool
+    {
+        $state = $this->storage->readTaskState($taskId);
+        if ($state === null) {
+            return false;
+        }
+
+        return ($state['taskId'] ?? '') === $taskId
+            && (string)($state['dedupeKey'] ?? '') === $dedupeKey
+            && in_array(
+                (int)($state['status'] ?? -1),
+                [Task::STATUS_PENDING, Task::STATUS_RETRYING, Task::STATUS_RUNNING],
+                true
+            );
     }
 
     /**

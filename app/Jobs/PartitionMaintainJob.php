@@ -80,8 +80,8 @@ class PartitionMaintainJob implements \Framework\Scheduler\Interfaces\JobInterfa
             ));
 
             // 投递下一次任务（每日单任务自循环）
-            if ($success) {
-                $this->scheduleNext();
+            if ($success && !$this->scheduleNext()) {
+                return false;
             }
 
             // hook app_Jobs_PartitionMaintainJob_handle_end.php
@@ -103,9 +103,9 @@ class PartitionMaintainJob implements \Framework\Scheduler\Interfaces\JobInterfa
      * 确保同一自然日最多只有一个等待中的任务。
      * 次日 03:00 执行，避让业务高峰期。
      *
-     * @return void
+     * @return bool
      */
-    private function scheduleNext()
+    private function scheduleNext(): bool
     {
         try {
             $now = time();
@@ -116,7 +116,7 @@ class PartitionMaintainJob implements \Framework\Scheduler\Interfaces\JobInterfa
             // dedupeKey 按日聚合：同一天多次调用只保留第一个
             $dedupeKey = 'job:partition:maintain:daily:' . gmdate('Ymd');
 
-            $this->taskManage->createTask(array(
+            $dispatch = $this->taskManage->createTask(array(
                 'className'   => self::class,
                 'methodName'  => 'handle',
                 'args'        => array(),
@@ -128,15 +128,26 @@ class PartitionMaintainJob implements \Framework\Scheduler\Interfaces\JobInterfa
                 'retryDelay'  => 60,
             ));
 
+            if (!\Framework\Scheduler\TaskDispatchResult::isAccepted($dispatch)) {
+                $this->logger->warning('PartitionMaintainJob scheduleNext failed', array(
+                    'outcome' => \Framework\Scheduler\TaskDispatchResult::outcome($dispatch),
+                    'code' => \Framework\Scheduler\TaskDispatchResult::code($dispatch)
+                        ?? 'TASK_DISPATCH_UNKNOWN',
+                    'task_id' => \Framework\Scheduler\TaskDispatchResult::taskId($dispatch),
+                ));
+                return false;
+            }
+
             $this->logger->info('PartitionMaintainJob scheduled next', array(
                 'scheduled_at' => date('Y-m-d H:i:s', $scheduledAt),
                 'dedupe_key'   => $dedupeKey,
             ));
+            return true;
         } catch (\Throwable $e) {
-            // TaskManage 不可用时（无 Redis）不抛异常，仅记录
             $this->logger->warning('PartitionMaintainJob scheduleNext failed', array(
                 'error' => $e->getMessage(),
             ));
+            return false;
         }
     }
 }

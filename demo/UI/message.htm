@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+    演示文件：系统消息页（对应 app/views/htm/message.htm）
+    纯静态演示稿：无 PHP 标签；消息文案与操作链接为演示数据；
+    原文件中的自动跳转脚本在演示稿中省略
+-->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="keywords" content="操作成功">
+    <meta name="description" content="操作成功">
+    <title>操作成功 | WellCMS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+    <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+    <div class="grid h-screen place-content-center bg-stone-50 dark:bg-slate-900 px-4">
+        <div class="text-center">
+            <!-- 状态图标 -->
+            <div class="mx-auto mb-6 w-16 h-16 rounded-full bg-emerald-100 dark:bg-emerald-500/15 flex items-center justify-center">
+                <svg class="w-8 h-8 text-emerald-600 dark:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                </svg>
+            </div>
+            <div class="ajax-body">
+                <p class="text-base mt-4 text-stone-900 dark:text-gray-100 font-semibold">发布成功！你的帖子已进入审核队列，通过后将公开展示。</p>
+            </div>
+
+            <!-- 操作链接组（对应 data.action_links，演示渲染两条） -->
+            <div class="mt-6 space-y-3">
+                <a href="my_threads.htm" class="inline-block rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white hover:bg-blue-700 focus:outline-none focus:ring transition-colors">查看我的帖子</a>
+                <a href="article_detail.htm" target="_blank" class="inline-block rounded-xl bg-white dark:bg-slate-800 border border-stone-200 dark:border-slate-700 px-5 py-3 text-sm font-bold text-stone-600 dark:text-gray-300 hover:bg-stone-100 dark:hover:bg-slate-700 focus:outline-none focus:ring transition-colors ml-2">阅读社区规范</a>
+            </div>
+        </div>
+    </div>
+    <script src="../assets/js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>快讯-DUX主题演示</title>
+	<link rel="stylesheet" href="assets/css/dux.css">
+	<script>
+		/* 防闪烁：与 WellCMS v3 主题初始化逻辑一致 */
+		if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+			document.documentElement.classList.add('dark');
+		} else {
+			document.documentElement.classList.remove('dark');
+		}
+	</script>
+</head>
+<body class="bg-slate-50 dark:bg-slate-900 text-gray-800 dark:text-gray-200 font-sans min-h-screen flex flex-col">
+
+<!-- Header（结构参考 WellCMS v3 header_nav.inc.htm，Soft UI 风格化） -->
+<header class="sticky top-0 w-full z-50 transition-all duration-300">
+	<div class="absolute inset-0 glass-header -z-10"></div>
+	<div class="max-w-6xl mx-auto px-4 md:px-6 lg:px-8">
+		<div class="flex items-center h-16 relative">
+			<!-- Navigation Backdrop (Mobile Only) -->
+			<div id="nav-backdrop" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm opacity-0 hidden transition-opacity duration-300 z-[60]"></div>
+
+			<!-- Mobile Hamburger -->
+			<div class="flex md:hidden items-center absolute left-0 z-[65]">
+				<button id="mobile-menu-toggle" aria-label="打开菜单" class="p-2 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors focus:outline-none">
+					<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+				</button>
+			</div>
+
+			<!-- Logo -->
+			<div class="flex items-center md:static absolute left-1/2 -translate-x-1/2 md:translate-x-0 h-16 z-10">
+				<a href="index.html" class="flex items-center gap-2 font-semibold text-xl md:text-2xl text-gray-800 dark:text-white whitespace-nowrap">
+					<span class="w-9 h-9 rounded-full bg-indigo-500/10 flex items-center justify-center">
+						<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+					</span>
+					DUX
+				</a>
+			</div>
+
+			<!-- Main Nav -->
+			<nav id="main-nav" class="fixed inset-y-0 left-0 w-72 h-full bg-white dark:bg-slate-900 shadow-2xl transform -translate-x-full transition-transform duration-300 ease-in-out z-[70] md:relative md:translate-x-0 md:inset-auto md:w-auto md:h-auto md:bg-transparent md:dark:bg-transparent md:flex md:items-center md:ml-8 md:shadow-none text-left overflow-y-auto md:overflow-visible">
+				<div class="p-6 md:hidden flex items-center justify-between mb-4 bg-white dark:bg-slate-900">
+					<span class="text-xl font-semibold text-gray-800 dark:text-white">DUX</span>
+					<button id="nav-close" aria-label="关闭菜单" class="p-2 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white">
+						<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+					</button>
+				</div>
+				<div class="flex flex-col md:flex-row p-6 md:p-0 space-y-2 md:space-y-0 md:items-center md:space-x-1 text-sm md:text-base">
+					<a href="index.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">首页</a>
+					<a href="category.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">分类</a>
+					<a href="zhuanti.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">专题</a>
+					<a href="notice.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">短文</a>
+					<a href="kuai.html" class="px-4 py-2.5 rounded-2xl font-medium text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 transition-colors">快讯</a>
+					<a href="news.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">筛选</a>
+					<!-- 产品（下拉） -->
+					<div class="relative group">
+						<button class="flex items-center justify-between w-full md:w-auto px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors focus:outline-none" onclick="if(window.innerWidth < 768) this.nextElementSibling.classList.toggle('hidden')">
+							<span>产品</span>
+							<svg class="w-4 h-4 ml-1 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+						</button>
+						<div class="hidden md:block md:absolute left-0 mt-2 w-52 md:transition-all md:duration-200 md:opacity-0 md:invisible md:translate-y-2 md:group-hover:opacity-100 md:group-hover:visible md:group-hover:translate-y-0 z-50">
+							<div class="mt-2 md:mt-0 md:bg-white md:dark:bg-slate-800 md:rounded-2xl md:shadow-xl md:shadow-gray-200/50 md:dark:shadow-slate-900/50 overflow-hidden p-2 space-y-1 md:space-y-0 ml-4 md:ml-0">
+								<a href="product.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">产品中心</a>
+								<a href="product.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">产品二级目录</a>
+								<a href="product.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors md:pl-8 pl-8">产品三级目录</a>
+							</div>
+						</div>
+					</div>
+					<!-- 页面（下拉） -->
+					<div class="relative group">
+						<button class="flex items-center justify-between w-full md:w-auto px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors focus:outline-none" onclick="if(window.innerWidth < 768) this.nextElementSibling.classList.toggle('hidden')">
+							<span>页面</span>
+							<svg class="w-4 h-4 ml-1 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+						</button>
+						<div class="hidden md:block md:absolute left-0 mt-2 w-52 md:transition-all md:duration-200 md:opacity-0 md:invisible md:translate-y-2 md:group-hover:opacity-100 md:group-hover:visible md:group-hover:translate-y-0 z-50">
+							<div class="mt-2 md:mt-0 md:bg-white md:dark:bg-slate-800 md:rounded-2xl md:shadow-xl md:shadow-gray-200/50 md:dark:shadow-slate-900/50 overflow-hidden p-2 space-y-1 md:space-y-0 ml-4 md:ml-0">
+								<a href="zcd.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">子菜单页面</a>
+								<a href="sample-page.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">友情链接</a>
+								<a href="archives.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">页面存档</a>
+								<a href="readers.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">读者墙</a>
+								<a href="navs.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">网址导航</a>
+								<a href="tags.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">标签云</a>
+								<a href="has-side.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">有边栏页面</a>
+								<a href="no-sidebar.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">无边栏页面</a>
+								<a href="blank.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">空白内容</a>
+								<a href="full.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">全宽屏幕空白页面</a>
+							</div>
+						</div>
+					</div>
+				</div>
+			</nav>
+
+			<!-- Actions -->
+			<div class="flex items-center space-x-2 ml-auto">
+				<!-- 暗色切换（与 WellCMS v3 一致） -->
+				<button onclick="wellcms.toggleDarkMode()" aria-label="切换夜间模式" class="p-2 rounded-full text-gray-500 hover:text-gray-900 hover:bg-indigo-500/10 dark:text-gray-400 dark:hover:text-white transition-colors">
+					<span class="dark:hidden">
+						<svg class="w-5 h-5 text-gray-600 dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+					</span>
+					<span class="hidden dark:inline">
+						<svg class="w-5 h-5 text-yellow-400 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+					</span>
+				</button>
+				<a href="#" rel="nofollow" class="hidden md:inline-flex px-5 py-2 rounded-2xl text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-slate-800 shadow-lg shadow-gray-200/50 dark:shadow-slate-900/40 hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200">注册</a>
+				<a href="#" rel="nofollow" class="inline-flex px-5 py-2 rounded-2xl text-sm font-medium text-white bg-indigo-600 shadow-lg shadow-indigo-600/30 hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200">登录</a>
+			</div>
+		</div>
+	</div>
+</header>
+
+<!-- Main -->
+<main class="flex-1 w-full max-w-6xl mx-auto px-4 md:px-6 lg:px-8 py-8 md:py-12">
+	<div class="space-y-6 md:space-y-8">
+
+		<!-- 页面标题 -->
+		<div class="soft-card p-6 md:p-8 flex items-center gap-4">
+			<span class="w-12 h-12 rounded-full bg-indigo-500/10 flex items-center justify-center flex-shrink-0">
+				<svg class="w-6 h-6 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+			</span>
+			<div>
+				<h1 class="font-semibold text-3xl md:text-4xl text-gray-800 dark:text-gray-100">快讯</h1>
+				<p class="mt-1 text-sm md:text-base text-gray-500 dark:text-gray-400">7×24 小时滚动播报，第一时间掌握行业动态</p>
+			</div>
+		</div>
+
+		<!-- 快讯时间流：2022-03-14 -->
+		<section class="soft-card p-6 md:p-8">
+			<div class="flex items-baseline gap-3 pb-5 mb-6 border-b border-gray-100 dark:border-slate-700">
+				<span class="font-semibold text-3xl md:text-4xl text-indigo-600 dark:text-indigo-400">14</span>
+				<span class="text-sm md:text-base text-gray-400">2022-03</span>
+			</div>
+			<div class="space-y-6 md:space-y-8">
+
+				<article class="relative pl-6 md:pl-8">
+					<span class="absolute left-0 top-2 w-3 h-3 rounded-full bg-indigo-500/20 ring-4 ring-indigo-500/10"></span>
+					<div class="flex items-center gap-3">
+						<time class="px-3 py-1 rounded-full text-xs font-medium bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">16:32</time>
+						<h2 class="font-semibold text-base md:text-lg text-gray-800 dark:text-gray-100">小米、OPPO等据称正与印度制造商就在当地生产手机向全球出口展开磋商</h2>
+					</div>
+					<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7">小米、OPPO和vivo正在与印度制造商就在当地生产手机向全球出口展开磋商。其中，OPPO和vivo已经开始与Lava International Ltd.进行谈判，而小米正在接洽Dixon Technologies India Ltd.。如继续推进，最快今年计划由Lava和Dixon来组装手机并进行出口。</p>
+				</article>
+
+				<article class="relative pl-6 md:pl-8">
+					<span class="absolute left-0 top-2 w-3 h-3 rounded-full bg-pink-500/20 ring-4 ring-pink-500/10"></span>
+					<div class="flex items-center gap-3">
+						<time class="px-3 py-1 rounded-full text-xs font-medium bg-pink-500/10 text-pink-500">13:12</time>
+						<h2 class="font-semibold text-base md:text-lg text-gray-800 dark:text-gray-100">华铭智能：参投合伙企业拟投资哪吒汽车</h2>
+					</div>
+					<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7">华铭智能发布公告称，公司全资子公司上海近铭与上海典实资产管理有限公司、海口友琰投资合伙企业（有限合伙）、韩亚伟等于近日签署了《嘉兴典芯股权投资合伙企业（有限合伙）合伙协议》。该合伙企业全体合伙人总认缴出资额为3.13亿元，其中上海近铭作为有限合伙人认缴出资1500万元。据披露，该合伙企业拟以股权投资方式投资合众新能源汽车有限公司（哪吒汽车）股权。</p>
+				</article>
+
+				<article class="relative pl-6 md:pl-8">
+					<span class="absolute left-0 top-2 w-3 h-3 rounded-full bg-emerald-500/20 ring-4 ring-emerald-500/10"></span>
+					<div class="flex items-center gap-3">
+						<time class="px-3 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">11:20</time>
+						<h2 class="font-semibold text-base md:text-lg text-gray-800 dark:text-gray-100">SpaceX又发射48颗“星链”卫星</h2>
+					</div>
+					<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7">美国东部时间3月9日8时45分，SpaceX猎鹰9号火箭在佛罗里达州卡纳维拉尔角太空部队基地发射48颗“星链”卫星。本次发射是该枚猎鹰9号一级助推器第四次飞行和着陆，一二级分离后，一级助推器着陆在大西洋里无人驾驶驳船“缺少庄重感”上。上一批47颗“星链”卫星于美东时间3月3日在佛罗里达州肯尼迪航天中心发射，彼时诞生SpaceX第三枚一箭11飞火箭。</p>
+				</article>
+
+				<article class="relative pl-6 md:pl-8">
+					<span class="absolute left-0 top-2 w-3 h-3 rounded-full bg-amber-500/20 ring-4 ring-amber-500/10"></span>
+					<div class="flex items-center gap-3">
+						<time class="px-3 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400">10:41</time>
+						<h2 class="font-semibold text-base md:text-lg text-gray-800 dark:text-gray-100">书亦烧仙草申请书亦仙草铺商标</h2>
+					</div>
+					<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7">近日，四川书亦餐饮管理有限公司申请注册“书亦仙草铺”商标，国际分类涉及方便食品、啤酒饮料、广告销售等，当前商标状态为申请中。</p>
+				</article>
+
+				<article class="relative pl-6 md:pl-8">
+					<span class="absolute left-0 top-2 w-3 h-3 rounded-full bg-sky-500/20 ring-4 ring-sky-500/10"></span>
+					<div class="flex items-center gap-3">
+						<time class="px-3 py-1 rounded-full text-xs font-medium bg-sky-500/10 text-sky-600 dark:text-sky-400">09:40</time>
+						<h2 class="font-semibold text-base md:text-lg text-gray-800 dark:text-gray-100">Vivo首款折叠屏手机X Fold铰链供应商为苹链厂商安费诺飞凤通信</h2>
+					</div>
+					<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7">Vivo下月即将发布的首款折叠屏手机X Fold，其铰链为苹果供应链厂商杭州安费诺飞凤通信，因添加了多重航天材料，铰链成本超1200元，是目前市面上折叠屏铰链成本之最，将在折叠次数上有更大的提升。同时，该产品还使用了六块精心排布的钕铁硼材料磁铁，来对抗UTG玻璃的张力，保证在极端条件下也能拥有良好的表现。</p>
+				</article>
+
+				<article class="relative pl-6 md:pl-8">
+					<span class="absolute left-0 top-2 w-3 h-3 rounded-full bg-violet-500/20 ring-4 ring-violet-500/10"></span>
+					<div class="flex items-center gap-3">
+						<time class="px-3 py-1 rounded-full text-xs font-medium bg-violet-500/10 text-violet-600 dark:text-violet-400">06:25</time>
+						<h2 class="font-semibold text-base md:text-lg text-gray-800 dark:text-gray-100">恒大汽车新公司经营范围含网约车服务</h2>
+					</div>
+					<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7">近日，恒驰新能源汽车销售有限公司成立，注册资本1亿人民币，法定代表人为唐琳，经营范围包括新能源汽车换电设施销售；充电桩销售；电动汽车充电基础设施运营；网络预约出租汽车经营服务等。股东信息显示，该公司由恒大新能源汽车投资控股集团有限公司全资持股。</p>
+				</article>
+
+			</div>
+		</section>
+
+		<!-- 快讯时间流：2022-03-13 -->
+		<section class="soft-card p-6 md:p-8">
+			<div class="flex items-baseline gap-3 pb-5 mb-6 border-b border-gray-100 dark:border-slate-700">
+				<span class="font-semibold text-3xl md:text-4xl text-indigo-600 dark:text-indigo-400">13</span>
+				<span class="text-sm md:text-base text-gray-400">2022-03</span>
+			</div>
+			<div class="space-y-6 md:space-y-8">
+
+				<article class="relative pl-6 md:pl-8">
+					<span class="absolute left-0 top-2 w-3 h-3 rounded-full bg-indigo-500/20 ring-4 ring-indigo-500/10"></span>
+					<div class="flex items-center gap-3">
+						<time class="px-3 py-1 rounded-full text-xs font-medium bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">09:42</time>
+						<h2 class="font-semibold text-base md:text-lg text-gray-800 dark:text-gray-100">俄政府网站将改用境内域名服务器，俄媒：不会与全球互联网“断连”</h2>
+					</div>
+					<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7">据多家俄罗斯媒体报道，俄罗斯政府已经下令，在3月11日前，所有政府机构的网站及其电信服务提供商应改用位于俄罗斯境内的域名服务器（DNS），放弃境外服务器托管服务。俄罗斯政府随后通过媒体强调，并不计划将俄罗斯与全球互联网断开连接。</p>
+				</article>
+
+				<article class="relative pl-6 md:pl-8">
+					<span class="absolute left-0 top-2 w-3 h-3 rounded-full bg-pink-500/20 ring-4 ring-pink-500/10"></span>
+					<div class="flex items-center gap-3">
+						<time class="px-3 py-1 rounded-full text-xs font-medium bg-pink-500/10 text-pink-500">09:41</time>
+						<h2 class="font-semibold text-base md:text-lg text-gray-800 dark:text-gray-100">哈啰出行申请注册“哈罗摩托”、“哈啰摩托”系列商标</h2>
+					</div>
+					<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7">哈啰出行关联公司上海钧丰网络科技有限公司日前向商标管理部门申请注册了一系列“哈罗摩托”、“哈啰摩托”商标，国际分类为12类“运输工具”、39类“运输贮藏”、35类“广告销售”、12类“运输工具”、09类“科学仪器”等。该系列商标目前均为“商标申请中”状态。</p>
+				</article>
+
+			</div>
+		</section>
+
+		<!-- 品牌推广 -->
+		<section class="soft-card p-6 md:p-8 text-center">
+			<h2 class="font-semibold text-2xl md:text-3xl text-gray-800 dark:text-gray-100">大前端WP主题 更专业 更方便</h2>
+			<p class="mt-4 max-w-3xl mx-auto text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7">支持快讯、专题、百度收录推送、人机验证、多级分类筛选器，适用于垂直站点、科技博客、个人站，扁平化设计、简洁白色、超多功能配置、会员中心、直达链接、文章图片弹窗、自动缩略图等...</p>
+			<div class="mt-6 flex flex-col sm:flex-row justify-center gap-4">
+				<a href="http://wpa.qq.com/msgrd?v=3&uin=937373201&site=qq&menu=yes" target="_blank" rel="external nofollow" class="soft-btn-primary text-sm">联系我们</a>
+				<a href="https://themebetter.com/theme/dux" target="_blank" rel="external nofollow" class="soft-btn-ghost text-sm">购买此主题</a>
+			</div>
+		</section>
+
+	</div>
+</main>
+
+<!-- Footer -->
+<footer class="bg-white dark:bg-slate-800 text-gray-600 dark:text-gray-400 mt-auto">
+	<div class="max-w-6xl mx-auto px-4 md:px-6 lg:px-8 py-16">
+		<div class="grid grid-cols-1 md:grid-cols-3 gap-8 md:gap-12">
+			<div>
+				<a href="index.html" class="flex items-center gap-2 font-semibold text-xl md:text-2xl text-gray-800 dark:text-white">
+					<span class="w-9 h-9 rounded-full bg-indigo-500/10 flex items-center justify-center">
+						<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+					</span>
+					DUX
+				</a>
+				<p class="mt-4 text-xs leading-6">DUX主题官方演示站（Soft UI 复刻版）。温和友好的界面设计，柔和的阴影、圆润的边角、低饱和度的配色。</p>
+			</div>
+			<div>
+				<h4 class="font-semibold text-base text-gray-800 dark:text-gray-100 mb-4">快捷导航</h4>
+				<ul class="space-y-2 text-xs">
+					<li><a href="tags.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">标签云</a></li>
+					<li><a href="readers.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">读者墙</a></li>
+					<li><a href="archives.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">页面存档</a></li>
+					<li><a href="sample-page.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">友情链接</a></li>
+					<li><a href="navs.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">网址导航</a></li>
+				</ul>
+			</div>
+			<div>
+				<h4 class="font-semibold text-base text-gray-800 dark:text-gray-100 mb-4">关注我们</h4>
+				<ul class="space-y-2 text-xs">
+					<li><a href="https://themebetter.com" target="_blank" rel="external nofollow" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">themebetter</a></li>
+					<li><a href="https://themebetter.com" target="_blank" rel="external nofollow" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">更好的主题</a></li>
+				</ul>
+			</div>
+		</div>
+		<div class="mt-12 pt-6 text-center text-xs text-gray-400">
+			© 2026 DUX主题官方演示站 · Soft UI 复刻版（Tailwind CSS + WellCMS v3 暗色模式）
+		</div>
+	</div>
+</footer>
+
+<!-- 回到顶部 -->
+<button id="back-to-top" aria-label="回到顶部" class="fixed bottom-6 right-6 z-40 w-11 h-11 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-600/30 flex items-center justify-center opacity-0 pointer-events-none transition-all duration-300 hover:-translate-y-0.5 hover:shadow-xl">
+	<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg>
+</button>
+
+<script src="assets/js/dux.js"></script>
+</body>
+</html>

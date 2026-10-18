@@ -30,7 +30,6 @@ class GroupService
 
         $this->container = $container;
 
-        $this->dbModel     = $container->get(\App\Models\GroupModel::class);
         $this->cache       = $container->get(\Framework\Cache\Interfaces\CacheInterface::class);
         $this->cacheConfig = $container->get('cacheConfig');
 
@@ -39,13 +38,23 @@ class GroupService
         // hook app_Services_GroupService_construct_end.php
     }
 
+    private function getModel()
+    {
+        if ($this->dbModel !== null) {
+            return $this->dbModel;
+        }
+        $resolved = $this->container->get(\App\Models\GroupModel::class);
+        // 首次获取可能让出协程；保留已经建立的模型引用。
+        return $this->dbModel = $this->dbModel ?? $resolved;
+    }
+
     public function insert(array $data): int
     {
         Validator::make(['data' => $data], ['data' => 'required|array']);
 
         // hook app_Services_GroupService_insert_start.php
 
-        $result = $this->dbModel->insert($data);
+        $result = $this->getModel()->insert($data);
         //if (!$result) throw new \Framework\Exception\BusinessException('GroupService -> / insert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
 
         $data['id'] = $result;
@@ -70,8 +79,8 @@ class GroupService
 
         // hook app_Services_GroupService_update_start.php
 
-        $result = $this->dbModel->update(['id' => $id], $update);
-        if ($result === 0) throw new \Framework\Exception\BusinessException('GroupService -> / update() update failed : ' . json_encode(['id' => $id, 'update' => $update], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $result = $this->getModel()->update(['id' => $id], $update);
+        if ($result === 0) throw new \Framework\Exception\BusinessException('GroupService -> update(): update failed');
 
         $groups = $this->getState('groups', []);
         if (isset($groups[$id])) {
@@ -106,7 +115,7 @@ class GroupService
     {
         // hook app_Services_GroupService_find_start.php
 
-        $datalist = $this->dbModel->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         $groups = $this->getState('groups', []);
@@ -150,7 +159,7 @@ class GroupService
 
         // hook app_Services_GroupService_findCacheList_end.php
 
-        $data = (array)$this->dbModel->find([], [], 1, 1000);
+        $data = (array)$this->getModel()->find([], [], 1, 1000);
         return (array)$this->formatData($data);
     }
 
@@ -159,7 +168,7 @@ class GroupService
      */
     public function name($id): string
     {
-        $groups = $this->getState('groups', $this->findCacheList());
+        $groups = $this->getState('groups') ?? $this->findCacheList();
         return $groups[$id]['name'] ?? '';
     }
 
@@ -176,13 +185,13 @@ class GroupService
 
         // hook app_Services_GroupService_delete_before.php
 
-        $result = $this->dbModel->delete(['id' => $id]);
+        $result = $this->getModel()->delete(['id' => $id]);
         if ($result === 0) return 0;
 
         // hook app_Services_GroupService_delete_center.php
 
         if (!empty($this->cacheConfig['stores'])) {
-            $groups = $this->getState('groups', $this->findCacheList());
+            $groups = $this->getState('groups') ?? $this->findCacheList();
 
             if (isset($groups[$id])) {
                 unset($groups[$id]);
@@ -200,7 +209,7 @@ class GroupService
 
     public function count( array $condition= []): int
     {
-        return $this->dbModel->count($condition);
+        return $this->getModel()->count($condition);
     }
 
     public function maxid(): int
@@ -208,7 +217,7 @@ class GroupService
         $maxId = $this->getState('maxId');
         if (null !== $maxId) return $maxId;
         // hook app_Services_GroupService_maxid_start.php
-        $maxId = $this->dbModel->maxid();
+        $maxId = $this->getModel()->maxid();
         $this->setState('maxId', $maxId);
         // hook app_Services_GroupService_maxid_end.php
         return $maxId;
@@ -256,7 +265,7 @@ class GroupService
         if (isset($staticAccess[$key])) return $staticAccess[$key];
         if (1 === $id || 3 === (int)\DEBUG) return true;
 
-        $groups = $this->getState('groups', $this->findCacheList());
+        $groups = $this->getState('groups') ?? $this->findCacheList();
         if (!isset($groups[$id])) return false;
 
         $group = $groups[$id];

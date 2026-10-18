@@ -7,9 +7,11 @@
 			<p class="font-bold">Debug Info:</p>
 			<p>Processed Time:<?php echo $view->e('website.running.processed_time'); ?></p>
 			<ul class="list-disc pl-4 mt-2 space-y-1">
+				<!--wellcms-debug-sql:start-->
 				<?php foreach ($view->get('website.running.sqls') as $SQLString) { ?>
 				<li><?php echo htmlspecialchars($SQLString); ?></li>
 				<?php } ?>
+				<!--wellcms-debug-sql:end-->
 			</ul>
 			<br>
 			<p>
@@ -40,7 +42,9 @@
 						<?php echo substr($view->get('website.running.processed_time'), 0, 5); ?>
 					</b>, SQL:
 					<b>
+						<?php if (\defined('DEBUG') && \DEBUG > 1) { echo '<!--wellcms-debug-count:start-->'; } ?>
 						<?php echo $view->get('website.running.sql_count'); ?>
+						<?php if (\defined('DEBUG') && \DEBUG > 1) { echo '<!--wellcms-debug-count:end-->'; } ?>
 					</b>
 				</div>
 
@@ -54,7 +58,27 @@
 
 <script src="<?php echo $viewPath;?>js/main.js<?php echo $staticVersion; ?>"></script>
 
-<!--{hook footer_inc_js.htm}-->
+<link rel="stylesheet"
+	href="<?php echo $view->e('website.current.view'); ?>css/scroll-controls.css<?php echo $view->e('website.static_version'); ?>">
+<div class="hidden lg:flex fixed bottom-8 z-40 flex-col gap-4"
+	style="right: max(1rem, calc((100vw - 80rem) / 2 - 1rem));" data-scroll-controls>
+	<button type="button" data-scroll-direction="top"
+		class="wellcms-scroll-control flex w-12 h-12 items-center justify-center rounded-full dark:bg-gray-800/90 border border-gray-200 dark:border-gray-700 text-gray-400 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:border-gray-500 shadow-lg transition-all hover:-translate-y-1"
+		title="TOP" aria-label="TOP">
+		<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 15l7-7 7 7"></path>
+		</svg>
+	</button>
+	<button type="button" data-scroll-direction="bottom"
+		class="wellcms-scroll-control flex w-12 h-12 items-center justify-center rounded-full dark:bg-gray-800/90 border border-gray-200 dark:border-gray-700 text-gray-400 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:border-gray-500 shadow-lg transition-all"
+		title="END" aria-label="END">
+		<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 9l7 7 7-7"></path>
+		</svg>
+	</button>
+</div>
+<script
+	src="<?php echo $view->e('website.current.view'); ?>js/scroll-controls.js<?php echo $view->e('website.static_version'); ?>"></script>
 
 <!--{hook footer_inc_js.htm}-->
 

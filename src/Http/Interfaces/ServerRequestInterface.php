@@ -32,8 +32,8 @@ interface ServerRequestInterface extends RequestInterface
     public function withUploadedFiles(array $uploadedFiles): self;
 
     /** 获取解析后的请求体
- * @return array
- */
+     * @return array
+     */
     public function getParsedBody();
     public function withParsedBody(array $data): self;
 

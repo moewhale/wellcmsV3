@@ -42,8 +42,7 @@
                             class="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-white/50 dark:bg-slate-800/50 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
                             placeholder="<?php echo $view->get('language.verification_code');?>" required>
                         <div class="absolute right-3 flex items-center bg-transparent">
-                            <a id="send-code" href="javascript:void(0);"
-                                data-href="<?php echo $view->get('verify_code_link'); ?>"
+                            <a id="send-code" href="<?php echo $view->e('verify_code_link'); ?>"
                                 class="text-sm text-blue-600 font-medium hover:underline">
                                 <?php echo $view->get('language.send_verification_code');?>
                             </a>
@@ -96,10 +95,12 @@
                             <?php echo $view->get('language.remember_me');?>
                         </span>
                     </label>
-                    <a href="<?php echo $view->get('user.reset_password.url'); ?>"
-                        class="text-sm text-blue-600 hover:underline">
-                        <?php echo $view->get('language.forget_password');?>
-                    </a>
+                    <?php if ($view->get('user_resetpw_on')){ ?>
+                        <a href="<?php echo $view->get('user.reset_password.url'); ?>"
+                            class="text-sm text-blue-600 hover:underline">
+                            <?php echo $view->get('language.forget_password');?>
+                        </a>
+                    <?php } ?>
                 </div>
                 <!--{hook sign_in_form_remember_me_after.htm}-->
 
@@ -183,79 +184,71 @@
         this.value = this.checked ? '1' : '0';
     });
 
-    new GlobalFormHandler(".ajax-form", {
-        ui: window.wellcms,
-        timeout: 2,
-        modalSize: "md"
-    });
-
-    /*30分钟token失效，刷新页面*/
-    setTimeout(() => {
-        window.location.reload();
-    }, 1800000);
+    wellcms.guardPageToken();
 </script>
 <?php if ($view->get('signIn_by_code') && $view->get('verify_email_on')){ ?>
 <script ajax-eval="true">
-    bindClickID("send-code", function () {
-        const anchorElement = document.querySelector("[data-href]");
-        const url = anchorElement ? anchorElement.getAttribute("href") : null;
-        if (!url) {
-            console.error("No data-href attribute found");
-            return;
-        }
+    (function () {
+        const send = document.getElementById("send-code");
+        if (!send) return;
 
-        const emailInput = document.querySelector('input[name="email"]');
-        const emailValue = emailInput ? emailInput.value : null;
+        send.addEventListener("click", async function (event) {
+            event.preventDefault();
+            if (send.classList.contains("loading")) return;
 
-        const _tokenInput = document.querySelector('input[name="_token"]');
-        const _tokenValue = _tokenInput ? _tokenInput.value : null;
-        if (!_tokenValue) {
-            console.error("Token error");
-            return;
-        }
-
-        const data = {
-            email: emailValue,
-            _token: _tokenValue,
-            key: 'codeSignIn'
-        };
-
-        postRequest(url, data, function (response) {
-            if (0 === response.code) {
-                const send = document.getElementById("send-code");
-                const completed = document.getElementById("sending-completed");
-                const countdownElement = document.getElementById('countdown');
-                let remainingTime = 60;
-                const intervalId = setInterval(() => {
-                    send.style.display = 'none';
-                    completed.style.display = '';
-                    countdownElement.style.display = '';
-                    remainingTime--;
-                    countdownElement.textContent = remainingTime;
-                    if (remainingTime <= 0) {
-                        clearInterval(intervalId);
-                    }
-                }, 1000);
-                setTimeout(() => {
-                    countdownElement.style.display = 'none';
-                    send.style.display = '';
-                    completed.style.display = 'none';
-                }, 60000);
-            } else {
-                showAlert({ State: "Error", body: response.message }, 3, {
-                    size: "md",
-                    position: "center",
+            send.classList.add("loading");
+            try {
+                const response = await wellcms.post(send.getAttribute("href"), {
+                    email: document.querySelector('input[name="email"]')?.value || "",
+                    _token: document.querySelector('input[name="_token"]')?.value || "",
+                    key: "codeSignIn"
                 });
 
-                /* if (url !== undefined) {
-                    setTimeout(function () {
-                        window.location.href = url;
-                    }, 3000);
-                } */
-                console.error("请求失败，错误代码:", response.code, "错误信息:", response.message);
+                if (response.code === 0) {
+                    wellcms.toast(response.message || document.getElementById("sending-completed")?.textContent.trim() || "Success", "success");
+                    startCountdown(send, 60);
+                } else {
+                    showFieldError(response);
+                }
+            } catch (error) {
+                wellcms.error(error.message || "Request failed");
+            } finally {
+                send.classList.remove("loading");
             }
         });
-    });
+
+        function startCountdown(send, seconds) {
+            const completed = document.getElementById("sending-completed");
+            const countdown = document.getElementById("countdown");
+            if (!completed || !countdown) return;
+
+            let remaining = seconds;
+            send.style.display = "none";
+            completed.style.display = "";
+            countdown.style.display = "";
+            countdown.textContent = remaining;
+
+            const timer = setInterval(function () {
+                remaining--;
+                countdown.textContent = remaining;
+                if (remaining <= 0) {
+                    clearInterval(timer);
+                    countdown.style.display = "none";
+                    completed.style.display = "none";
+                    send.style.display = "";
+                }
+            }, 1000);
+        }
+
+        function showFieldError(response) {
+            const field = response.data?.field || (typeof response.code === "string" ? response.code : "");
+            if (field && document.querySelector('[name="' + field + '"]')) {
+                wellcms.showInputError(field, response.message || "Invalid input");
+                return;
+            }
+            wellcms.error(response.message || "Request failed");
+        }
+    })();
 </script>
 <?php } ?>
 

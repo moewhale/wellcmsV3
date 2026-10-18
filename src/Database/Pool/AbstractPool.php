@@ -8,6 +8,7 @@ declare(strict_types=1);
 namespace Framework\Database\Pool;
 
 use Framework\Exception\Infra\PoolException;
+use Framework\Exception\Infra\RollbackOnlyException;
 use Framework\Logger\LoggerInterface;
 
 /**
@@ -112,6 +113,9 @@ abstract class AbstractPool implements PoolInterface
             $node->nodeId = $cfg['node_id'] ?? ('auto-node-' . $idx);
             $node->shard = $shard;
             $node->config = $cfg;
+            $node->config['_wellcms_connection'] = [
+                'role' => 'slave', 'shard' => $shard, 'node_id' => $node->nodeId,
+            ];
             $node->weight = (int)($cfg['weight'] ?? 1);
             $node->tags = (array)($cfg['tags'] ?? []);
 
@@ -134,9 +138,8 @@ abstract class AbstractPool implements PoolInterface
 
     /**
      * 在指定 shard 中按 nodeId 查找 Node
-     * @return array
      */
-    protected function findNode(string $shard, string $nodeId)
+    protected function findNode(string $shard, string $nodeId): ?Node
     {
         $pool = $this->getShardPool($shard);
         foreach ($pool->nodes as $node) {
@@ -175,7 +178,12 @@ abstract class AbstractPool implements PoolInterface
 
         if ($level === 0) {
             $pdo = $this->getMaster($shard);
-            $pdo->beginTransaction();
+            try {
+                $pdo->beginTransaction();
+            } catch (\Throwable $e) {
+                $this->evictCurrentConnection($shard);
+                throw $e;
+            }
             $this->setShouldRollback(false, $shard);
         }
 
@@ -196,18 +204,21 @@ abstract class AbstractPool implements PoolInterface
 
         if ($level === 0) {
             $pdo = $this->getMaster($shard);
+            $rollbackOnly = $this->getShouldRollback($shard);
             try {
-                if ($this->getShouldRollback($shard)) {
+                if ($rollbackOnly) {
                     $pdo->rollBack();
-                    $this->clearMaster($shard);
-                    throw new \RuntimeException('Database transaction failed: marked as rollback only due to inner failure.');
+                } else {
+                    $pdo->commit();
                 }
-                $pdo->commit();
             } catch (\Throwable $e) {
-                $this->clearMaster($shard);
+                $this->evictCurrentConnection($shard);
                 throw $e;
             }
             $this->clearMaster($shard);
+            if ($rollbackOnly) {
+                throw new RollbackOnlyException('Database transaction failed: marked as rollback only due to inner failure.');
+            }
         }
 
         return true;
@@ -229,7 +240,7 @@ abstract class AbstractPool implements PoolInterface
             try {
                 $pdo->rollBack();
             } catch (\Throwable $e) {
-                $this->clearMaster($shard);
+                $this->evictCurrentConnection($shard);
                 throw $e;
             }
             $this->clearMaster($shard);
@@ -247,7 +258,7 @@ abstract class AbstractPool implements PoolInterface
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $levels = $ctx->dbTransactionLevels ?? [];
+            $levels = $ctx['dbTransactionLevels'] ?? [];
             return $levels[$shard] ?? 0;
         }
         $pool = $this->getShardPool($shard);
@@ -266,14 +277,8 @@ abstract class AbstractPool implements PoolInterface
                     return 0;
                 }
             } catch (\PDOException $e) {
-                try {
-                    $this->releaseConnection($master);
-                } catch (\Throwable $releaseEx) {
-                    // ignore
-                }
-                $pool->master = null;
-                $pool->transactionLevel = 0;
-                $pool->shouldRollback = false;
+                // 状态检查失败的连接不能再走正常归还（归还会再次检查事务）。
+                $this->evictCurrentConnection($shard);
                 return 0;
             }
         }
@@ -284,7 +289,7 @@ abstract class AbstractPool implements PoolInterface
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $levels = $ctx->dbTransactionLevels ?? [];
+            $levels = $ctx['dbTransactionLevels'] ?? [];
             foreach ($levels as $s => $level) {
                 if ($s !== $shard && $level > 0) {
                     throw new \RuntimeException("Cross-shard query violation: Active transaction on '{$s}', attempted operation on '{$shard}'.");
@@ -303,9 +308,9 @@ abstract class AbstractPool implements PoolInterface
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $levels = $ctx->dbTransactionLevels ?? [];
+            $levels = $ctx['dbTransactionLevels'] ?? [];
             $levels[$shard] = $level;
-            $ctx->dbTransactionLevels = $levels;
+            $ctx['dbTransactionLevels'] = $levels;
         } else {
             $this->getShardPool($shard)->transactionLevel = $level;
         }
@@ -315,7 +320,7 @@ abstract class AbstractPool implements PoolInterface
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $flags = $ctx->dbShouldRollback ?? [];
+            $flags = $ctx['dbShouldRollback'] ?? [];
             return $flags[$shard] ?? false;
         }
         return $this->getShardPool($shard)->shouldRollback;
@@ -325,9 +330,9 @@ abstract class AbstractPool implements PoolInterface
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $flags = $ctx->dbShouldRollback ?? [];
+            $flags = $ctx['dbShouldRollback'] ?? [];
             $flags[$shard] = $shouldRollback;
-            $ctx->dbShouldRollback = $flags;
+            $ctx['dbShouldRollback'] = $flags;
         } else {
             $this->getShardPool($shard)->shouldRollback = $shouldRollback;
         }
@@ -337,12 +342,12 @@ abstract class AbstractPool implements PoolInterface
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $masters = $ctx->dbMasters ?? [];
+            $masters = $ctx['dbMasters'] ?? [];
             if (isset($masters[$shard])) {
                 $pdo = $masters[$shard];
                 $this->releaseConnection($pdo);
                 unset($masters[$shard]);
-                $ctx->dbMasters = $masters;
+                $ctx['dbMasters'] = $masters;
             }
         } else {
             $pool = $this->getShardPool($shard);
@@ -435,6 +440,56 @@ abstract class AbstractPool implements PoolInterface
     }
 
     /**
+     * 仅识别会使当前 PDO 不再适合复用的物理连接故障。
+     */
+    protected function isConnectionFailure(\Throwable $e): bool
+    {
+        $states = [(string)$e->getCode()];
+        $driverCodes = [];
+        if ($e instanceof \PDOException && is_array($e->errorInfo ?? null)) {
+            $states[] = (string)($e->errorInfo[0] ?? '');
+            $driverCodes[] = (int)($e->errorInfo[1] ?? 0);
+        }
+
+        foreach ($states as $state) {
+            $state = strtoupper($state);
+            if (strlen($state) >= 2 && substr($state, 0, 2) === '08') {
+                return true;
+            }
+            if (in_array($state, ['57P01', '57P02', '57P03'], true)) {
+                return true;
+            }
+        }
+
+        $driverCodes[] = (int)$e->getCode();
+        foreach ($driverCodes as $code) {
+            if (in_array($code, [1042, 1043, 2002, 2003, 2006, 2013, 2055], true)) {
+                return true;
+            }
+        }
+
+        $message = strtolower($e->getMessage());
+        foreach ([
+            'server has gone away',
+            'lost connection',
+            'no connection to the server',
+            'server closed the connection unexpectedly',
+            'connection refused',
+            'connection reset by peer',
+            'broken pipe',
+            'ssl connection has been closed unexpected',
+            'is dead or not responding',
+            'error while sending',
+        ] as $fragment) {
+            if (strpos($message, $fragment) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * 获取主连接
      * @param string $shard
      * @return \PDO
@@ -443,10 +498,10 @@ abstract class AbstractPool implements PoolInterface
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $masters = $ctx->dbMasters ?? [];
+            $masters = $ctx['dbMasters'] ?? [];
             if (!isset($masters[$shard])) {
                 $masters[$shard] = $this->driver->createFreshConnection('master', $shard);
-                $ctx->dbMasters = $masters;
+                $ctx['dbMasters'] = $masters;
             }
             return $masters[$shard];
         }

@@ -73,7 +73,8 @@ class StorageManager
         $path = 'avatar/' . $ym . '/' . $timestamp . '.png';
 
         // 云端状态且当前开启了云存储驱动
-        if (1 === $status && ($this->config['default'] ?? 'local') !== 'local') {
+        if (1 === $status && ($this->config['default'] ?? 'local') !== 'local'
+            && !($this->disk($this->config['default']) instanceof \App\Services\Storage\Drivers\LocalStorage)) {
             $cloudBaseUrl = $this->config['disks'][$this->config['default']]['url'] ?? '';
             return rtrim($cloudBaseUrl, '/') . '/' . ltrim($localUrl, '/') . $path;
         }
@@ -106,26 +107,15 @@ class StorageManager
     public function deleteFile(string $relativeKey, int $status): bool
     {
         if (empty($relativeKey)) return false;
+        if (!in_array($status, [0, 1], true) || ($status === 1 && ($this->config['default'] ?? 'local') === 'local')) return false;
 
-        // 1. 统一路径标准化：提取相对于 upload 根目录的路径
-        // 去除可能的开头斜杠
-        $cleanPath = ltrim($relativeKey, '/\\');
+        // 云端与本地删除必须共用同一个已验证的根内相对 key。
+        // 不能把 DB path 直接交给 LocalStorage，否则 ../ 会在 root 拼接后跨根。
+        $cleanPath = $this->normalizeDeleteKey($relativeKey);
+        if ($cleanPath === null) return false;
 
-        // 如果是以 storage/upload/ 开头 (数据库 path 字段常见格式)
-        if (strpos($cleanPath, 'storage' . DIRECTORY_SEPARATOR . 'upload' . DIRECTORY_SEPARATOR) === 0) {
-            $cleanPath = substr($cleanPath, strlen('storage' . DIRECTORY_SEPARATOR . 'upload' . DIRECTORY_SEPARATOR));
-        } elseif (strpos($cleanPath, 'storage/upload/') === 0) {
-            $cleanPath = substr($cleanPath, strlen('storage/upload/'));
-        }
-
-        // 如果是以 upload/ 开头 (数据库 url 字段常见格式)
-        $localUrl = ltrim($this->config['disks']['local']['url'] ?? 'upload/', '/\\');
-        if (strpos($cleanPath, $localUrl) === 0) {
-            $cleanPath = substr($cleanPath, strlen($localUrl));
-        }
-
-        // 确保 cleanPath 不带前导斜杠
-        $cleanPath = ltrim($cleanPath, '/\\');
+        $localUrl = trim(str_replace('\\', '/', (string)($this->config['disks']['local']['url'] ?? 'upload/')), '/');
+        if ($localUrl !== '') $localUrl .= '/';
 
         $result = true;
 
@@ -134,13 +124,17 @@ class StorageManager
             try {
                 // 云端 Key 通常需要包含 upload/ 前缀以匹配 UploadToCloudJob 的逻辑
                 $cloudKey = ltrim($localUrl, '/\\') . $cleanPath;
-                $result = $this->disk($this->config['default'])->delete($cloudKey);
+                $cloud = $this->disk($this->config['default']);
+                if ($cloud instanceof \App\Services\Storage\Drivers\LocalStorage) return false;
+                $result = $cloud->delete($cloudKey);
             } catch (\Exception $e) {
                 $result = false;
             }
         }
 
-        // 3. 始终尝试从本地清理
+        if (!$result) return false;
+
+        // 3. 云端结果已确认后再清理本地
         try {
             // 本地磁盘驱动的 root 通常已设为 storage/upload/，所以传 cleanPath 即可
             $localResult = $this->disk('local')->delete($cleanPath);
@@ -150,6 +144,83 @@ class StorageManager
         }
 
         return $result;
+    }
+
+    /**
+     * 将数据库 path、URL 或相对 key 解析为正式存储根内的相对路径。
+     *
+     * @return string|null null 表示输入不安全或不属于配置存储根
+     */
+    private function normalizeDeleteKey(string $path): ?string
+    {
+        if ($path === '' || preg_match('/[\x00-\x1f\x7f]/', $path)) return null;
+
+        $path = str_replace('\\', '/', $path);
+        $rootConfig = str_replace('\\', '/', (string)($this->config['disks']['local']['root'] ?? ''));
+        if ($rootConfig === '') return null;
+
+        $appRoot = rtrim(str_replace('\\', '/', (string)(\defined('APP_PATH') ? \APP_PATH : '')), '/');
+        $rootAbsolute = $rootConfig;
+        if ($rootAbsolute[0] !== '/') {
+            if ($appRoot === '') return null;
+            $rootAbsolute = $appRoot . '/' . ltrim($rootAbsolute, '/');
+        }
+        $rootReal = realpath($rootAbsolute);
+        if ($rootReal === false || !is_dir($rootReal)) return null;
+        $rootReal = rtrim(str_replace('\\', '/', $rootReal), '/');
+
+        // 绝对路径只允许从当前配置根相对化，任何其他绝对路径都拒绝。
+        if (isset($path[0]) && $path[0] === '/') {
+            $absolute = rtrim($path, '/');
+            $rootPrefix = $rootReal . '/';
+            if (strpos($absolute . '/', $rootPrefix) !== 0) return null;
+            $path = substr($absolute, strlen($rootPrefix));
+        } else {
+            $path = ltrim($path, '/');
+            $prefixes = [];
+
+            $rootRelative = trim($rootConfig, '/');
+            if ($rootRelative !== '' && strpos($rootRelative, ':') === false) {
+                $prefixes[] = $rootRelative;
+            }
+            if ($appRoot !== '' && strpos($rootReal . '/', $appRoot . '/') === 0) {
+                $prefixes[] = ltrim(substr($rootReal, strlen($appRoot)), '/');
+            }
+            $localUrl = trim(str_replace('\\', '/', (string)($this->config['disks']['local']['url'] ?? 'upload/')), '/');
+            if ($localUrl !== '') $prefixes[] = $localUrl;
+
+            foreach (array_unique(array_filter($prefixes)) as $prefix) {
+                $prefix = trim((string)$prefix, '/');
+                if ($path === $prefix) {
+                    $path = '';
+                    break;
+                }
+                if (strpos($path, $prefix . '/') === 0) {
+                    $path = substr($path, strlen($prefix) + 1);
+                    break;
+                }
+            }
+        }
+
+        $segments = explode('/', $path);
+        if (empty($segments)) return null;
+        foreach ($segments as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') return null;
+            if (preg_match('/[\x00-\x1f\x7f]/', $segment)) return null;
+        }
+        $cleanPath = implode('/', $segments);
+
+        // 对已存在目标再做 canonical 校验，阻断根内符号链接指向根外。
+        $candidate = $rootReal . '/' . $cleanPath;
+        if (is_link($candidate)) return null;
+        if (file_exists($candidate)) {
+            $targetReal = realpath($candidate);
+            if ($targetReal === false || !is_file($targetReal)) return null;
+            $targetReal = str_replace('\\', '/', $targetReal);
+            if (strpos($targetReal . '/', $rootReal . '/') !== 0) return null;
+        }
+
+        return $cleanPath;
     }
 
     /**

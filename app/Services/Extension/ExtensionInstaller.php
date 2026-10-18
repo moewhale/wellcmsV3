@@ -4,11 +4,12 @@ declare(strict_types=1);
 
 namespace App\Services\Extension;
 
+use App\Services\Market\SignatureHelper;
 use Framework\Utils\DirectoryHelper;
+use Framework\Utils\SecurityHelper;
 
 /**
- * ExtensionInstaller - 扩展物理安装器 (工业级实现)
- * 核心特性：流式下载、哈希校验、影子解压、原子覆盖、自动热重载
+ * 扩展物理部署器：签名权证、强哈希、同盘暂存与原子切换。
  */
 class ExtensionInstaller
 {
@@ -16,7 +17,7 @@ class ExtensionInstaller
     private $market;
     /** @var \App\Services\Upgrade\Downloader */
     private $downloader;
-    /** @var \App\Interfaces\LanguageLoaderInterface */
+    /** @var \App\Interfaces\LanguageLoaderInterface|null */
     private $language;
     /** @var array */
     private $appConfig;
@@ -41,139 +42,305 @@ class ExtensionInstaller
         $this->appConfig = $appConfig;
         $this->pluginPath = rtrim($pluginConfig['plugins_path'], '/\\') . DIRECTORY_SEPARATOR;
         $this->themePath = rtrim($viewConfig['themes_path'], '/\\') . DIRECTORY_SEPARATOR;
-        $this->tmpPath = $appConfig['tmp_path'];
+        $this->tmpPath = rtrim($appConfig['tmp_path'], '/\\') . DIRECTORY_SEPARATOR;
     }
 
     /**
-     * 执行安装/升级任务
+     * 准备并原子切换扩展目录。返回的事务必须由调用方 commit 或 rollback。
      */
     public function execute(string $dir, string $type, int $storeId, string $expectedHash = ''): array
     {
-        $lockAcquired = false;
+        $this->assertIdentity($dir, $type, $storeId);
+        $manifest = $this->getDownloadManifest($storeId, $dir, $type);
+        if ($expectedHash !== ''
+            && (!preg_match('/^[a-f0-9]{64}$/i', $expectedHash)
+                || !hash_equals(strtolower($manifest['hash']), strtolower($expectedHash)))) {
+            throw new \RuntimeException('Expected extension hash does not match signed manifest');
+        }
+        $basePath = $type === 'theme' ? $this->themePath : $this->pluginPath;
+        $operationId = bin2hex(random_bytes(12));
+        $stagePath = $basePath . '.wellcms-stage-' . $dir . '-' . $operationId;
+        $backupPath = $basePath . '.wellcms-backup-' . $dir . '-' . $operationId;
+        $targetPath = $basePath . $dir;
+        $zipFile = $this->tmpPath . 'wellcms-extension-' . $operationId . '.zip';
+        $hadPrevious = is_dir($targetPath);
+
+        $this->ensureDirectory($this->tmpPath);
+        $this->ensureDirectory($stagePath);
+
         try {
-            // 1. 目录互斥锁 (防止并发写冲突)
-            \Framework\Utils\FileHelper::lock($dir);
-            $lockAcquired = true;
-
-            // 2. 获取加密下载直链
-            $downloadInfo = $this->getDownloadUrl($storeId);
-            if ($downloadInfo['status'] !== 'success') return $downloadInfo;
-
-            $url = $downloadInfo['url'];
-            $hash = $expectedHash ?: ($downloadInfo['hash'] ?? '');
-
-            // 3. 流式下载并同步校验 (SHA256)
-            $zipFile = $this->tmpPath . $dir . '_' . random_int(100000, 999999) . '.zip';
-            $this->ensureTmp();
-
-            $this->downloader->download($url, $zipFile, $hash);
-
-            // 4. "影子解压"策略：先行解压到临时路径
-            $shadowPath = $this->tmpPath . 'shadow_' . $dir . '/';
-            DirectoryHelper::rmdirRecursive($shadowPath);
-            if (!is_dir($shadowPath)) {
-                mkdir($shadowPath, 0755, true);
-            }
+            $this->downloader->download($manifest['url'], $zipFile, $manifest['hash']);
 
             $zip = new \Framework\Utils\ZipUtility();
-            $zip->unzip($zipFile, $shadowPath);
-            @unlink($zipFile);
+            $zip->unzip($zipFile, $stagePath, false);
 
-            // 5. 校验提取结果 (Integrity Check)
-            $extractedDir = $shadowPath . $dir . '/';
-            // 如果只有一层子目录且不是 $dir，尝试自动探测
-            if (!is_dir($extractedDir)) {
-                $dirs = glob($shadowPath . '*', GLOB_ONLYDIR);
-                if (count($dirs) === 1) $extractedDir = $dirs[0] . '/';
+            $extractedPath = $stagePath . DIRECTORY_SEPARATOR . $dir;
+            if (!is_dir($extractedPath)) {
+                throw new \RuntimeException('Extension archive root directory does not match signed dir');
+            }
+            $this->validatePackage($extractedPath, $type, $manifest);
+            if (!@unlink($zipFile)) {
+                throw new \RuntimeException('Failed to remove verified extension archive');
             }
 
-            $configFile = $extractedDir . 'config.json';
-            if (!file_exists($configFile)) {
-                DirectoryHelper::rmdirRecursive($shadowPath);
-                return ['status' => 'error', 'message' => $this->language->get('plugin_format_error') . ' (config.json empty)'];
+            if ($hadPrevious && !@rename($targetPath, $backupPath)) {
+                throw new \RuntimeException('Failed to move current extension to transaction backup');
             }
 
-            // 6. 原子性覆盖 (Atomic Swap/Overwrite)
-            $targetPath = ($type === 'theme' ? $this->themePath : $this->pluginPath) . $dir;
-
-            // 如果目标已存在，先行备份（简单重命名）
-            if (is_dir($targetPath)) {
-                $backupPath = $this->tmpPath . 'backup_' . $dir . '_' . date('His');
-                rename($targetPath, $backupPath);
+            if (!@rename($extractedPath, $targetPath)) {
+                throw new \RuntimeException('Atomic extension directory switch failed');
             }
 
-            // 执行移动
-            if (!rename(rtrim($extractedDir, '/'), $targetPath)) {
-                // FIX: 原子覆盖失败时恢复备份，防止原扩展丢失
-                if (isset($backupPath) && is_dir($backupPath)) {
-                    @rename($backupPath, $targetPath);
+            return [
+                'status' => 'success',
+                'dir' => $dir,
+                'target_path' => $targetPath,
+                'backup_path' => $backupPath,
+                'stage_path' => $stagePath,
+                'had_previous' => $hadPrevious,
+                'version' => (string)$manifest['version'],
+                'store_id' => $storeId,
+                'type' => $type,
+            ];
+        } catch (\Throwable $e) {
+            $cleanupFailures = [];
+            if (!is_dir($targetPath) && $hadPrevious && is_dir($backupPath)) {
+                if (!@rename($backupPath, $targetPath)) {
+                    $cleanupFailures[] = 'original directory restore failed';
                 }
-                return ['status' => 'error', 'message' => 'FileSystem I/O Error: failed to rename shadow directory, backup restored'];
             }
-
-            // 移动成功，清理备份（可选：保留一定时间用于回滚）
-            if (isset($backupPath) && is_dir($backupPath)) {
-                DirectoryHelper::rmdirRecursive($backupPath);
+            try {
+                $this->removeDirectoryIfExists($stagePath);
+            } catch (\Throwable $cleanupError) {
+                $cleanupFailures[] = $cleanupError->getMessage();
             }
-
-            // 7. 环境刷新
-            DirectoryHelper::rmdirRecursive($shadowPath);
-            \Framework\Utils\Runtime::reload(); // 触发 Swoole 热重载
-
-            return ['status' => 'success', 'dir' => $dir];
-        } catch (\Exception $e) {
-            return ['status' => 'error', 'message' => $e->getMessage()];
-        } finally {
-            if ($lockAcquired) \Framework\Utils\FileHelper::unlock($dir);
-            $this->cleanTmp($dir);
+            if (is_file($zipFile) && !@unlink($zipFile)) {
+                $cleanupFailures[] = 'download archive cleanup failed';
+            }
+            if ($cleanupFailures) {
+                throw new \RuntimeException(
+                    'Extension preparation failed and cleanup failed: ' . implode('; ', $cleanupFailures),
+                    0,
+                    $e
+                );
+            }
+            throw $e;
         }
     }
 
-    /**
-     * 向商店请求下载地址
-     */
-    private function getDownloadUrl(int $storeId): array
+    /** 确认部署事务，删除旧版本备份。 */
+    public function commit(array $transaction): void
+    {
+        $this->assertTransaction($transaction);
+        // 先清理不参与回滚的暂存目录；旧版本备份必须最后删除。
+        $this->removeDirectoryIfExists($transaction['stage_path']);
+        $this->removeDirectoryIfExists($transaction['backup_path']);
+    }
+
+    /** 回滚部署事务到切换前的目录状态。 */
+    public function rollback(array $transaction): void
+    {
+        $this->assertTransaction($transaction);
+        $targetPath = $transaction['target_path'];
+        $backupPath = $transaction['backup_path'];
+        $hadPrevious = (bool)$transaction['had_previous'];
+
+        $this->removeDirectoryIfExists($targetPath);
+        if ($hadPrevious) {
+            if (!is_dir($backupPath) || !@rename($backupPath, $targetPath)) {
+                throw new \RuntimeException('Failed to restore original extension directory');
+            }
+        }
+        $this->removeDirectoryIfExists($transaction['stage_path']);
+    }
+
+    private function getDownloadManifest(int $storeId, string $dir, string $type): array
     {
         $params = $this->market->getCommonParams();
         $params['storeid'] = $storeId;
 
-        // 向官方请求下载权证
-        $res = $this->market->request('download.html', $params);
-        $result = \Framework\Utils\SecurityHelper::jsonDecode($res);
-
-        if (isset($result['status']) && 'success' === $result['status'] && !empty($result['data']['url'])) {
-            return ['status' => 'success', 'url' => $result['data']['url'], 'hash' => $result['data']['hash'] ?? ''];
+        $response = $this->market->request('download.html', $params);
+        $result = SecurityHelper::jsonDecode($response);
+        if (($result['status'] ?? '') !== 'success' || !is_array($result['data'] ?? null)) {
+            throw new \RuntimeException((string)($result['message'] ?? 'Store download authorization failed'));
         }
 
-        $msg = $result['data']['message'] ?? $result['message'] ?? $this->language->get('plugin_download_failed');
-        return ['status' => 'error', 'message' => $msg];
+        $manifest = $result['data'];
+        $required = ['url', 'hash', 'version', 'storeid', 'type', 'dir', 'expires_at', 'sign'];
+        foreach ($required as $field) {
+            if (!array_key_exists($field, $manifest) || $manifest[$field] === '') {
+                throw new \RuntimeException('Incomplete signed download manifest: ' . $field);
+            }
+        }
+
+        $credentials = $this->market->getCredentials();
+        $sessionSecret = is_array($credentials) ? (string)($credentials['session_secret'] ?? '') : '';
+        if (!preg_match('/^[a-f0-9]{64}$/i', $sessionSecret)
+            || !SignatureHelper::verifyRequest($manifest, $sessionSecret)) {
+            throw new \RuntimeException('Invalid download manifest signature');
+        }
+        if ((int)$manifest['expires_at'] < time()) {
+            throw new \RuntimeException('Download manifest expired');
+        }
+        if ((int)$manifest['storeid'] !== $storeId
+            || !hash_equals((string)$manifest['dir'], $dir)
+            || !hash_equals((string)$manifest['type'], $type)) {
+            throw new \RuntimeException('Download manifest identity mismatch');
+        }
+        if (!preg_match('/^[a-f0-9]{64}$/i', (string)$manifest['hash'])) {
+            throw new \RuntimeException('Download manifest hash is invalid');
+        }
+        if (parse_url((string)$manifest['url'], PHP_URL_SCHEME) !== 'https') {
+            throw new \RuntimeException('Store download URL must use HTTPS');
+        }
+
+        $manifest['hash'] = strtolower((string)$manifest['hash']);
+        return $manifest;
     }
 
-    private function ensureTmp(): void
+    /**
+     * 向商店请求下载地址的兼容入口。
+     */
+    /* private function getDownloadUrl(int $storeId): array
     {
-        if (!is_dir($this->tmpPath)) mkdir($this->tmpPath, 0755, true);
+        $params = $this->market->getCommonParams();
+        $params['storeid'] = $storeId;
+        $result = SecurityHelper::jsonDecode($this->market->request('download.html', $params));
+        if (($result['status'] ?? '') === 'success' && !empty($result['data']['url'])) {
+            return [
+                'status' => 'success',
+                'url' => $result['data']['url'],
+                'hash' => $result['data']['hash'] ?? '',
+            ];
+        }
+        $message = $result['message'] ?? '';
+        if ($message === '' && $this->language) {
+            $message = $this->language->get('plugin_download_failed');
+        }
+        return ['status' => 'error', 'message' => $message ?: 'Extension download authorization failed'];
+    } */
+
+    /* private function ensureTmp(): void
+    {
+        $this->ensureDirectory($this->tmpPath);
     }
 
     private function cleanTmp(string $dir): void
     {
-        // 清理当前任务产生的碎片
         $shadow = $this->tmpPath . 'shadow_' . $dir;
-        if (is_dir($shadow)) DirectoryHelper::rmdirRecursive($shadow, true);
+        $this->removeDirectoryIfExists($shadow);
 
-        // 清理残留压缩包
-        $zips = glob($this->tmpPath . $dir . '_*.zip'); 
-        if (!empty($zips)) {
-            foreach ($zips as $zip) @unlink($zip);
+        foreach ((array)glob($this->tmpPath . $dir . '_*.zip') as $zip) {
+            if (is_file($zip) && !@unlink($zip)) {
+                throw new \RuntimeException('Failed to remove extension temporary archive');
+            }
         }
-        
-        // 清理残留备份目录
-        $backups = glob($this->tmpPath . 'backup_' . $dir . '_*');
-        if (!empty($backups)) {
-            foreach ($backups as $backup) {
-                if (is_dir($backup)) DirectoryHelper::rmdirRecursive($backup, true);
-            } 
-        }    
+        foreach ((array)glob($this->tmpPath . 'backup_' . $dir . '_*') as $backup) {
+            $this->removeDirectoryIfExists($backup);
+        }
+    } */
+
+    private function validatePackage(string $extensionPath, string $type, array $manifest): void
+    {
+        $configFile = $extensionPath . DIRECTORY_SEPARATOR . 'config.json';
+        if (!is_file($configFile)) {
+            throw new \RuntimeException('Extension package config.json is missing');
+        }
+        $config = SecurityHelper::jsonDecode((string)file_get_contents($configFile));
+        if (!is_array($config)) {
+            throw new \RuntimeException('Extension package config.json is invalid');
+        }
+
+        $expectedType = $type === 'theme' ? 2 : 1;
+        if ((int)($config['type'] ?? 0) !== $expectedType) {
+            throw new \RuntimeException('Extension package type does not match signed manifest');
+        }
+        if (!isset($config['version'])
+            || !hash_equals((string)$manifest['version'], (string)$config['version'])) {
+            throw new \RuntimeException('Extension package version does not match signed manifest');
+        }
+
+        $requiredSoftware = (string)($config['software_version'] ?? '');
+        $currentSoftware = (string)($this->appConfig['version'] ?? '');
+        if ($requiredSoftware === '' || $currentSoftware === ''
+            || version_compare($currentSoftware, $requiredSoftware, '<')) {
+            throw new \RuntimeException('Extension package requires a newer WellCMS version');
+        }
+
+        foreach (['dependencies', 'dependencies_theme'] as $dependencyField) {
+            if (!isset($config[$dependencyField])) {
+                continue;
+            }
+            if (!is_array($config[$dependencyField])) {
+                throw new \RuntimeException('Extension package dependency declaration is invalid');
+            }
+            foreach ($config[$dependencyField] as $dependencyDir => $minimumVersion) {
+                if (!is_string($dependencyDir)
+                    || !preg_match('/^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/', $dependencyDir)
+                    || !is_string($minimumVersion)
+                    || trim($minimumVersion) === ''
+                    || strlen($minimumVersion) > 32) {
+                    throw new \RuntimeException('Extension package dependency identity is invalid');
+                }
+            }
+        }
+
+        foreach (['install', 'upgrade', 'uninstall'] as $action) {
+            if (!isset($config[$action])) {
+                // 旧扩展使用固定文件名约定；文件存在即可由统一生命周期入口执行。
+                continue;
+            }
+            $relative = is_array($config[$action]) ? (string)($config[$action]['file'] ?? '') : '';
+            if (!$this->isSafeRelativePath($relative)
+                || !is_file($extensionPath . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative))) {
+                throw new \RuntimeException('Invalid extension lifecycle script: ' . $action);
+            }
+        }
     }
 
+    private function assertIdentity(string $dir, string $type, int $storeId): void
+    {
+        if (!preg_match('/^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/', $dir)
+            || !in_array($type, ['plugin', 'theme'], true)
+            || $storeId <= 0) {
+            throw new \InvalidArgumentException('Invalid extension deployment identity');
+        }
+    }
 
+    private function assertTransaction(array $transaction): void
+    {
+        foreach (['target_path', 'backup_path', 'stage_path', 'had_previous'] as $field) {
+            if (!array_key_exists($field, $transaction)) {
+                throw new \InvalidArgumentException('Invalid extension deployment transaction');
+            }
+        }
+    }
+
+    private function isSafeRelativePath(string $path): bool
+    {
+        if ($path === '' || strpos($path, "\0") !== false || strpos($path, '\\') !== false
+            || $path[0] === '/' || preg_match('/^[A-Za-z]:/', $path)) {
+            return false;
+        }
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private function ensureDirectory(string $path): void
+    {
+        if (!is_dir($path) && !mkdir($path, 0755, true) && !is_dir($path)) {
+            throw new \RuntimeException('Failed to create extension transaction directory');
+        }
+    }
+
+    private function removeDirectoryIfExists(string $path): void
+    {
+        if (is_dir($path) && !DirectoryHelper::rmdirRecursive($path, true)) {
+            throw new \RuntimeException('Failed to remove extension transaction directory: ' . basename($path));
+        }
+    }
 }

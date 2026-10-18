@@ -22,12 +22,12 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
     {
         // hook app_Providers_SchedulerServiceProvider_start.php
 
-        // 加载 Scheduler 工业级配置（v2 服务注册前必须可用）
+        // 加载 Scheduler 工业级配置（服务注册前必须可用）
         $config = [];
         try {
             $config = $container->get('schedulerConfig') ?: [];
         } catch (\Throwable $e) {
-            // 无配置则跳过 v2 服务
+            // 无配置则跳过 服务
         }
 
         // 注册 RedisCache（非单例，确保每次使用正确的 cachepre）
@@ -53,7 +53,7 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
             $redis = $container->get(RedisCache::class);
             $queue = new \Framework\Scheduler\RedisTaskQueue($redis);
 
-            // v2 未启用时直接返回原始 RedisQueue
+            // 未启用时直接返回原始 RedisQueue
             if (empty($config['v2_enabled'])) {
                 return $queue;
             }
@@ -65,8 +65,8 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
             }
 
             // 第 1 层: PersistenceQueue（MySQL 持久化，可选）
-            // P0 #1: 传入 RedisCache 用于直接操作哈希索引
-            // v3.2: DatabaseQueue → TaskStorageInterface
+            // 传入 RedisCache 用于直接操作哈希索引
+            // DatabaseQueue → TaskStorageInterface
             if (!empty($config['dual_write']['enabled'])) {
                 $storage = $container->get(\Framework\Scheduler\Interfaces\TaskStorageInterface::class);
                 $queue = new PersistenceQueue($queue, $storage, $redis, $eventBus);
@@ -101,13 +101,13 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
                 error_log($msg);
             }
 
-            // v3.4: 注入 TaskStorageInterface（cancelTasksByClass 用）
+            // 注入 TaskStorageInterface（cancelTasksByClass 用）
             if (!empty($config['v2_enabled'])) {
                 try {
                     $storage = $container->get(\Framework\Scheduler\Interfaces\TaskStorageInterface::class);
                     $taskManage->setTaskStorage($storage);
                 } catch (\Throwable $e) {
-                    // v2 储存层未注册时静默降级（不影响核心流程）
+                    // 储存层未注册时静默降级（不影响核心流程）
                 }
             }
 
@@ -121,21 +121,21 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
             try {
                 $coordinator = $container->get(WorkerCoordinator::class);
             } catch (\Throwable $e) {
-                // v2 未启用或配置关闭时允许缺失
+                // 未启用或配置关闭时允许缺失
             }
 
             $eventBus = null;
             try {
                 $eventBus = $container->get(EventBus::class);
             } catch (\Throwable $e) {
-                // v2 未启用或配置关闭时允许缺失
+                // 未启用或配置关闭时允许缺失
             }
 
             $recoveryEngine = null;
             try {
                 $recoveryEngine = $container->get(RecoveryEngine::class);
             } catch (\Throwable $e) {
-                // v2 未启用或配置关闭时允许缺失
+                // 未启用或配置关闭时允许缺失
             }
 
             return new \Framework\Scheduler\TaskExecutor(
@@ -143,9 +143,9 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
                 $container->get(RedisCache::class), // 注入 Redis 用于锁
                 $container->get(\Framework\Scheduler\Interfaces\TaskQueueInterface::class),
                 $container->get(\Framework\Scheduler\Logger::class), // 注入 Logger 单例
-                $eventBus, // C-3: 可观测性事件总线
-                $coordinator, // P0 #3: Worker 协调器心跳
-                $recoveryEngine // P1 #11 / v3.2: FPM 模式僵尸检测
+                $eventBus, // 可观测性事件总线
+                $coordinator, // Worker 协调器心跳
+                $recoveryEngine // FPM 模式僵尸检测
             );
         }, false, true);
 
@@ -160,7 +160,7 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
             return new \Framework\Scheduler\Jobs\CallbackJob(null, $httpCallback);
         }, false, false);
 
-        // ── 新增: v2 工业级服务注册（仅在配置启用时激活）──
+        // 工业级服务注册（仅在配置启用时激活）
         if (!empty($config['v2_enabled'])) {
             $this->registerV2Services($container, $config);
         }
@@ -170,21 +170,21 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
     }
 
     /**
-     * 注册 v2 工业级服务
+     * 注册 工业级服务
      *
      * @param Container $container
      * @param array     $config
      */
     private function registerV2Services(Container $container, array $config): void
     {
-        // ── EventBus 新增 Logger ──
+        // EventBus 新增 Logger
         $container->bind(EventBus::class, function (Container $c) {
             $logger = null;
             try { $logger = $c->get(\Framework\Scheduler\Logger::class); } catch (\Throwable $e) {}
             return new EventBus($c->get(RedisCache::class), $logger);
         }, true);
 
-        // ── CircuitBreaker 不变 ──
+        // CircuitBreaker 不变
         $container->bind(CircuitBreaker::class, function (Container $c) use ($config) {
             $cb = new CircuitBreaker($c->get(RedisCache::class));
             $cbCfg = $config['circuit_breaker'] ?? [];
@@ -197,7 +197,7 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
             return $cb;
         }, true);
 
-        // ── WorkerCoordinator 精简版（保持 Redis 心跳） ──
+        // WorkerCoordinator 精简版（保持 Redis 心跳）
         $container->bind(WorkerCoordinator::class, function (Container $c) use ($config) {
             $wc = new WorkerCoordinator($c->get(RedisCache::class));
             $wcCfg = $config['worker_coordinator'] ?? [];
@@ -208,8 +208,8 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
             return $wc;
         });
 
-        // ── v3.2 新增: 绑定 TaskStorageInterface 到 DatabaseTaskStorage ──
-        // v3.3: 注入 SchedulerTaskModel 替代 ProxyDriver
+        // 绑定 TaskStorageInterface 到 DatabaseTaskStorage
+        // 注入 SchedulerTaskModel 替代 ProxyDriver
         $container->bind(
             \Framework\Scheduler\Interfaces\TaskStorageInterface::class,
             function (Container $c) {
@@ -217,13 +217,14 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
                 try { $logger = $c->get(\Framework\Scheduler\Logger::class); } catch (\Throwable $e) {}
                 return new \App\Services\Scheduler\Storage\DatabaseTaskStorage(
                     $c->get(\App\Models\SchedulerTaskModel::class),
+                    $c->get(\Framework\Database\Interfaces\DatabaseInterface::class),
                     $logger
                 );
             }
         );
 
-        // ── v3.2 新增: 绑定 ZombieDetectorInterface 到 ZombieHandler ──
-        // v3.3: 注入 SchedulerTaskModel 替代 ProxyDriver
+        // 绑定 ZombieDetectorInterface 到 ZombieHandler
+        // 注入 SchedulerTaskModel 替代 ProxyDriver
         $container->bind(
             \Framework\Scheduler\Interfaces\ZombieDetectorInterface::class,
             function (Container $c) use ($config) {
@@ -247,12 +248,14 @@ class SchedulerServiceProvider implements \Framework\Providers\ServiceProviderIn
             try { $eventBus = $c->get(EventBus::class); } catch (\Throwable $e) {}
             $zombieDetector = null;
             try { $zombieDetector = $c->get(\Framework\Scheduler\Interfaces\ZombieDetectorInterface::class); } catch (\Throwable $e) {}
+            $redis = $c->get(RedisCache::class);
             return new RecoveryEngine(
                 $c->get(\Framework\Scheduler\Interfaces\TaskStorageInterface::class),
-                $c->get(RedisCache::class),
+                $redis,
                 $zombieDetector,
                 $logger,
-                $eventBus
+                $eventBus,
+                new \Framework\Scheduler\RedisTaskQueue($redis)
             );
         }, true);
     }

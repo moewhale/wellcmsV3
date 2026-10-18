@@ -21,14 +21,12 @@ class ExternalLinkRedirectController extends BaseController
         $target = RequestUtils::param('target', '');
         $url = base64_decode(rawurldecode($target), true);
 
-        // 1. 基础校验：解码失败或非URL格式
-        if (empty($url) || !filter_var($url, FILTER_VALIDATE_URL)) {
+        // 公开入口必须自行完成最终协议校验，不能依赖只在 UGC 渲染链运行的前置过滤。
+        if (empty($url) || !$this->isAllowedTargetUrl($url)) {
             return $this->errorMessage($this->language->get('error_param'), 400);
         }
 
-        // 2. 如果目标实际上是站内或白名单（配置变更导致），直接 302 跳转
-        // 注意：危险协议拦截已由 SafeHelper::filterUgcLinks() 作为唯一真实来源处理，
-        // 控制器层面不再重复检查。SafeHelper 负责在内容渲染时拦截，此处仅做站内判断。
+        // 如果目标实际上是站内或白名单（配置变更导致），直接 302 跳转。
         $linkService = $this->container->get(LinkService::class);
         if ($linkService->isInternal($url)) {
             $responseFactory = $this->container->get(\Framework\Http\Interfaces\ResponseFactoryInterface::class);
@@ -51,5 +49,34 @@ class ExternalLinkRedirectController extends BaseController
 
         $routeMeta = $request->getAttributes()['_route_meta'] ?? ['layout' => 'external_link_redirect'];
         return $this->render($routeMeta['layout'], $data, false);
+    }
+
+    /**
+     * 外链跳转页的最终目标白名单。
+     *
+     * filter_var() 只验证 URL 结构，会接受 javascript/file/data 等协议，
+     * 因此这里必须在直跳和模板输出前独立限定可点击协议。
+     */
+    private function isAllowedTargetUrl(string $url): bool
+    {
+        if ($url === '' || strlen($url) > 4096) {
+            return false;
+        }
+        if (preg_match('/[\\x00-\\x20\\x7f\\\\]/', $url)) {
+            return false;
+        }
+        if (filter_var($url, FILTER_VALIDATE_URL) === false) {
+            return false;
+        }
+
+        $parts = parse_url($url);
+        if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
+            return false;
+        }
+        if (isset($parts['user']) || isset($parts['pass'])) {
+            return false;
+        }
+
+        return in_array(strtolower((string)$parts['scheme']), ['http', 'https'], true);
     }
 }

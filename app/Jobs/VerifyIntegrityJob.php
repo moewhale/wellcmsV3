@@ -8,7 +8,8 @@ declare(strict_types=1);
 namespace App\Jobs;
 
 /**
- * 对于超大文件，提交后触发异步任务验证hash和size
+ * 按原始上传或已提交清洗产物的身份验证本地文件，不改写预期哈希和大小。
+ * 上传链路保护：本次变更由用户依据全链路修复文档明确授权；不得另行增加投递入口。
  */
 class VerifyIntegrityJob implements \Framework\Scheduler\Interfaces\JobInterface
 {
@@ -16,70 +17,68 @@ class VerifyIntegrityJob implements \Framework\Scheduler\Interfaces\JobInterface
     protected $fileStorageService;
     /** @var \Framework\Logger\LoggerInterface */
     protected $logger;
-    /** @var \App\Services\Storage\StorageManager */
-    protected $storageManager;
 
     // TaskExecutor 会通过 Container 自动注入这些依赖
     public function __construct(
         \App\Services\Storage\FileStorageService $fileStorageService,
-        \Framework\Logger\LoggerInterface $logger,
-        \App\Services\Storage\StorageManager $StorageManager
+        \Framework\Logger\LoggerInterface $logger
     ) {
         $this->fileStorageService = $fileStorageService;
         $this->logger = $logger;
-        $this->storageManager = $StorageManager;
     }
 
     public function handle(int $fileStorageId): array
     {
-        if (!$fileStorageId) {
+        if ($fileStorageId <= 0) {
             throw new \InvalidArgumentException("Missing File StorageId ID");
         }
+        return $this->fileStorageService->withFileProtection($fileStorageId, function () use ($fileStorageId): array {
+            return $this->verify($fileStorageId);
+        });
+    }
 
-        // 获取附件信息
-        $file = $this->fileStorageService->read(['id' => $fileStorageId]);
-        if (empty($file) || $file['cloud_type'] > 0) {
+    private function verify(int $fileStorageId): array
+    {
+        // 与清洗/发布共用对象保护；不能从延迟缓存拿旧产物身份。
+        $file = $this->fileStorageService->readOnMaster($fileStorageId);
+        if (empty($file)) {
             $this->logger->warning("VerifyIntegrityJob: File not found in DB", ['file_storage_id' => $fileStorageId]);
             return ['status' => 'skipped', 'reason' => 'db_not_found'];
         }
 
-        // 如果已经是绝对路径则直接使用，否则拼接 APP_PATH
-        $filePath = (strpos($file['path'], APP_PATH) === 0) ? $file['path'] : APP_PATH . $file['path'];
-
-        if (!file_exists($filePath)) {
-            $this->logger->error("VerifyIntegrityJob: File not found on disk", ['path' => $filePath]);
-            return ['status' => 'failed', 'reason' => 'file_missing'];
+        if ((int)($file['cloud_type'] ?? 0) > 0) {
+            return ['status' => 'skipped', 'reason' => 'cloud_storage'];
         }
 
-        try {
-            // 获取本地文件流
-            $filesize = (int)filesize($filePath);
-            //$filehashrRaw = hash_file('sha256', $filePath, true); // 32位二进制符串
-            $filehashrRaw = \Framework\Utils\FileHasher::sha256($filePath, 'raw'); // 32位二进制符串
-            if ($filehashrRaw === false) return ['status' => 'failed', 'reason' => 'operation_failed'];
+        // 主库读取已将数据库二进制哈希格式化为 hex；清洗后只验证已提交产物。
+        $cleaned = 1 === (int)($file['exif_cleaned'] ?? 0);
+        $expectedHash = (string)($file[$cleaned ? 'newhash' : 'filehash'] ?? '');
+        $expectedSize = (int)($file[$cleaned ? 'newsize' : 'filesize'] ?? -1);
+        if (!preg_match('/^[a-f0-9]{64}$/i', $expectedHash)
+            || strspn($expectedHash, '0') === 64
+            || $expectedSize < 0
+            || ($cleaned && $expectedSize === 0)) {
+            throw new \RuntimeException('VerifyIntegrityJob: Expected file identity is unavailable');
+        }
 
-            $update = [];
-            if ($filehashrRaw !== $file['filehash'] && $file['filesize'] && $filesize !== $file['filesize']) {
-                $update['is_reviewed'] = 2;
-                $update['review_note'] = 'The hash and size do not match; this is dangerous.';
-            } else {
-                $update['filesize'] = $filesize;
-                $update['filehash'] = $filehashrRaw;
-                // 可触发定时任务上传云储存
+        $filePath = $this->fileStorageService->resolveStoredFilePath((string)($file['path'] ?? ''));
+        clearstatcache(true, $filePath);
+        $filesize = filesize($filePath);
+        if ($filesize === false) {
+            throw new \RuntimeException('VerifyIntegrityJob: Failed to read file size');
+        }
+        $filehash = \Framework\Utils\FileHasher::sha256($filePath, 'hex');
+        if (!hash_equals(strtolower($expectedHash), $filehash) || $filesize !== $expectedSize) {
+            $note = 'File hash or size does not match the expected identity.';
+            if ((int)($file['is_reviewed'] ?? 0) !== 2 || (string)($file['review_note'] ?? '') !== $note) {
+                if ($this->fileStorageService->update($fileStorageId, ['is_reviewed' => 2, 'review_note' => $note]) <= 0) {
+                    throw new \RuntimeException('VerifyIntegrityJob: Failed to persist integrity rejection');
+                }
             }
-
-            $update['newhash'] = $filehashrRaw;
-            $update['newsize'] = $filesize;
-
-            $this->fileStorageService->update($fileStorageId, $update);
-
-            return ['status' => 'success', 'reason' => 'operation_successfully'];
-        } catch (\Exception $e) {
-            // 记录日志，等待重试
-            $this->logger->error("VerifyIntegrityJob Error: " . $e->getMessage());
+            throw new \RuntimeException('VerifyIntegrityJob: File integrity mismatch');
         }
 
-        return ['status' => 'failed', 'reason' => 'operation_successfully'];
+        return ['status' => 'success', 'reason' => 'operation_successfully'];
     }
 }
 

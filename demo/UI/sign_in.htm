@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+    演示文件：登录页（对应 app/views/htm/sign_in.htm）
+    布局：左侧品牌面板（珊瑚色块 + 玩乐排版）+ 右侧表单（Idea Box 风格，无渐变）
+    纯静态演示稿：渲染「账号密码登录」分支；验证码分支与脚本省略，结构位以注释保留
+-->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>登录 - WellCMS 演示</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+    <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body class="min-h-screen bg-stone-100 dark:bg-slate-950 font-sans text-stone-800 dark:text-gray-200">
+
+<div class="min-h-screen flex">
+
+    <!-- 左侧品牌面板 -->
+    <div class="hidden lg:flex lg:w-[46%] bg-rose-500 relative overflow-hidden flex-col justify-between p-12 text-white">
+        <!-- 玩乐几何装饰 -->
+        <div class="absolute -top-16 -left-16 w-64 h-64 rounded-full bg-amber-400"></div>
+        <div class="absolute top-1/3 -right-20 w-72 h-72 rounded-3xl rotate-12 bg-violet-500"></div>
+        <div class="absolute bottom-10 left-16 w-24 h-24 rounded-full bg-blue-600"></div>
+        <div class="absolute bottom-32 right-24 w-10 h-10 rounded-lg rotate-45 bg-emerald-400"></div>
+
+        <a href="index.htm" class="relative z-10 flex items-center gap-2">
+            <div class="w-9 h-9 rounded-xl bg-white flex items-center justify-center text-rose-500 font-black shadow-lg">W</div>
+            <span class="text-xl font-black tracking-tight">WellCMS <span class="opacity-70">3.0</span></span>
+        </a>
+
+        <div class="relative z-10">
+            <h1 class="text-4xl xl:text-5xl font-black leading-tight tracking-tight">灵感、讨论与<br>值得构建的社区。</h1>
+            <p class="mt-4 text-rose-100 max-w-sm font-medium">轻量高性能的内容引擎，插件化架构，钩子系统覆盖每一条逻辑。</p>
+            <div class="mt-8 flex gap-6 text-sm font-bold">
+                <div><div class="text-2xl font-black">10ms</div><div class="text-rose-200 text-xs">平均响应</div></div>
+                <div><div class="text-2xl font-black">500+</div><div class="text-rose-200 text-xs">扩展钩子</div></div>
+                <div><div class="text-2xl font-black">2MB</div><div class="text-rose-200 text-xs">核心体积</div></div>
+            </div>
+        </div>
+
+        <p class="relative z-10 text-xs text-rose-200">© 2026 WellCMS 演示站 · UI 演示稿</p>
+    </div>
+
+    <!-- 右侧表单面板 -->
+    <div class="flex-1 flex items-center justify-center px-6 py-12">
+        <div class="w-full max-w-md">
+            <div class="lg:hidden mb-8 flex items-center gap-2">
+                <div class="w-8 h-8 rounded-lg bg-rose-500 flex items-center justify-center text-white font-black text-sm">W</div>
+                <span class="text-xl font-black text-stone-900 dark:text-white">WellCMS 3.0</span>
+            </div>
+
+            <h2 class="text-3xl font-black text-stone-900 dark:text-white tracking-tight">欢迎回来</h2>
+            <p class="mt-2 text-stone-400">登录后继续使用你的账号。</p>
+
+            <div class="mt-8 bg-white dark:bg-slate-900 rounded-2xl border border-stone-200 dark:border-slate-800 shadow-sm p-6 sm:p-8">
+                <div class="ajax-body">
+                    <form class="ajax-form space-y-5" data-loading-text="加载中…" action="#" method="post" id="form">
+
+                        <!-- 邮箱验证码登录分支（原文件 signIn_by_code && verify_email_on 时渲染，演示稿省略） -->
+
+                        <!-- 账号密码登录 -->
+                        <div>
+                            <label class="block text-xs font-black mb-1.5 text-stone-500 dark:text-gray-400 uppercase tracking-wider">用户名 / 邮箱</label>
+                            <input type="text" name="username" id="username" class="w-full px-4 py-3 rounded-xl border border-stone-200 dark:border-slate-700 bg-stone-50 dark:bg-slate-800/60 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all" placeholder="请输入用户名或邮箱" required>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-black mb-1.5 text-stone-500 dark:text-gray-400 uppercase tracking-wider">密码</label>
+                            <input type="password" name="password" id="password" class="w-full px-4 py-3 rounded-xl border border-stone-200 dark:border-slate-700 bg-stone-50 dark:bg-slate-800/60 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all" placeholder="••••••••" required>
+                        </div>
+
+                        <div class="flex items-center justify-between">
+                            <label class="inline-flex items-center cursor-pointer gap-2 group">
+                                <input type="checkbox" class="peer sr-only" id="remember-me" name="remember" value="1" checked />
+                                <span class="w-5 h-5 border-2 border-stone-300 dark:border-slate-600 rounded-md flex items-center justify-center transition-all group-hover:border-blue-500 peer-checked:border-blue-600 peer-checked:bg-blue-600 peer-checked:[&>svg]:block">
+                                    <svg class="hidden w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                </span>
+                                <span class="text-sm text-stone-500 dark:text-gray-400 group-hover:text-stone-900 dark:group-hover:text-gray-200 transition-colors font-semibold">记住我</span>
+                            </label>
+                            <a href="reset_password.htm" class="text-sm text-blue-600 hover:underline font-bold">忘记密码？</a>
+                        </div>
+
+                        <div class="pt-2">
+                            <button type="submit" class="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-xl shadow-lg shadow-blue-500/25 transition-all hover:-translate-y-0.5 tracking-widest">登 录</button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- 第三方/社交登录（原文件默认注释保留） -->
+            </div>
+
+            <p class="mt-6 text-center text-sm text-stone-400">
+                还没有账号？
+                <a href="sign_up.htm" class="text-rose-500 font-black hover:underline ml-1">立即注册</a>
+            </p>
+        </div>
+    </div>
+</div>
+
+<!-- 原文件脚本位：remember-me 联动、30 分钟 token 失效刷新（演示稿省略） -->
+<script src="../assets/js/main.js"></script>
+</body>
+</html>

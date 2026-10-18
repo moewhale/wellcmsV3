@@ -7,6 +7,11 @@ declare(strict_types=1);
 
 namespace App\Services\Storage\Support;
 
+/*
+ * 上传链路保护（用户要求，2026-10-10；见根目录 AGENTS.md）：
+ * 未经用户明确授权，AI 禁止修改上传路径、URL、文件校验及临时/正式目录处理行为。
+ * 审计、重构、优化或修复测试均不构成授权，必须保留此备注。
+ */
 /** -----------------------------
  * 抽象：文件系统工具
  * - 分片目录、最终目录
@@ -47,6 +52,95 @@ class FileSystemHelper
             return $path;
         }
         return $appPath . DIRECTORY_SEPARATOR . ltrim($path, DIRECTORY_SEPARATOR . '\\');
+    }
+
+    /**
+     * 将路径解析为上传临时根中的普通文件。
+     */
+    public function resolveManagedTempFile(string $path): string
+    {
+        return $this->resolveRegularFileWithinRoot($path, (string)$this->cfg['upload_temp'], 'upload temp');
+    }
+
+    /**
+     * 将路径解析为正式存储根中的普通文件。
+     */
+    public function resolveStoredFile(string $path): string
+    {
+        return $this->resolveRegularFileWithinRoot($path, (string)$this->cfg['disks']['local']['root'], 'upload storage');
+    }
+
+    /** 恢复写入独立校验：目标可以不存在，受管根与现存父目录不得是符号链接。 */
+    public function resolveStoredTarget(string $path, bool $createParents = false): string
+    {
+        if ($path === '' || preg_match('/[\x00-\x1f\x7f]/', $path)) {
+            throw new \RuntimeException('Invalid upload storage target');
+        }
+        $root = $this->normalizePath((string)$this->cfg['disks']['local']['root']);
+        $realRoot = realpath($root);
+        if ($realRoot === false || is_link(rtrim($root, DIRECTORY_SEPARATOR))) {
+            throw new \RuntimeException('Invalid upload storage root');
+        }
+        $root = rtrim($root, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        $target = $this->normalizePath($path);
+        if (strpos($target, $root) !== 0) {
+            throw new \RuntimeException('Upload storage target is outside configured root');
+        }
+        $parts = explode(DIRECTORY_SEPARATOR, substr($target, strlen($root)));
+        $current = rtrim($realRoot, DIRECTORY_SEPARATOR);
+        $last = count($parts) - 1;
+        foreach ($parts as $index => $part) {
+            if ($part === '' || $part === '.' || $part === '..') {
+                throw new \RuntimeException('Invalid upload storage target segment');
+            }
+            $current .= DIRECTORY_SEPARATOR . $part;
+            if (is_link($current)) {
+                throw new \RuntimeException('Upload storage target symlink is not allowed');
+            }
+            if ($index === $last) {
+                if (file_exists($current) && !is_file($current)) {
+                    throw new \RuntimeException('Upload storage target is not a regular file');
+                }
+                continue;
+            }
+            if (!file_exists($current) && $createParents && !@mkdir($current, 0755) && !is_dir($current)) {
+                throw new \RuntimeException('Cannot create upload storage target directory');
+            }
+            if (file_exists($current) && (!is_dir($current) || realpath($current) !== $current)) {
+                throw new \RuntimeException('Invalid upload storage target directory');
+            }
+        }
+        return $current;
+    }
+
+    /**
+     * canonical 路径边界：拒绝不存在的文件、符号链接及配置根之外的目标。
+     */
+    private function resolveRegularFileWithinRoot(string $path, string $root, string $label): string
+    {
+        if ($path === '' || strpos($path, "\0") !== false) {
+            throw new \RuntimeException('Invalid ' . $label . ' path');
+        }
+
+        $normalizedPath = $this->normalizePath($path);
+        $normalizedRoot = $this->normalizePath($root);
+        $realPath = realpath($normalizedPath);
+        $realRoot = realpath($normalizedRoot);
+
+        if ($realPath === false || $realRoot === false || !is_file($realPath)) {
+            throw new \RuntimeException(ucfirst($label) . ' file does not exist');
+        }
+        if (is_link($normalizedPath)) {
+            throw new \RuntimeException(ucfirst($label) . ' symlink is not allowed');
+        }
+
+        $realPath = rtrim($realPath, DIRECTORY_SEPARATOR);
+        $rootPrefix = rtrim($realRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if (strpos($realPath . DIRECTORY_SEPARATOR, $rootPrefix) !== 0) {
+            throw new \RuntimeException(ucfirst($label) . ' path is outside configured root');
+        }
+
+        return $realPath;
     }
 
 
@@ -102,17 +196,47 @@ class FileSystemHelper
 
     public function dailyFinalTmpDir(?string $namespace = null)
     {
+        $tempRoot = rtrim(
+            $this->normalizePath($this->cfg['upload_temp']),
+            DIRECTORY_SEPARATOR
+        );
+
         if ($namespace !== null && $namespace !== '') {
-            $d = $this->normalizePath($this->cfg['upload_temp'])
-                . $namespace . DIRECTORY_SEPARATOR
+            $segments = explode('/', $namespace);
+            foreach ($segments as $segment) {
+                if (
+                    $segment === ''
+                    || $segment === '.'
+                    || $segment === '..'
+                    || strpos($segment, '\\') !== false
+                    || strpos($segment, "\0") !== false
+                ) {
+                    throw new \InvalidArgumentException('上传 namespace 包含非法路径段');
+                }
+            }
+
+            $d = $tempRoot . DIRECTORY_SEPARATOR
+                . implode(DIRECTORY_SEPARATOR, $segments) . DIRECTORY_SEPARATOR
                 . date($this->cfg['attach_dir_save_rule'] ?? 'Ym')
                 . DIRECTORY_SEPARATOR;
         } else {
-            $d = $this->normalizePath($this->cfg['upload_temp'])
+            $d = $tempRoot . DIRECTORY_SEPARATOR
                 . date($this->cfg['attach_dir_save_rule'] ?? 'Ym')
                 . DIRECTORY_SEPARATOR;
         }
+
         $this->ensureDir($d);
+
+        // 创建后按 canonical 路径复核，阻止 namespace 中的符号链接逃逸临时根。
+        $realRoot = realpath($tempRoot);
+        $realDir = realpath($d);
+        if ($realRoot !== false && $realDir !== false) {
+            $rootPrefix = rtrim($realRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+            if (strpos(rtrim($realDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR, $rootPrefix) !== 0) {
+                throw new \RuntimeException('上传 namespace 目录超出临时目录范围');
+            }
+        }
+
         return $d;
     }
 
@@ -125,7 +249,7 @@ class FileSystemHelper
      */
     public function fileUrl($path): array
     {
-        // [修改] 使用 uploadDir 的绝对路径作为根，避免将绝对路径 ltrim 成假相对路径导致 URL 错误泄露
+        // 使用 uploadDir 的绝对路径作为根，避免将绝对路径 ltrim 成假相对路径导致 URL 错误泄露
         // /www/wwwroot/wellcms/storage/upload
         $absUploadRoot = realpath($this->normalizePath($this->cfg['disks']['local']['root']));
 
@@ -169,9 +293,20 @@ class FileSystemHelper
         return $mimeType ?: false;
     }
 
+    /**
+     * 分片/粗查阶段的危险 MIME 拦截（仅可执行代码与 Windows 可执行）。
+     *
+     * 注意：这是分片阶段的粗略检查（.part 无扩展名，finfo 按内容识别）。
+     * html/js 有正当附件业务且可安全分发，交由完整文件阶段的 needsReview() 待审分流；
+     * svg（image/svg+xml）已从 allowed_mimes 白名单移除，由 isDangerousFile() 的
+     * 内容-白名单一致性校验拦截，此处不再需要 'xml' 子串误伤。
+     *
+     * @param string $mime
+     * @return bool
+     */
     public function blockDangerous(string $mime): bool{
         $m = mb_strtolower($mime);
-        $dangerous = ['php', 'x-php', 'javascript', 'x-javascript', 'html', 'xhtml', 'xml'];
+        $dangerous = ['php', 'x-msdownload', 'x-dosexec'];
         foreach ($dangerous as $d) {
             if (strpos($m, $d) !== false) return true;
         }
@@ -321,21 +456,43 @@ class FileSystemHelper
      * @param string $tempPath 临时文件路径
      * @return array [newPath, newUrl]
      */
-    public function promoteFile(string $tempPath): array
+    public function promoteFile(string $tempPath, bool $preserveSource = false): array
     {
-        $tempPath = $this->normalizePath($tempPath);
-        if (!file_exists($tempPath)) {
-            throw new \RuntimeException('Temporary file does not exist: ' . $tempPath);
-        }
+        // 必须使用 canonical 临时根内的普通文件，禁止路径遍历和外指符号链接。
+        $tempPath = $this->resolveManagedTempFile($tempPath);
 
         // 1. 生成正式目录 Ym 格式
         $finalDir = $this->dailyFinalDir();
         $filename = basename($tempPath);
         $newPath = $finalDir . $filename;
+        if (file_exists($newPath)) {
+            throw new \RuntimeException('Formal storage target already exists: ' . $newPath);
+        }
 
-        // 2. 物理移动
-        if (!rename($tempPath, $newPath)) {
-            throw new \RuntimeException('Failed to move file from temp to formal storage (from ' . $tempPath . ' to ' . $newPath . ')');
+        // 事务绑定保留临时源至提交确认；既有其他调用方仍保持 move 语义。
+        if ($preserveSource) {
+            $source = fopen($tempPath, 'rb');
+            $target = fopen($newPath, 'x+b');
+            if (!is_resource($source) || !is_resource($target)) {
+                if (is_resource($source)) fclose($source);
+                if (is_resource($target)) { fclose($target); unlink($newPath); }
+                throw new \RuntimeException('Cannot prepare promoted file copy');
+            }
+            try {
+                $copied = stream_copy_to_stream($source, $target);
+                if ($copied === false || $copied !== filesize($tempPath) || !fflush($target)) {
+                    throw new \RuntimeException('Incomplete promoted file copy');
+                }
+            } catch (\Throwable $error) {
+                fclose($source);
+                fclose($target);
+                unlink($newPath);
+                throw $error;
+            }
+            fclose($source);
+            fclose($target);
+        } elseif (!rename($tempPath, $newPath)) {
+            throw new \RuntimeException('Failed to move file from temp to formal storage');
         }
 
         // 3. 生成正式 URL

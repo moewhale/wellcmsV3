@@ -59,8 +59,9 @@ class Kernel implements \Framework\Http\Interfaces\KernelInterface
                 }
             });
 
-            // 4. 执行并返回响应
-            return $pipeline->handle($request);
+            // 会话等中间件完成写入后，再刷新页面底部 SQL；必须在 Collector 清理之前。
+            $response = $pipeline->handle($request);
+            return defined('DEBUG') && \DEBUG > 1 ? DebugSqlRenderer::render($response) : $response;
         } finally {
             // 清理现场
             \Framework\Database\Collector\QueryCollector::clear();

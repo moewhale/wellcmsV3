@@ -231,20 +231,19 @@ class IndexController extends BaseController
             $message = $cache->get('official-message');
         }
 
-        // 生成 CSRF 令牌供 processUpgrade 链接使用（GET 请求通过 _csrf_token 查询参数校验）
+        // 生成 CSRF 令牌供 processUpgrade POST form body 使用。
         $user = $request->getAttribute('user', []);
         $csrfToken = empty($user['salt']) ? '' : $this->getCsrfToken($user['salt']);
 
         return $this->renderCheckPage($routeMeta['layout'], [
-            'upgrade_url' => $this->urlGenerator->url('admin/process/upgrade', $csrfToken ? ['_csrf_token' => $csrfToken] : []),
+            'upgrade_url' => $this->urlGenerator->url('admin/process/upgrade'),
             'upgrade_id' => $settingConfig['upgrade_id'] ?? '',
             'software_version' => $settingConfig['version'] ?? '',
             'official_version' => $settingConfig['official_version'] ?? '',
             'official_message' => $message,
             'upgrade' => $settingConfig['upgrade'] ?? 0,
-            // upgrade_available 与 process_upgrade 为模板遗留兼容字段，均指向 upgrade
+            // upgrade_available 指向 upgrade
             'upgrade_available' => $settingConfig['upgrade'] ?? 0,
-            'process_upgrade' => $settingConfig['upgrade'] ?? 0,
             '_csrf_token' => $csrfToken,
         ]);
     }
@@ -256,17 +255,6 @@ class IndexController extends BaseController
      */
     public function processUpgrade(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
-        // CSRF 保护：验证查询参数中的 _csrf_token（GET 请求避免大文件下载超时）
-        $user = $request->getAttribute('user', []);
-        $token = $request->getQueryParams()['_csrf_token'];
-        if (!$token || !$this->verifyCsrfToken($token, $user['salt'] ?? '')) {
-            throw new \App\Exception\UpgradeException(
-                $this->language->get('request_method_error'),
-                16,
-                $this->urlGenerator->url('admin/check/upgrade')
-            );
-        }
-
         $kv = $this->container->get(KeyValueService::class);
         $settingConfig = $kv->settingGet('config');
 
@@ -425,8 +413,17 @@ class IndexController extends BaseController
         ];
     }
 
-    public function systemInfo(): void{
+    public function systemInfo(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
+    {
+        ob_start();
         phpinfo();
+        $content = (string)ob_get_clean();
+
+        $responseFactory = $this->container->get(ResponseFactoryInterface::class);
+        $response = $responseFactory->createResponse(200)
+            ->withHeader('Content-Type', 'text/html; charset=utf-8');
+        $response->getBody()->write($content);
+        return $response;
     }
 
     // hook app_Controllers_Admin_IndexController_end.php

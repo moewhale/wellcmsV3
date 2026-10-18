@@ -9,6 +9,7 @@ namespace App\Services\System;
 
 use Framework\Utils\Validator;
 use Framework\Exception\BusinessException;
+use Framework\Exception\Infra\DatabaseException;
 
 class LogService
 {
@@ -40,8 +41,7 @@ class LogService
 
         $result = $this->dbModel->insert($data);
         if (!$result) {
-            $timeFormat = date('Y-m-d H:i:s');
-            throw new BusinessException('LogService - Time:' . $timeFormat . ' / insert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            throw new DatabaseException('LogService -> insert(): data writing failed');
         }
 
         // hook app_Services_LogService_insert_end.php
@@ -58,8 +58,7 @@ class LogService
 
         $result = $this->dbModel->bulkInsert($data);
         if (!$result) {
-            $timeFormat = date('Y-m-d H:i:s');
-            throw new BusinessException('LogService - Time:' . $timeFormat . ' / bulkInsert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            throw new DatabaseException('LogService -> bulkInsert(): data writing failed');
         }
 
         // hook app_Services_LogService_bulkInsert_end.php
@@ -78,8 +77,7 @@ class LogService
 
         $result = $this->dbModel->update(['id' => $logid], $update);
         if ($result === 0) {
-            $timeFormat = date('Y-m-d H:i:s');
-            throw new BusinessException('LogService - Time:' . $timeFormat . ' / update() update failed : ' . json_encode(['id' => $logid, 'update' => $update], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            throw new BusinessException('LogService -> update(): update failed');
         }
 
         // hook app_Services_LogService_update_end.php
@@ -96,8 +94,7 @@ class LogService
 
         $result = $this->dbModel->bulkUpdate($update, $keyColumn, $wheres);
         if ($result === 0) {
-            $timeFormat = date('Y-m-d H:i:s');
-            throw new BusinessException('LogService - Time:' . $timeFormat . ' / bulkUpdate() update failed : ' . json_encode($update, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            throw new BusinessException('LogService -> bulkUpdate(): update failed');
         }
 
         // hook app_Services_LogService_bulkUpdate_end.php

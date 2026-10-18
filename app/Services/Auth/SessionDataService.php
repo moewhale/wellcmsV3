@@ -8,7 +8,7 @@ declare(strict_types=1);
 namespace App\Services\Auth;
 
 use Framework\Utils\Validator;
-use Framework\Exception\BusinessException;
+use Framework\Exception\Infra\DatabaseException;
 
 class SessionDataService
 {
@@ -30,7 +30,7 @@ class SessionDataService
         if (isset($data['id'])) $data['id'] = hex2bin($data['id']);
 
         $result = $this->dbModel->insert($data);
-        if (!$result) throw new BusinessException('SessionDataService -> insert(): Data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        if (!$result) throw new DatabaseException('SessionDataService -> insert(): data writing failed');
 
         // hook app_Services_SessionDataService_insert_end.php
 
@@ -54,7 +54,7 @@ class SessionDataService
         unset($item);
 
         $result = $this->dbModel->bulkInsert($data);
-        if (!$result) throw new BusinessException('SessionDataService -> bulkInsert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        if (!$result) throw new DatabaseException('SessionDataService -> bulkInsert(): data writing failed');
 
         // hook app_Services_SessionDataService_bulkInsert_end.php
 

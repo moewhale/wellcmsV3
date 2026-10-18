@@ -34,8 +34,8 @@ class RoundRobinLoadBalancer implements \Framework\Database\Pool\LoadBalancer\Lo
         $ctx = self::coroContext();
         if ($ctx !== null) {
             $key = $this->getContextKey('index');
-            $index = $ctx->$key ?? 0;
-            $ctx->$key = ($index + 1) % $count;
+            $index = $ctx[$key] ?? 0;
+            $ctx[$key] = ($index + 1) % $count;
         } else {
             $index = $this->index % $count;
             $this->index = ($index + 1) % $count;
@@ -57,7 +57,7 @@ class RoundRobinLoadBalancer implements \Framework\Database\Pool\LoadBalancer\Lo
         $key = $this->getContextKey('node_weights');
         $nodeWeights = [];
         if ($ctx !== null) {
-            $nodeWeights = $ctx->$key ?? [];
+            $nodeWeights = $ctx[$key] ?? [];
         } else {
             $nodeWeights = $this->nodeWeights;
         }
@@ -76,7 +76,7 @@ class RoundRobinLoadBalancer implements \Framework\Database\Pool\LoadBalancer\Lo
         }
 
         if ($ctx !== null) {
-            $ctx->$key = $nodeWeights;
+            $ctx[$key] = $nodeWeights;
         } else {
             $this->nodeWeights = $nodeWeights;
         }

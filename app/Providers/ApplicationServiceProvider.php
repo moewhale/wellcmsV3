@@ -68,7 +68,7 @@ class ApplicationServiceProvider implements \Framework\Providers\ServiceProvider
                 (bool)(\defined('DEBUG') ? \DEBUG : 0),
                 $errorConfig
             );
-        }, true, false);
+        }, true, true);
 
         // 3. Session 管理系统 (单例注入并提前锁定配置)
         $container->bind(\App\Session\Handler\DatabaseSessionHandler::class, \App\Session\Handler\DatabaseSessionHandler::class, true, false);
@@ -122,32 +122,48 @@ class ApplicationServiceProvider implements \Framework\Providers\ServiceProvider
         }, true, true);
 
         $container->bind(\App\Services\Storage\StorageManager::class, \App\Services\Storage\StorageManager::class, true, false);
-        $container->bind(\App\Services\Storage\UploadService::class, \App\Services\Storage\UploadService::class, false, false);
+        $container->bind(\App\Services\Storage\UploadService::class, static function ($container, array $params) {
+            $service = $container->make(\App\Services\Storage\UploadService::class, $params);
+            $request = $container->get(\Framework\Http\Interfaces\ServerRequestInterface::class);
+            if ($request !== null) $service->captureContext($request);
+            return $service;
+        }, false, true);
 
         $container->bind(\Framework\Session\SessionInterface::class, function ($container) {
             $request = $container->get(\Framework\Http\Interfaces\ServerRequestInterface::class);
             return $request ? $request->getAttribute(\Framework\Session\SessionInterface::class) : null;
         }, false, true);
 
-        $container->bind(\App\Services\System\MenuService::class, \App\Services\System\MenuService::class, false, false);
+        $container->bind(\App\Services\System\MenuService::class, static function ($container, array $params) {
+            return $container->make(\App\Services\System\MenuService::class, $params);
+        }, false, true);
 
-        // 5. 自动升级系统服务 (主程序集成)
-        $container->bind(\App\Services\Upgrade\Downloader::class, \App\Services\Upgrade\Downloader::class, true, false);
-
-        $container->bind(\App\Services\Upgrade\Deployer::class, \App\Services\Upgrade\Deployer::class, true, false);
-        $container->bind(\App\Services\Upgrade\ScriptRunner::class, \App\Services\Upgrade\ScriptRunner::class, true, false);
-        $container->bind(\App\Services\Upgrade\UpgradeService::class, \App\Services\Upgrade\UpgradeService::class, true, false);
-
-        // 6. 官方商店与扩展管理系统
-        $container->bind(\App\Services\Market\MarketClient::class, \App\Services\Market\MarketClient::class, true, false);
-        $container->bind(\App\Services\Market\RetryPolicy::class, \App\Services\Market\RetryPolicy::class, true, false);
-        $container->bind(\App\Services\Market\MarketCircuitBreaker::class, \App\Services\Market\MarketCircuitBreaker::class, true, false);
-        $container->bind(\App\Services\Market\MarketFallbackService::class, \App\Services\Market\MarketFallbackService::class, true, false);
-        $container->bind(\App\Services\Extension\ExtensionInstaller::class, \App\Services\Extension\ExtensionInstaller::class, true, false);
-        $container->bind(\App\Services\Extension\ExtensionManager::class, \App\Services\Extension\ExtensionManager::class, false, false);
+        // 5/6. 升级、商店与扩展管理按需创建真实对象，普通页面不预加载这组依赖。
+        // 使用闭包延迟工厂，保留构造函数类型约束及原有单例/多例规则。
+        // Swoole 只在启动时预热一次，保留其首次协程请求前的初始化时序。
+        $deferManagement = !defined('SWOOLE_MODE') || !\SWOOLE_MODE;
+        $managementServices = [
+            \App\Services\Upgrade\Downloader::class => true,
+            \App\Services\Upgrade\Deployer::class => true,
+            \App\Services\Upgrade\ScriptRunner::class => true,
+            \App\Services\Upgrade\UpgradeService::class => true,
+            \App\Services\Market\MarketClient::class => true,
+            \App\Services\Market\RetryPolicy::class => true,
+            \App\Services\Market\MarketCircuitBreaker::class => true,
+            \App\Services\Market\MarketFallbackService::class => true,
+            \Framework\Utils\HttpClient::class => true,
+            \App\Services\Extension\ExtensionInstaller::class => true,
+            \App\Services\Extension\ExtensionOperationTokenService::class => true,
+            \App\Services\Extension\ExtensionManager::class => false,
+        ];
+        foreach ($managementServices as $service => $singleton) {
+            $container->bind($service, static function ($container, array $params) use ($service) {
+                return $container->make($service, $params);
+            }, $singleton, $deferManagement);
+        }
 
         // 7. 数据库分区管理器
-        // ——— PartitionDialectInterface（新增）———
+        // PartitionDialectInterface
         $container->bind(
             \Framework\Database\Partition\PartitionDialectInterface::class,
             function ($c) {
@@ -177,7 +193,7 @@ class ApplicationServiceProvider implements \Framework\Providers\ServiceProvider
             true    // defer: 延迟实例化
         );
 
-        // ——— PartitionManager（修改：新增 $dialect）———
+        // PartitionManager
         $container->bind(
             \Framework\Database\Partition\PartitionManager::class,
             function ($c) {
@@ -210,7 +226,7 @@ class ApplicationServiceProvider implements \Framework\Providers\ServiceProvider
             true
         );
 
-        // ——— PartitionRegistry（修改：新增 $dialect）———
+        // PartitionRegistry
         $container->bind(
             \Framework\Database\Partition\PartitionRegistry::class,
             function ($c) {

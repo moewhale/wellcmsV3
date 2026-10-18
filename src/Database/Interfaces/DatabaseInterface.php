@@ -9,6 +9,15 @@ namespace Framework\Database\Interfaces;
 
 use PDO;
 
+/**
+ * 可选能力 (duck-typing)：事务成功提交/回滚后的副作用回调。
+ *
+ * 故意不定义为接口方法，避免强制第三方驱动与测试 fake 实现。
+ * 调用方必须先 method_exists($db, 'afterCommit') 探测再调用。
+ *
+ * @method void afterCommit(callable $callback) 注册事务成功提交后的副作用；无活动事务时立即执行
+ * @method void afterRollback(callable $callback) 注册事务最终回滚后的补偿；无活动事务时不保留
+ */
 interface DatabaseInterface
 {
     public function connect(string $role = 'master', string $shard = ''): PDO;
@@ -74,6 +83,9 @@ interface DatabaseInterface
     public function transaction(callable $callback, int $maxAttempts = 3, string $shard = '');
 
     // --- 分片 & 隔离级别 ---
+    /** 解析表的数据库节点；分区元数据和 DDL 使用与 CRUD 相同的路由。 */
+    public function resolveShard(string $table, array $context = []): string;
+
     public function setIsolationLevel(string $level, string $shard = ''): void;
 
     /** 获取数据库服务器版本 */

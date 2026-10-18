@@ -180,9 +180,9 @@ class TaskExecutor
 
         $this->log("Task {$task->id} starts executing, P={$task->priority}, R={$task->retryCount}");
 
-        // 在调用任务前释放幂等锁，确保 handle() 中的 createTask() 自调度能成功
+        // 在调用任务前仅释放属于当前 taskId 的 claim，确保自调度可安全续链。
         if (!empty($task->dedupeKey)) {
-            $this->redis->del('scheduler:dedupe:' . $task->dedupeKey);
+            $this->releaseDedupeClaim($task);
         }
 
         try {
@@ -197,8 +197,12 @@ class TaskExecutor
                     $task->error = $errorMsg;
                 }
             } else {
-                $this->invokeCallback($task);
-                $success = true;
+                $jobResult = $this->invokeCallback($task);
+                $success = $this->isSuccessfulJobResult($jobResult);
+                if (!$success) {
+                    $errorMsg = 'Job reported dispatch failure';
+                    $task->error = $errorMsg;
+                }
             }
         } catch (\Throwable $ex) {
             $errorMsg = $ex->getMessage();
@@ -254,6 +258,52 @@ class TaskExecutor
         // 幂等锁已在 invokeCallback 前释放，此处不再重复删除
     }
 
+    private function releaseDedupeClaim(\Framework\Scheduler\Task $task): void
+    {
+        $key = 'scheduler:dedupe:' . $task->dedupeKey;
+        try {
+            $stored = $this->redis->get($key, null);
+            $decoded = \Framework\Scheduler\TaskDedupeClaim::decode($stored);
+            if ($decoded !== null && $decoded['taskId'] === $task->id) {
+                $claim = \Framework\Scheduler\TaskDedupeClaim::encode(
+                    $decoded['taskId'],
+                    (int)$decoded['claimedAt']
+                );
+                $this->redis->compareDelete($key, $claim);
+                return;
+            }
+
+            if (!\Framework\Scheduler\TaskDedupeClaim::isLegacy($stored)) {
+                return;
+            }
+
+            $raw = $this->redis->hGet('scheduler:queue:hash', $task->id);
+            $payload = is_string($raw) ? json_decode($raw, true) : null;
+            if (is_array($payload)
+                && ($payload['id'] ?? '') === $task->id
+                && (string)($payload['dedupeKey'] ?? '') === $task->dedupeKey
+            ) {
+                $this->redis->compareDelete($key, $stored);
+            }
+        } catch (\Throwable $e) {
+            $this->log(
+                'Task ' . $task->id . ' dedupe claim release failed: ' . $e->getMessage(),
+                'WARNING'
+            );
+        }
+    }
+
+    private function isSuccessfulJobResult($result): bool
+    {
+        if ($result === false) {
+            return false;
+        }
+
+        return !is_array($result)
+            || ($result['status'] ?? '') !== 'error'
+            || !array_key_exists('outcome', $result);
+    }
+
     /**
      * #3 修复: 暴露队列引用（Swoole runLoopAsync 需要）
      * @return \Framework\Scheduler\Interfaces\TaskQueueInterface
@@ -306,8 +356,8 @@ class TaskExecutor
             try {
                 // 子进程必须重建 Redis 连接，避免继承父进程 Socket FD 导致数据错乱
                 $this->redis->reconnect();
-                $this->invokeCallback($task);
-                exit(0);
+                $jobResult = $this->invokeCallback($task);
+                exit($this->isSuccessfulJobResult($jobResult) ? 0 : 1);
             } catch (\Throwable $e) {
                 // 写入 STDERR，便于 Supervisor 捕获日志
                 fwrite(STDERR, "Child Process Exception: " . $e->getMessage() . PHP_EOL);

@@ -198,8 +198,8 @@ class MemcachedCache implements \Framework\Cache\Interfaces\CacheInterface
         return $this->prefix;
     }
 
-    /** 统一执行：连接池 or 直连，并支持一次自动重试断线 */
-    private function run(callable $runner)
+    /** 写入/状态命令默认禁止透明重放，纯读取由 runRead() 显式放行。 */
+    private function run(callable $runner, bool $retrySafe = false)
     {
         $attempts = 0;
         while (true) {
@@ -214,7 +214,7 @@ class MemcachedCache implements \Framework\Cache\Interfaces\CacheInterface
                 $resCode = ($this->withConn === null && $this->mc instanceof \Memcached) ? $this->mc->getResultCode() : 0;
 
                 // 如果是连接断开相关错误，且是第一次尝试，则重试
-                if ($attempts < 2 && (
+                if ($retrySafe && $attempts < 2 && (
                     $resCode === \Memcached::RES_CONNECTION_FAILURE ||
                     $resCode === \Memcached::RES_SERVER_ERROR ||
                     strpos($msg, 'lost') !== false ||
@@ -227,6 +227,12 @@ class MemcachedCache implements \Framework\Cache\Interfaces\CacheInterface
         }
     }
 
+    /** 纯读取命令的一次断线恢复入口。 */
+    private function runRead(callable $runner)
+    {
+        return $this->run($runner, true);
+    }
+
     /**
      * 一、缓存基础方法 （Memcached）
      *
@@ -236,7 +242,7 @@ class MemcachedCache implements \Framework\Cache\Interfaces\CacheInterface
      **/
     public function get(string $key, $default = null)
     {
-        return $this->run(function ($mc) use ($key, $default) {
+        return $this->runRead(function ($mc) use ($key, $default) {
             $fullKey = $this->withPrefix($key);
             $val = $mc->get($fullKey);
             if ($val === false && $mc->getResultCode() === Memcached::RES_NOTFOUND) {
@@ -333,7 +339,7 @@ class MemcachedCache implements \Framework\Cache\Interfaces\CacheInterface
      **/
     public function getMulti(array $keys, $default = null): array
     {
-        return $this->run(function ($mc) use ($keys, $default) {
+        return $this->runRead(function ($mc) use ($keys, $default) {
             $result = [];
             if (empty($keys)) return $result;
             $fullKeys = array_map([$this, 'withPrefix'], $keys);
@@ -373,13 +379,15 @@ class MemcachedCache implements \Framework\Cache\Interfaces\CacheInterface
 
     public function deleteMulti(array $keys): int
     {
+        if (empty($keys)) return 0;
         return $this->run(function ($mc) use ($keys) {
-            if (empty($keys)) return 0;
             $fullKeys = array_map([$this, 'withPrefix'], $keys);
             $res = $mc->deleteMulti($fullKeys);
-            // Memcached::deleteMulti 返回删除成功的数组或布尔，统计成功数量
-            if (is_array($res)) return count($res);
-            return $res ? count($keys) : 0;
+            $count = 0;
+            foreach ($res as $status) {
+                if ($status === true) ++$count;
+            }
+            return $count;
         });
     }
 
@@ -395,7 +403,7 @@ class MemcachedCache implements \Framework\Cache\Interfaces\CacheInterface
      **/
     public function exists(string $key): bool
     {
-        return $this->run(function ($mc) use ($key) {
+        return $this->runRead(function ($mc) use ($key) {
             $val = $mc->get($this->withPrefix($key));
             return !($val === false && $mc->getResultCode() === Memcached::RES_NOTFOUND);
         });
@@ -403,7 +411,7 @@ class MemcachedCache implements \Framework\Cache\Interfaces\CacheInterface
 
     public function stats(): ?array
     {
-        return $this->run(function ($mc) {
+        return $this->runRead(function ($mc) {
             $st = $mc->getStats();
             return is_array($st) ? $st : null;
         });
@@ -411,7 +419,7 @@ class MemcachedCache implements \Framework\Cache\Interfaces\CacheInterface
 
     public function version(): ?array
     {
-        return $this->run(function ($mc) {
+        return $this->runRead(function ($mc) {
             $ver = $mc->getVersion();
             return is_array($ver) ? $ver : null;
         });
@@ -587,7 +595,7 @@ class MemcachedCache implements \Framework\Cache\Interfaces\CacheInterface
             }
         }
 
-        return $this->run(function ($mc) use ($resource) {
+        return $this->runRead(function ($mc) use ($resource) {
             $val = $mc->get($resource);
             return !($val === false && $mc->getResultCode() === Memcached::RES_NOTFOUND);
         });

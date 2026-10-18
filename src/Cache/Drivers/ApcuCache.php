@@ -56,6 +56,13 @@ class ApcuCache implements \Framework\Cache\Interfaces\CacheInterface
         return apcu_delete($fullKey);
     }
 
+    public function deleteMulti(array $keys): int
+    {
+        if (empty($keys)) return 0;
+        $failed = apcu_delete(array_map([$this, 'withPrefix'], $keys));
+        return count($keys) - count($failed);
+    }
+
     public function increment(string $key, int $step = 1, int $ttl = 0)
     {
         $fullKey = $this->getCacheKey($this->prefix . $key);

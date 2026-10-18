@@ -21,6 +21,10 @@ class WellRTE {
       ...options,
     };
 
+    // 上传保护：只映射服务端已授权的文件地址，源码和提交始终使用稳定 URL。
+    this.fileUrlMap = Object.assign(Object.create(null), JSON.parse(this.sourceEl.dataset.fileUrlMap || "{}"));
+    this.fileSourceMap = Object.create(null);
+    Object.keys(this.fileUrlMap).forEach((stable) => { this.fileSourceMap[this.fileUrlMap[stable]] = stable; });
     this.editorId = "rte_" + Math.random().toString(36).substr(2, 9);
     this.mentionTimer = null;
     this.mentionDebounceTimer = null;
@@ -87,7 +91,7 @@ class WellRTE {
 
     // 3. Initialize Content
     this.sourceEl.placeholder = this.options.placeholder;
-    this.editorEl.innerHTML = this.sourceEl.value || "";
+    this.editorEl.innerHTML = this.mapFileUrls(this.sourceEl.value || "", true);
 
     // 4. Bind Basic Events
     this.bindEvents();
@@ -2721,9 +2725,39 @@ class WellRTE {
     this.updateSource();
   }
 
+  // 同一节点规则用于视觉/源码切换；代码中的示例 URL 不参与替换。
+  mapFileUrls(html, display) {
+    const mapping = display ? this.fileUrlMap : this.fileSourceMap;
+    if (!Object.keys(mapping).length) return html;
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    template.content.querySelectorAll("img[src], a[href]").forEach((node) => {
+      if (node.closest("pre, code, script, style")) return;
+      const attribute = node.tagName === "IMG" ? "src" : "href";
+      const url = node.getAttribute(attribute);
+      if (Object.prototype.hasOwnProperty.call(mapping, url)) node.setAttribute(attribute, mapping[url]);
+    });
+    return template.innerHTML;
+  }
+
+  registerFileDisplayUrl(stable, preview) {
+    if (typeof stable !== "string" || typeof preview !== "string" || !stable || stable === preview) return;
+    if (this.fileUrlMap[stable]) delete this.fileSourceMap[this.fileUrlMap[stable]];
+    this.fileUrlMap[stable] = preview;
+    this.fileSourceMap[preview] = stable;
+  }
+
   updateSource() {
     if (!this.sourceEl.classList.contains("hidden")) return; // In source mode, don't sync back yet
-    this.sourceEl.value = this.sanitizeHtml(this.editorEl.innerHTML);
+    this.sourceEl.value = this.mapFileUrls(this.sanitizeHtml(this.editorEl.innerHTML), false);
+    if (Object.keys(this.fileUrlMap).length) {
+      this.editorEl.querySelectorAll("img[src], a[href]").forEach((node) => {
+        if (node.closest("pre, code, script, style")) return;
+        const attribute = node.tagName === "IMG" ? "src" : "href";
+        const stable = node.getAttribute(attribute);
+        if (this.fileUrlMap[stable]) node.setAttribute(attribute, this.fileUrlMap[stable]);
+      });
+    }
     this.syncMentionInputs();
   }
 
@@ -2737,13 +2771,13 @@ class WellRTE {
     const btn = this.wrapper.querySelector("#rte-btn-source");
     if (this.sourceEl.classList.contains("hidden")) {
       // Switch to Source
-      this.sourceEl.value = this.sanitizeHtml(this.editorEl.innerHTML);
+      this.sourceEl.value = this.mapFileUrls(this.sanitizeHtml(this.editorEl.innerHTML), false);
       this.editorEl.classList.add("hidden");
       this.sourceEl.classList.remove("hidden");
       btn.classList.add("bg-purple-100", "text-purple-700");
     } else {
       // Switch to Visual
-      this.editorEl.innerHTML = this.sourceEl.value; // Trust source (or sanitize again?)
+      this.editorEl.innerHTML = this.mapFileUrls(this.sourceEl.value, true);
       this.sourceEl.classList.add("hidden");
       this.editorEl.classList.remove("hidden");
       btn.classList.remove("bg-purple-100", "text-purple-700");
@@ -2800,16 +2834,11 @@ class WellRTE {
       return;
     }
 
-    // 4. Plain URL → 链接卡片
+    // 4. Plain URL → 标题 + 域名链接卡片
     if (text && this.isUrl(text)) {
+      // 剪贴板可能同时携带 text/plain URL 和 text/html <a>。
+      // 只要纯文本是单一 URL，就必须统一走预览卡片链路。
       e.preventDefault();
-      // 检查 HTML 剪贴板是否包含真正的富文本链接（<a> 标签）
-      // 如果是浏览器复制链接（地址栏），text/html 也有内容，但仅当包含 <a> 标签时才视为富文本粘贴
-      const htmlData = e.clipboardData.getData("text/html");
-      if (htmlData && /<a\s[^>]*href/i.test(htmlData)) {
-        // 富文本粘贴包含链接 → 使用默认浏览器行为插入
-        return;
-      }
       this.insertLinkCard(text.trim());
       return;
     }
@@ -2827,25 +2856,83 @@ class WellRTE {
     }
   }
 
-  async handleImageUpload(files) {
+  async handleImageUpload(files, insertionRange = null) {
     if (!files) return;
     const fileList =
       files instanceof FileList || Array.isArray(files)
         ? Array.from(files)
         : [files];
+    let range = insertionRange || this.captureEditorRange();
 
     for (const file of fileList) {
       if (!file.type.startsWith("image/")) continue;
       try {
-        const url = await this.options.uploadHandler(file);
+        const receipt = await this.options.uploadHandler(file);
+        const stable = typeof receipt === "string" ? receipt : receipt.url;
+        if (typeof receipt === "object" && receipt.previewUrl) this.registerFileDisplayUrl(stable, receipt.previewUrl);
+        const url = this.fileUrlMap[stable] || stable;
         const img = `<p style="text-align:center;"><img src="${url}" style="width:100%;" data-well-img="1"></p><p><br></p>`;
+        this.restoreEditorRange(range);
         this.ensureCursorOutsideProtected();
         document.execCommand("insertHTML", false, img);
         this.updateSource();
+        range = this.captureEditorRange();
       } catch (err) {
         console.error("Upload failed: " + err);
       }
     }
+  }
+
+  isEditorRange(range) {
+    if (!range || !this.editorEl) return false;
+    const node = range.commonAncestorContainer;
+    return node === this.editorEl || this.editorEl.contains(node);
+  }
+
+  captureEditorRange() {
+    const selection = window.getSelection();
+    if (selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      if (this.isEditorRange(range)) return range.cloneRange();
+    }
+
+    if (this.isEditorRange(this.lastRange)) {
+      return this.lastRange.cloneRange();
+    }
+
+    const range = document.createRange();
+    range.selectNodeContents(this.editorEl);
+    range.collapse(false);
+    return range;
+  }
+
+  restoreEditorRange(range) {
+    const targetRange = this.isEditorRange(range)
+      ? range
+      : this.captureEditorRange();
+
+    this.editorEl.focus();
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(targetRange);
+    this.lastRange = targetRange.cloneRange();
+  }
+
+  dropRange(event) {
+    let range = null;
+
+    if (document.caretRangeFromPoint) {
+      range = document.caretRangeFromPoint(event.clientX, event.clientY);
+    } else if (document.caretPositionFromPoint) {
+      const position = document.caretPositionFromPoint(event.clientX, event.clientY);
+      if (position) {
+        range = document.createRange();
+        range.setStart(position.offsetNode, position.offset);
+        range.collapse(true);
+      }
+    }
+
+    return this.isEditorRange(range) ? range : this.captureEditorRange();
   }
 
   bindDragDrop() {
@@ -2878,10 +2965,9 @@ class WellRTE {
     editor.addEventListener(
       "drop",
       (e) => {
-        const dt = e.dataTransfer;
-        const files = dt.files;
+        const files = e.dataTransfer && e.dataTransfer.files;
         if (files && files.length > 0) {
-          this.handleImageUpload(files);
+          this.handleImageUpload(files, this.dropRange(e));
         }
       },
       false,
@@ -3499,10 +3585,11 @@ class WellRTE {
   async fetchLinkPreview(url) {
     try {
       const apiUrl = (window.wellcms_urls && window.wellcms_urls.link_preview) || '/api/linkPreview';
-      const res = await fetch(`${apiUrl}?url=${encodeURIComponent(url)}`, {
-        headers: { 'X-Requested-With': 'XMLHttpRequest' }
-      });
-      const json = await res.json();
+      if (!window.wellcms || typeof window.wellcms.get !== 'function') return null;
+
+      // 由主程序网络层根据 URL 中是否已有查询串选择 ? / &，
+      // 兼容 url_rewrite_on=0 生成的 ?api-linkPreview.html 形式。
+      const json = await window.wellcms.get(apiUrl, { url: url });
       if (json && json.code === 0 && json.data && json.data.title) return json.data;
     } catch (e) {
       console.warn('[WellRTE] Link preview failed:', e);
@@ -3710,33 +3797,27 @@ class WellRTE {
   }
 
   /**
-   * 在编辑器中插入链接卡片（含 favicon + title + domain）
+   * 在编辑器中立即插入超链接，获取成功后原位升级为“标题 + 域名”卡片。
+   * 先同步插入可以固定粘贴位置，避免等待网络时光标移动导致链接插错位置。
    * @param {string} url
-   * @param {object|null} data 来自 fetchLinkPreview 的响应
    */
-  async insertLinkCard(url, data = null) {
-    if (!data) {
-      data = await this.fetchLinkPreview(url);
-    }
-    // 无预览数据或预览数据为空时，回退为纯文本链接
-    // 无预览数据或无法获取标题时，回退为纯文本链接（显示原 URL）
-    if (!data || !data.title) {
-      this.insertSimpleLink(url);
-      return;
-    }
+  async insertLinkCard(url) {
+    const normalizedUrl = /^www\./i.test(url) ? 'https://' + url : url;
+    const link = this.insertSimpleLink(normalizedUrl);
 
-    const a = document.createElement('a');
-    a.href = url;
-    a.target = '_blank';
-    a.className = 'rte-link-card';
+    const data = await this.fetchLinkPreview(normalizedUrl);
+    if (!data || !data.title || !this.editorEl.contains(link)) return;
 
-    // title 和 domain 纵向排列
+    link.title = data.title;
+    link.className = 'rte-link-card';
+    link.textContent = '';
+
     const textWrap = document.createElement('span');
     textWrap.className = 'rte-link-text';
 
     const titleSpan = document.createElement('span');
     titleSpan.className = 'rte-link-card-title';
-    titleSpan.textContent = data.title || url;
+    titleSpan.textContent = data.title;
     textWrap.appendChild(titleSpan);
 
     if (data.domain) {
@@ -3746,9 +3827,9 @@ class WellRTE {
       textWrap.appendChild(domainSpan);
     }
 
-    a.appendChild(textWrap);
-
-    this.insertNodeAtCursor(a);
+    link.appendChild(textWrap);
+    this.updateSource();
+    this.updateCounter();
   }
 
   /**
@@ -3761,6 +3842,7 @@ class WellRTE {
     a.target = '_blank';
     a.textContent = url;
     this.insertNodeAtCursor(a);
+    return a;
   }
 
   /**

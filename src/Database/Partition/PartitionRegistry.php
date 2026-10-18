@@ -33,6 +33,34 @@ class PartitionRegistry
 {
     const CACHE_KEY = 'partition_registry_configs';
 
+    /** 物理分区缓存与 DDL 失效代际；旧代数据由 TTL 回收。 */
+    private const PHYSICAL_KEY = 'partition:physical:';
+
+    public function readPhysicalPartitions(string $fullTable, callable $reader): array
+    {
+        $generation = (string)$this->cache->get(self::PHYSICAL_KEY . $fullTable . ':generation', '');
+        $key = self::PHYSICAL_KEY . $fullTable . ':rows:' . $generation;
+        $partitions = $this->cache->get($key);
+        if (is_array($partitions)) return $partitions;
+
+        $partitions = $reader();
+        $this->cache->set($key, $partitions, 86400);
+        return $partitions;
+    }
+
+    public function invalidatePhysicalPartitions(string $fullTable): void
+    {
+        // 读取与 DDL 可能并发；旧查询完成后只能写入旧代，不能覆盖新代。
+        $this->cache->set(self::PHYSICAL_KEY . $fullTable . ':generation', bin2hex(random_bytes(8)));
+    }
+
+    public function invalidateAllPhysicalPartitions(): void
+    {
+        foreach ($this->getAll() as $config) {
+            $this->invalidatePhysicalPartitions($this->db->prefix . $config->table);
+        }
+    }
+
     /** @var CacheInterface */
     private $cache;
 
@@ -70,6 +98,7 @@ class PartitionRegistry
         $all = $this->loadAll();
         $all[$config->table] = $config;
         $this->saveAll($all);
+        $this->invalidatePhysicalPartitions($this->db->prefix . $config->table);
     }
 
     /**
@@ -103,6 +132,7 @@ class PartitionRegistry
      */
     public function unregister(string $table)
     {
+        $this->invalidatePhysicalPartitions($this->db->prefix . $table);
         $all = $this->loadAll();
         if (isset($all[$table])) {
             unset($all[$table]);

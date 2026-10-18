@@ -163,10 +163,12 @@ class ConfigDrivenJob implements JobInterface
             'dedupeKey'   => $dedupeKey,
         ], true); // ignoreDedupe = true
 
-        if ($result['status'] !== 'success') {
+        if (!\Framework\Scheduler\TaskDispatchResult::isAccepted($result)) {
             error_log(sprintf(
-                '[ConfigDrivenJob] bootstrap failed: %s',
-                $result['msg'] ?? 'unknown'
+                '[ConfigDrivenJob] bootstrap failed outcome=%s code=%s task_id=%s',
+                \Framework\Scheduler\TaskDispatchResult::outcome($result),
+                \Framework\Scheduler\TaskDispatchResult::code($result) ?? 'TASK_DISPATCH_UNKNOWN',
+                \Framework\Scheduler\TaskDispatchResult::taskId($result) ?? ''
             ));
         }
     }
@@ -215,6 +217,7 @@ class ConfigDrivenJob implements JobInterface
         $tm      = $this->container->get(TaskManage::class);
         $nextRun = time() + 300;
         $results = [];
+        $selfDispatch = null;
 
         try {
             foreach (self::$mappings as $map) {
@@ -243,7 +246,7 @@ class ConfigDrivenJob implements JobInterface
             // 🛡️ 自链下一轮巡检：放在 finally 中确保即使 handle() 中途异常仍能续命
             //    使用 5 分钟级 dedupeKey 匹配自链周期（300s），避免同一时钟小时内多轮自链冲突
             $dedupeKey = 'sys:config_driven_job:' . gmdate('YmdHi', (int)($nextRun / 300) * 300);
-            $result = $tm->createTask([
+            $selfDispatch = $tm->createTask([
                 'className'   => self::class,
                 'methodName'  => 'handle',
                 'args'        => [],
@@ -251,12 +254,32 @@ class ConfigDrivenJob implements JobInterface
                 'scheduledAt' => $nextRun,
                 'dedupeKey'   => $dedupeKey,
             ], true);
-            if ($result['status'] !== 'success') {
+            if (!\Framework\Scheduler\TaskDispatchResult::isAccepted($selfDispatch)) {
                 $this->logError(sprintf(
-                    '[ConfigDrivenJob] self-chain failed: %s',
-                    $result['msg'] ?? 'unknown'
+                    '[ConfigDrivenJob] self-chain failed outcome=%s code=%s task_id=%s',
+                    \Framework\Scheduler\TaskDispatchResult::outcome($selfDispatch),
+                    \Framework\Scheduler\TaskDispatchResult::code($selfDispatch) ?? 'TASK_DISPATCH_UNKNOWN',
+                    \Framework\Scheduler\TaskDispatchResult::taskId($selfDispatch) ?? ''
                 ));
             }
+        }
+
+        if (!is_array($selfDispatch)
+            || !\Framework\Scheduler\TaskDispatchResult::isAccepted($selfDispatch)
+        ) {
+            return [
+                'status' => 'error',
+                'outcome' => is_array($selfDispatch)
+                    ? \Framework\Scheduler\TaskDispatchResult::outcome($selfDispatch)
+                    : \Framework\Scheduler\TaskDispatchResult::OUTCOME_UNKNOWN,
+                'code' => is_array($selfDispatch)
+                    ? (\Framework\Scheduler\TaskDispatchResult::code($selfDispatch) ?? 'TASK_DISPATCH_UNKNOWN')
+                    : 'TASK_DISPATCH_UNKNOWN',
+                'taskId' => is_array($selfDispatch)
+                    ? \Framework\Scheduler\TaskDispatchResult::taskId($selfDispatch)
+                    : null,
+                'results' => $results,
+            ];
         }
 
         return [
@@ -317,11 +340,24 @@ class ConfigDrivenJob implements JobInterface
             ]);
 
             $status = $result['status'] ?? 'unknown';
-            if ($status !== 'success') {
+            if (!\Framework\Scheduler\TaskDispatchResult::isAccepted($result)) {
                 $this->logError(sprintf(
-                    '[ConfigDrivenJob] createTask %s failed: %s',
-                    $map['jobClass'], $result['msg'] ?? ''
+                    '[ConfigDrivenJob] createTask %s failed outcome=%s code=%s task_id=%s',
+                    $map['jobClass'],
+                    \Framework\Scheduler\TaskDispatchResult::outcome($result),
+                    \Framework\Scheduler\TaskDispatchResult::code($result) ?? 'TASK_DISPATCH_UNKNOWN',
+                    \Framework\Scheduler\TaskDispatchResult::taskId($result) ?? ''
                 ));
+
+                return [
+                    'job' => $map['jobClass'],
+                    'action' => 'error',
+                    'status' => $status,
+                    'outcome' => \Framework\Scheduler\TaskDispatchResult::outcome($result),
+                    'code' => \Framework\Scheduler\TaskDispatchResult::code($result)
+                        ?? 'TASK_DISPATCH_UNKNOWN',
+                    'taskId' => \Framework\Scheduler\TaskDispatchResult::taskId($result),
+                ];
             }
 
             return [

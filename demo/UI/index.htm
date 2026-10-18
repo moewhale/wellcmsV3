@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+    演示文件：站点首页（对应 app/views/htm/index.htm）
+    布局：Idea Box 玩乐编辑风 —— 暖白底、墨色大字、珊瑚/钴蓝/紫/琥珀/薄荷色块、无渐变
+    纯静态演示稿：无 PHP 标签；功能（Hero / 特性 / CTA / 统计）与原版一致
+-->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>WellCMS 3.0 - 内容引擎的未来</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+    <link rel="stylesheet" href="../assets/css/style.css">
+    <style>
+        @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+        .animate-float{animation:float 6s ease-in-out infinite}
+        .animate-float-delay{animation:float 7s ease-in-out 1.5s infinite}
+    </style>
+</head>
+<body class="flex flex-col min-h-screen bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-gray-200 font-sans">
+
+    <!-- 页头 -->
+    <header class="sticky top-0 z-50 bg-stone-50/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-stone-200 dark:border-slate-800">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <a href="index.htm" class="flex items-center gap-2 shrink-0">
+                    <div class="w-8 h-8 rounded-lg bg-rose-500 flex items-center justify-center text-white font-black text-sm shadow-md shadow-rose-500/30">W</div>
+                    <span class="text-xl font-black tracking-tight">WellCMS <span class="text-rose-500">3.0</span></span>
+                </a>
+                <nav class="hidden md:flex items-center gap-6 text-sm font-bold text-stone-500 dark:text-gray-400">
+                    <a href="index.htm" class="text-stone-900 dark:text-white border-b-2 border-rose-500 pb-0.5">首页</a>
+                    <a href="article_index.htm" class="hover:text-rose-500 transition-colors">文章</a>
+                    <a href="forum_index.htm" class="hover:text-rose-500 transition-colors">论坛</a>
+                    <a href="forum_collection_list.htm" class="hover:text-rose-500 transition-colors">合集</a>
+                </nav>
+                <div class="flex items-center gap-2">
+                    <button onclick="wellcms.toggleDarkMode()" class="p-2 rounded-lg hover:bg-stone-200 dark:hover:bg-white/10 transition-colors" title="切换深浅色"><span class="dark:hidden">🌙</span><span class="hidden dark:inline">☀️</span></button>
+                    <a href="sign_up.htm" class="hidden md:inline-block text-sm font-bold text-stone-500 dark:text-gray-400 hover:text-rose-500 px-4 py-2 transition-colors">注册</a>
+                    <a href="sign_in.htm" class="text-sm font-black text-white bg-stone-900 dark:bg-white dark:text-stone-900 hover:bg-stone-700 rounded-xl px-5 py-2.5 transition-colors">登录</a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1">
+        <!-- Hero -->
+        <section class="relative overflow-hidden">
+            <!-- 玩乐几何装饰 -->
+            <div class="absolute top-16 left-[6%] w-20 h-20 rounded-2xl rotate-12 bg-amber-400 animate-float hidden md:block"></div>
+            <div class="absolute top-40 right-[8%] w-14 h-14 rounded-full bg-blue-600 animate-float-delay hidden md:block"></div>
+            <div class="absolute bottom-24 left-[12%] w-10 h-10 rounded-full bg-emerald-400 hidden md:block"></div>
+            <div class="absolute bottom-40 right-[15%] w-16 h-16 rounded-2xl -rotate-12 bg-violet-500 animate-float hidden lg:block"></div>
+
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-20 pb-16 md:pt-28 md:pb-24 text-center relative">
+                <div class="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-100 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 text-sm font-black mb-8">
+                    <span class="relative flex h-3 w-3">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+                    </span>
+                    程序安装成功
+                </div>
+
+                <h1 class="text-5xl md:text-7xl font-black tracking-tight leading-[1.05]">
+                    欢迎使用 <span class="text-rose-500">WellCMS</span><br>
+                    <span class="text-stone-900 dark:text-white">内容引擎的<span class="underline decoration-amber-400 decoration-8 underline-offset-4">未来</span></span>
+                </h1>
+
+                <p class="max-w-2xl mx-auto mt-8 text-lg md:text-xl text-stone-500 dark:text-gray-400 leading-relaxed font-medium">
+                    专为追求速度、安全和绝对灵活性的开发者打造的轻量级、高性能内容引擎。
+                </p>
+
+                <div class="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
+                    <a href="manage_dashboard.htm" class="w-full sm:w-auto px-8 py-4 bg-rose-500 hover:bg-rose-600 text-white text-lg font-black rounded-2xl shadow-xl shadow-rose-500/25 transition-all hover:-translate-y-0.5">进入管理后台</a>
+                    <a href="https://www.wellcms.com" target="_blank" class="w-full sm:w-auto px-8 py-4 bg-white dark:bg-slate-900 border-2 border-stone-900 dark:border-slate-600 text-stone-900 dark:text-white text-lg font-black rounded-2xl hover:bg-stone-900 hover:text-white dark:hover:bg-slate-800 transition-all">查看官方文档</a>
+                </div>
+            </div>
+        </section>
+
+        <!-- 核心优势 -->
+        <section class="py-20 md:py-28 bg-white dark:bg-slate-900 border-y border-stone-200 dark:border-slate-800">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="text-center mb-16">
+                    <span class="inline-block px-3 py-1 rounded-full bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400 text-xs font-black uppercase tracking-[0.2em] mb-4">Features</span>
+                    <h2 class="text-4xl md:text-5xl font-black tracking-tight">核心优势</h2>
+                    <p class="text-stone-400 mt-4 text-lg font-medium">为什么行业领航者选择 WellCMS 3.0</p>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="p-8 rounded-3xl bg-stone-50 dark:bg-slate-800 border-2 border-transparent hover:border-blue-500 hover:-translate-y-2 transition-all duration-300">
+                        <div class="w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center text-white mb-6 shadow-lg shadow-blue-600/30">
+                            <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                        </div>
+                        <h3 class="text-2xl font-black mb-3">极致性能</h3>
+                        <p class="text-stone-500 dark:text-gray-400 leading-relaxed">核心体积小于 2MB。支持毫秒级响应，经过深度优化，在海量数据和高并发场景下依然坚如磐石。</p>
+                    </div>
+                    <div class="p-8 rounded-3xl bg-stone-50 dark:bg-slate-800 border-2 border-transparent hover:border-violet-500 hover:-translate-y-2 transition-all duration-300">
+                        <div class="w-14 h-14 bg-violet-600 rounded-2xl flex items-center justify-center text-white mb-6 shadow-lg shadow-violet-600/30">
+                            <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+                        </div>
+                        <h3 class="text-2xl font-black mb-3">坚若磐石</h3>
+                        <p class="text-stone-500 dark:text-gray-400 leading-relaxed">企业级安全架构。内置完善的攻击拦截机制，严防 SQL 注入、XSS 跨站攻击，守护您的数据安全。</p>
+                    </div>
+                    <div class="p-8 rounded-3xl bg-stone-50 dark:bg-slate-800 border-2 border-transparent hover:border-emerald-500 hover:-translate-y-2 transition-all duration-300">
+                        <div class="w-14 h-14 bg-emerald-500 rounded-2xl flex items-center justify-center text-white mb-6 shadow-lg shadow-emerald-500/30">
+                            <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z"/></svg>
+                        </div>
+                        <h3 class="text-2xl font-black mb-3">无限扩展</h3>
+                        <p class="text-stone-500 dark:text-gray-400 leading-relaxed">高度模块化的插件架构。独创的 Hooks 钩子系统，让每一条逻辑都可接管，满足您的各种商业化定制。</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- CTA + 统计 -->
+        <section class="py-20 md:py-28 bg-stone-900 dark:bg-slate-900 text-white relative overflow-hidden">
+            <div class="absolute top-10 left-10 w-16 h-16 rounded-2xl rotate-12 bg-rose-500"></div>
+            <div class="absolute bottom-10 right-10 w-20 h-20 rounded-full bg-blue-600"></div>
+            <div class="absolute top-1/2 right-[20%] w-8 h-8 rounded-lg rotate-45 bg-amber-400 hidden md:block"></div>
+
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative text-center">
+                <h2 class="text-4xl md:text-6xl font-black tracking-tight">准备好开启<span class="text-amber-400">极速体验</span>了吗？</h2>
+                <div class="mt-12 flex flex-wrap justify-center gap-5">
+                    <a href="manage_dashboard.htm" class="px-12 py-5 bg-rose-500 hover:bg-rose-600 text-white text-xl font-black rounded-2xl shadow-2xl shadow-rose-500/30 transition-all hover:-translate-y-1">开启管理面板</a>
+                    <a href="forum_index.htm" class="px-12 py-5 bg-transparent border-2 border-white/30 text-white text-xl font-black rounded-2xl hover:bg-white/10 transition-all">访问默认首页</a>
+                </div>
+
+                <div class="mt-20 pt-16 border-t border-white/10 grid grid-cols-2 md:grid-cols-4 gap-8">
+                    <div><div class="text-4xl font-black mb-2 text-rose-400">10ms</div><div class="text-stone-400 text-sm font-bold">平均响应延迟</div></div>
+                    <div><div class="text-4xl font-black mb-2 text-blue-400">99.9%</div><div class="text-stone-400 text-sm font-bold">安全防护评分</div></div>
+                    <div><div class="text-4xl font-black mb-2 text-amber-400">500+</div><div class="text-stone-400 text-sm font-bold">可控扩展钩子</div></div>
+                    <div><div class="text-4xl font-black mb-2 text-emerald-400">2MB</div><div class="text-stone-400 text-sm font-bold">核心程序体积</div></div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- 页脚 -->
+    <footer class="border-t border-stone-200 dark:border-slate-800 bg-white/60 dark:bg-slate-950">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row justify-between items-center gap-2 text-xs text-stone-400">
+            <span>© 2026 <a href="http://www.wellcms.com/" target="_blank" class="font-bold hover:text-rose-500">WellCMS</a> 演示站 · 页面为 UI 演示稿，数据均为演示数据</span>
+            <span>Processed: <b>0.0231</b>, SQL: <b>18</b></span>
+        </div>
+    </footer>
+    <script src="../assets/js/main.js"></script>
+</body>
+</html>

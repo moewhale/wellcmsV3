@@ -13,6 +13,7 @@
  * - driver        : 默认激活的数据库驱动标识，必须对应 connections 中的某个键
  * - connections   : 各驱动的连接参数集合，每个驱动包含 master（主库）和 slaves（从库数组）
  * - pool          : 连接池全局配置，分 fpm（阻塞模式）和 coroutine（协程模式）两套参数
+ * - shards        : 按表名配置整表独立部署，每个独立库支持一主多从，不需要分片键
  * - sharding      : 分片规则，按表名配置 shard_key 和多个分片节点
  *
  * 注意：本文件修改后需重启 Swoole Worker / FPM 进程方可生效。
@@ -200,12 +201,32 @@ return [
     ],
 
     /*
+     * 整表独立部署：键为不含前缀的表名，值为该独立库的 master / slaves。
+     * Model / CRUD 自动按表名读写；事务显式传入表名：
+     * $db->transaction($callback, 3, 'user');
+     * 显式取连接可传表名或已配置的节点标识：$db->connect('slave', 'user')。
+     * 同一张表使用整表部署或下方按键分片中的一种配置。
+     */
+    'shards' => [
+        /* 'user' => [
+            'master' => [
+                'host' => '10.0.0.31', 'port' => '5432', 'database' => 'wellcms_user',
+                'username' => 'wellcms', 'password' => 'pass', 'charset' => 'UTF8',
+            ],
+            'slaves' => [
+                ['host' => '10.0.0.32', 'port' => '5432', 'database' => 'wellcms_user', 'username' => 'wellcms_read', 'password' => 'read_pass', 'charset' => 'UTF8', 'weight' => 1],
+                ['host' => '10.0.0.33', 'port' => '5432', 'database' => 'wellcms_user', 'username' => 'wellcms_read', 'password' => 'read_pass', 'charset' => 'UTF8', 'weight' => 1],
+            ],
+        ], */
+    ],
+
+    /*
      * ------------------------------------------------------------------------
-     * 分片规则配置（分库分表）
+     * 按键分片规则配置（分库分表）
      * ------------------------------------------------------------------------
      * 支持按表维度配置一致性哈希分片。
      * 系统在启动时通过 ConfigServiceProvider 自动将本配置扁平化为：
-     * - dbConfig['shards']       : 各 shard 节点的 master/slave 连接参数
+     * - dbConfig['shards']       : 保留整表独立库，追加各分片节点的 master/slave 参数
      * - dbConfig['shard_routers'] : 分片路由元信息
      *
      * 字段说明：

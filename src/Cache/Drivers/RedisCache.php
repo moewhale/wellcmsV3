@@ -37,6 +37,19 @@ end
 return 0
 LUA;
 
+    /* 比较后替换，并按调用方要求设置 TTL */
+    private const S_COMPARE_SET = <<<'LUA'
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  if tonumber(ARGV[3]) > 0 then
+    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+  else
+    redis.call('SET', KEYS[1], ARGV[2])
+  end
+  return 1
+end
+return 0
+LUA;
+
     /* ② INCR / DECR + 首次 EXPIRE  (delta 可正可负) */
     private const S_ADJ_EXPIRE = <<<'LUA'
 local v = redis.call('INCRBY', KEYS[1], ARGV[1])
@@ -175,8 +188,12 @@ LUA;
         return $this->prefix;
     }
 
-    /** 统一执行入口：借还连接（连接池）或直连，并支持一次自动重试断线 */
-    private function run(callable $runner)
+    /**
+     * 统一执行入口：写入/状态命令默认禁止透明重放。
+     *
+     * 只有调用方已明确证明为纯读取时，才允许在断线后切换连接重试一次。
+     */
+    private function run(callable $runner, bool $retrySafe = false)
     {
         $attempts = 0;
         while (true) {
@@ -189,7 +206,7 @@ LUA;
                 $attempts++;
                 $msg = $e->getMessage();
                 // 如果是连接断开相关错误，且是第一次尝试，则重试（由连接池保证取到新连接）
-                if ($attempts < 2 && (
+                if ($retrySafe && $attempts < 2 && (
                     strpos($msg, 'lost') !== false ||
                     strpos($msg, 'read error') !== false ||
                     strpos($msg, 'Socket error') !== false ||
@@ -202,6 +219,22 @@ LUA;
         }
     }
 
+    /** 纯读取命令的一次断线恢复入口。 */
+    private function runRead(callable $runner)
+    {
+        return $this->run($runner, true);
+    }
+
+    /** 池化借还以方法为边界，不能承载跨方法的 Redis 连接会话状态。 */
+    private function assertStatefulConnectionAvailable(): void
+    {
+        if ($this->withConn !== null) {
+            throw new \RuntimeException(
+                'Stateful Redis transaction API is unavailable with per-command connection pooling'
+            );
+        }
+    }
+
     /**
      * 检测 Redis 是否可用
      *
@@ -210,7 +243,7 @@ LUA;
     public function ping(): bool
     {
         try {
-            return $this->run(function ($r) {
+            return $this->runRead(function ($r) {
                 // RedisCluster
                 if ($r instanceof \RedisCluster) {
                     foreach ($r->_masters() as $node) {
@@ -238,7 +271,7 @@ LUA;
     public function info(): array
     {
         try {
-            return $this->run(function ($r) {
+            return $this->runRead(function ($r) {
                 $info = [];
 
                 // RedisCluster
@@ -294,6 +327,10 @@ LUA;
     /**
      * 根据传入的值决定是否将其 JSON 编码后返回
      *
+     * 上传链路保护（用户要求，2026-10-10；见根目录 AGENTS.md）：
+     * 文件查重及临时上传依赖缓存序列化契约。未经用户明确授权，AI 禁止改变影响上传的
+     * 编解码行为、数据类型或二进制处理契约；审计、重构或修复测试不构成授权，保留此备注。
+     *
      * 仅针对字符串相关操作 (set/get) 中的 value 部分。对于其他数据结构 (Hash、List...)，不做自动编码。
      *
      * @param mixed $value
@@ -345,7 +382,7 @@ LUA;
      */
     public function exists(string $key): bool
     {
-        return $this->run(function ($r) use ($key) {
+        return $this->runRead(function ($r) use ($key) {
             return $r->exists($this->withPrefix($key)) > 0;
         });
     }
@@ -426,7 +463,7 @@ LUA;
      */
     public function ttl(string $key): int
     {
-        return $this->run(function ($r) use ($key) {
+        return $this->runRead(function ($r) use ($key) {
             return $r->ttl($this->withPrefix($key));
         });
     }
@@ -473,7 +510,7 @@ LUA;
      */
     public function type(string $key): string
     {
-        return $this->run(function ($r) use ($key) {
+        return $this->runRead(function ($r) use ($key) {
             return $r->type($this->withPrefix($key));
         });
     }
@@ -488,7 +525,7 @@ LUA;
      */
     public function keys(string $pattern): array
     {
-        return $this->run(function ($r) use ($pattern) {
+        return $this->runRead(function ($r) use ($pattern) {
             return $r->keys($pattern);
         });
     }
@@ -509,7 +546,7 @@ LUA;
      */
     public function get(string $key, $default = null)
     {
-        return $this->run(function ($r) use ($key, $default) {
+        return $this->runRead(function ($r) use ($key, $default) {
             $raw = $r->get($this->withPrefix($key));
             return $this->unserializeValue($raw, $default);
         });
@@ -566,6 +603,44 @@ LUA;
 
             return (bool)$r->set($full, $to, $options);
         });
+    }
+
+    /**
+     * 仅当当前值与预期值完全一致时删除普通缓存键。
+     *
+     * 与 unlock() 共用同一 Lua，但不添加 lock_ 命名空间，供具备所有权
+     * 语义的业务键释放使用。
+     *
+     * @param string $key
+     * @param mixed $expected
+     * @return bool
+     */
+    public function compareDelete(string $key, $expected): bool
+    {
+        $full = $this->withPrefix($key);
+        $serialized = $this->serializeValue($expected);
+        return (int)$this->call(self::S_COMPARE_DEL, [$full, $serialized], 1) === 1;
+    }
+
+    /**
+     * 仅当当前值与预期值完全一致时替换普通缓存键，并原子设置 TTL。
+     *
+     * @param string $key
+     * @param mixed $expected
+     * @param mixed $replacement
+     * @param int $ttl
+     * @return bool
+     */
+    public function compareSet(string $key, $expected, $replacement, int $ttl = 0): bool
+    {
+        $full = $this->withPrefix($key);
+        $serializedExpected = $this->serializeValue($expected);
+        $serializedReplacement = $this->serializeValue($replacement);
+        return (int)$this->call(
+            self::S_COMPARE_SET,
+            [$full, $serializedExpected, $serializedReplacement, $ttl],
+            1
+        ) === 1;
     }
 
     /**
@@ -717,7 +792,7 @@ LUA;
 
         // ---------- RedisCluster ----------
         try {
-            $isCluster = $this->run(function ($r) {
+            $isCluster = $this->runRead(function ($r) {
                 return $r instanceof \RedisCluster;
             });
         } catch (\Throwable $_) {
@@ -725,13 +800,13 @@ LUA;
         }
 
         if ($isCluster) {
-            $masters = $this->run(function ($r) {
+            $masters = $this->runRead(function ($r) {
                 return $r->_masters();
             });
             foreach ($masters as $node) {
                 $it = null;
                 while (true) {
-                    $batch = $this->run(function ($r) use (&$it, $node, $pattern, $count) {
+                    $batch = $this->runRead(function ($r) use (&$it, $node, $pattern, $count) {
                         return $r->scan($it, $node, $pattern, $count);
                     });
                     if ($batch === false || empty($batch)) break;
@@ -750,7 +825,7 @@ LUA;
         // ---------- 单机 Redis ----------
         $it = null;
         while (true) {
-            $batch = $this->run(function ($r) use (&$it, $pattern, $count) {
+            $batch = $this->runRead(function ($r) use (&$it, $pattern, $count) {
                 return $r->scan($it, $pattern, $count);
             });
             if ($batch === false || empty($batch)) break;
@@ -816,7 +891,7 @@ LUA;
      */
     public function hExists(string $key, string $field): bool
     {
-        return $this->run(function ($r) use ($key, $field) {
+        return $this->runRead(function ($r) use ($key, $field) {
             return $r->hExists($this->withPrefix($key), $field);
         });
     }
@@ -832,7 +907,7 @@ LUA;
      */
     public function hGet(string $key, string $field)
     {
-        return $this->run(function ($r) use ($key, $field) {
+        return $this->runRead(function ($r) use ($key, $field) {
             $raw = $r->hGet($this->withPrefix($key), $field);
             return $raw === false ? null : $raw;
         });
@@ -887,7 +962,7 @@ LUA;
      */
     public function hMGet(string $key, array $fields): array
     {
-        return $this->run(function ($r) use ($key, $fields) {
+        return $this->runRead(function ($r) use ($key, $fields) {
             $raws = $r->hMGet($this->withPrefix($key), $fields);
             $res = [];
             foreach ($fields as $f) {
@@ -927,7 +1002,7 @@ LUA;
      */
     public function hKeys(string $key): array
     {
-        return $this->run(function ($r) use ($key) {
+        return $this->runRead(function ($r) use ($key) {
             return $r->hKeys($this->withPrefix($key));
         });
     }
@@ -942,7 +1017,7 @@ LUA;
      */
     public function hVals(string $key): array
     {
-        return $this->run(function ($r) use ($key) {
+        return $this->runRead(function ($r) use ($key) {
             return $r->hVals($this->withPrefix($key));
         });
     }
@@ -957,7 +1032,7 @@ LUA;
      */
     public function hLen(string $key): int
     {
-        return $this->run(function ($r) use ($key) {
+        return $this->runRead(function ($r) use ($key) {
             return $r->hLen($this->withPrefix($key));
         });
     }
@@ -972,7 +1047,7 @@ LUA;
      */
     public function hGetAll(string $key): array
     {
-        return $this->run(function ($r) use ($key) {
+        return $this->runRead(function ($r) use ($key) {
             return $r->hGetAll($this->withPrefix($key));
         });
     }
@@ -1099,7 +1174,7 @@ LUA;
      */
     public function lLen(string $key): int
     {
-        return $this->run(function ($r) use ($key) {
+        return $this->runRead(function ($r) use ($key) {
             return $r->lLen($this->withPrefix($key));
         });
     }
@@ -1116,7 +1191,7 @@ LUA;
      */
     public function lRange(string $key, int $start, int $stop): array
     {
-        return $this->run(function ($r) use ($key, $start, $stop) {
+        return $this->runRead(function ($r) use ($key, $start, $stop) {
             return $r->lRange($this->withPrefix($key), $start, $stop);
         });
     }
@@ -1132,7 +1207,7 @@ LUA;
      */
     public function lIndex(string $key, int $index)
     {
-        return $this->run(function ($r) use ($key, $index) {
+        return $this->runRead(function ($r) use ($key, $index) {
             $val = $r->lIndex($this->withPrefix($key), $index);
             return $val === false ? null : $val;
         });
@@ -1247,7 +1322,7 @@ LUA;
      */
     public function sIsMember(string $key, $member): bool
     {
-        return $this->run(function ($r) use ($key, $member) {
+        return $this->runRead(function ($r) use ($key, $member) {
             return $r->sIsMember($this->withPrefix($key), (string)$member);
         });
     }
@@ -1262,7 +1337,7 @@ LUA;
      */
     public function sMembers(string $key): array
     {
-        return $this->run(function ($r) use ($key) {
+        return $this->runRead(function ($r) use ($key) {
             return $r->sMembers($this->withPrefix($key));
         });
     }
@@ -1277,7 +1352,7 @@ LUA;
      */
     public function sCard(string $key): int
     {
-        return $this->run(function ($r) use ($key) {
+        return $this->runRead(function ($r) use ($key) {
             return $r->sCard($this->withPrefix($key));
         });
     }
@@ -1353,7 +1428,7 @@ LUA;
      */
     public function zCard(string $key): int
     {
-        return $this->run(function ($r) use ($key) {
+        return $this->runRead(function ($r) use ($key) {
             return $r->zCard($this->withPrefix($key));
         });
     }
@@ -1369,7 +1444,7 @@ LUA;
      */
     public function zScore(string $key, string $member)
     {
-        return $this->run(function ($r) use ($key, $member) {
+        return $this->runRead(function ($r) use ($key, $member) {
             $score = $r->zScore($this->withPrefix($key), $member);
             return $score === false ? null : $score;
         });
@@ -1386,7 +1461,7 @@ LUA;
      */
     public function zRank(string $key, string $member)
     {
-        return $this->run(function ($r) use ($key, $member) {
+        return $this->runRead(function ($r) use ($key, $member) {
             $rank = $r->zRank($this->withPrefix($key), $member);
             return $rank === false ? null : $rank;
         });
@@ -1403,7 +1478,7 @@ LUA;
      */
     public function zRevRank(string $key, string $member)
     {
-        return $this->run(function ($r) use ($key, $member) {
+        return $this->runRead(function ($r) use ($key, $member) {
             $rank = $r->zRevRank($this->withPrefix($key), $member);
             return $rank === false ? null : $rank;
         });
@@ -1423,7 +1498,7 @@ LUA;
      */
     public function zRange(string $key, int $start, int $stop, bool $withScores = false): array
     {
-        return $this->run(function ($r) use ($key, $start, $stop, $withScores) {
+        return $this->runRead(function ($r) use ($key, $start, $stop, $withScores) {
             if ($withScores) return $r->zRange($this->withPrefix($key), $start, $stop, ['withscores' => true]);
             return $r->zRange($this->withPrefix($key), $start, $stop);
         });
@@ -1442,7 +1517,7 @@ LUA;
      */
     public function zRevRange(string $key, int $start, int $stop, bool $withScores = false): array
     {
-        return $this->run(function ($r) use ($key, $start, $stop, $withScores) {
+        return $this->runRead(function ($r) use ($key, $start, $stop, $withScores) {
             if ($withScores) return $r->zRevRange($this->withPrefix($key), $start, $stop, ['withscores' => true]);
             return $r->zRevRange($this->withPrefix($key), $start, $stop);
         });
@@ -1461,7 +1536,7 @@ LUA;
      */
     public function zRangeByScore(string $key, $min, $max, bool $withScores = false): array
     {
-        return $this->run(function ($r) use ($key, $min, $max, $withScores) {
+        return $this->runRead(function ($r) use ($key, $min, $max, $withScores) {
             if ($withScores) return $r->zRangeByScore($this->withPrefix($key), (string)$min, (string)$max, ['withscores' => true]);
             return $r->zRangeByScore($this->withPrefix($key), (string)$min, (string)$max);
         });
@@ -1479,7 +1554,7 @@ LUA;
      */
     public function zCount(string $key, $min, $max): int
     {
-        return $this->run(function ($r) use ($key, $min, $max) {
+        return $this->runRead(function ($r) use ($key, $min, $max) {
             return $r->zCount($this->withPrefix($key), (string)$min, (string)$max);
         });
     }
@@ -1603,7 +1678,7 @@ LUA;
      */
     public function getBit(string $key, int $offset): int
     {
-        return $this->run(function ($r) use ($key, $offset) {
+        return $this->runRead(function ($r) use ($key, $offset) {
             return $r->getBit($this->withPrefix($key), $offset);
         });
     }
@@ -1620,7 +1695,7 @@ LUA;
      */
     public function bitCount(string $key, ?int $start = null, ?int $end = null): int
     {
-        return $this->run(function ($r) use ($key, $start, $end) {
+        return $this->runRead(function ($r) use ($key, $start, $end) {
             if ($start !== null && $end !== null) return $r->bitCount($this->withPrefix($key), $start, $end);
             return $r->bitCount($this->withPrefix($key));
         });
@@ -1694,6 +1769,7 @@ LUA;
      */
     public function watch($keys): bool
     {
+        $this->assertStatefulConnectionAvailable();
         return $this->run(function ($r) use ($keys) {
             if (is_array($keys)) {
                 $full = array_map([$this, 'withPrefix'], $keys);
@@ -1713,6 +1789,7 @@ LUA;
      */
     public function multi(int $mode = Redis::MULTI)
     {
+        $this->assertStatefulConnectionAvailable();
         return $this->run(function ($r) use ($mode) {
             return $r->multi($mode);
         });
@@ -1727,6 +1804,7 @@ LUA;
      */
     public function exec()
     {
+        $this->assertStatefulConnectionAvailable();
         return $this->run(function ($r) {
             return $r->exec();
         });
@@ -1741,6 +1819,7 @@ LUA;
      */
     public function discard(): bool
     {
+        $this->assertStatefulConnectionAvailable();
         return $this->run(function ($r) {
             return $r->discard();
         });
@@ -1789,7 +1868,7 @@ LUA;
      */
     public function geoPos(string $key, array $members): array
     {
-        return $this->run(function ($r) use ($key, $members) {
+        return $this->runRead(function ($r) use ($key, $members) {
             return $r->geoPos($this->withPrefix($key), ...$members);
         });
     }
@@ -1807,7 +1886,7 @@ LUA;
      */
     public function geoDist(string $key, string $member1, string $member2, string $unit = 'm')
     {
-        return $this->run(function ($r) use ($key, $member1, $member2, $unit) {
+        return $this->runRead(function ($r) use ($key, $member1, $member2, $unit) {
             $dist = $r->geoDist($this->withPrefix($key), $member1, $member2, $unit);
             return $dist === false ? null : $dist;
         });
@@ -1842,7 +1921,7 @@ LUA;
         ?int $count = null,
         bool $asc = true
     ): array {
-        return $this->run(function ($r) use (
+        return $this->runRead(function ($r) use (
             $key,
             $longitude,
             $latitude,
@@ -1891,7 +1970,7 @@ LUA;
         ?int $count = null,
         bool $asc = true
     ): array {
-        return $this->run(function ($r) use (
+        return $this->runRead(function ($r) use (
             $key,
             $member,
             $radius,
@@ -1952,7 +2031,7 @@ LUA;
     public function getMulti(array $keys, $default = null): array
     {
         if (empty($keys)) return [];
-        return $this->run(function ($r) use ($keys, $default) {
+        return $this->runRead(function ($r) use ($keys, $default) {
             $full = array_map([$this, 'withPrefix'], $keys);
             $raws = $r->mGet($full);
             $res = [];
@@ -2033,7 +2112,7 @@ LUA;
      * @param array $keys
      * @return int  被删除键的数量
      */
-    public function mDelete(array $keys): int
+    public function deleteMulti(array $keys): int
     {
         if (empty($keys)) return 0;
         return $this->run(function ($r) use ($keys) {
@@ -2052,7 +2131,7 @@ LUA;
      * 对应命令: SET lock_key token NX EX expire
      *
      * @param string $key    锁标识
-     * @param int $expire    锁过期时间 (秒)，默认 3
+     * @param int $ttl    锁过期时间 (秒)，默认 3
      * @return string|null   如果获得锁返回 token，否则 null
      * @throws \Exception
      */
@@ -2129,7 +2208,7 @@ LUA;
     public function isLocked(string $key)
     {
         $fullLock = 'lock_' . $this->withPrefix($key);
-        return $this->run(function ($r) use ($fullLock) {
+        return $this->runRead(function ($r) use ($fullLock) {
             return $r->exists($fullLock) > 0;
         });
     }
@@ -2141,11 +2220,11 @@ LUA;
      * @param int    $rate     速率（每秒补充令牌数）
      * @return bool  true=放行，false=限流
      */
-    public function allow(string $key, int $cap, int $rate, array $only = []): bool
+    public function allow(string $key, int $capacity, int $rate, array $only = []): bool
     {
         $nowMs = (int)(microtime(true) * 1000);
         $bucketKey = $this->withPrefix($key);
-        return 1 === $this->call(self::S_TOKEN_BUCKET, [$bucketKey, $nowMs, $cap, $rate], 1);
+        return 1 === $this->call(self::S_TOKEN_BUCKET, [$bucketKey, $nowMs, $capacity, $rate], 1);
     }
 
     public function original(string $only = '')

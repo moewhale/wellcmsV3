@@ -17,6 +17,9 @@ class FileHelper
     private const LOCK_PREFIX = 'lockfile_';
     private const BACKUP_SUFFIX = '.backup.';
 
+    /** @var array<string,resource> */
+    private static $lockHandles = [];
+
     private static function getLockFilePath(string $key): string
     {
         return sys_get_temp_dir() . DIRECTORY_SEPARATOR . self::LOCK_PREFIX . md5($key);
@@ -27,23 +30,21 @@ class FileHelper
      */
     public static function lock(string $key, int $expire = 30): bool
     {
+        $lockId = md5($key);
+        if (isset(self::$lockHandles[$lockId])) {
+            return false;
+        }
+
         $filePath = self::getLockFilePath($key);
-        // 使用 @ 忽略警告，通过返回值判断
         $fileHandle = @fopen($filePath, 'c');
 
         if (!is_resource($fileHandle)) {
             return false;
         }
 
-        // 尝试获取文件锁
         if (flock($fileHandle, LOCK_EX | LOCK_NB)) {
-            // 设置过期时间
             self::expireAt($filePath, $expire);
-            // 注意：逻辑锁在持久化场景下通常依赖文件存在。
-            // 这里我们保持句柄打开或通过文件时间戳管理。
-            // 为了作为静态工具类的“状态占坑”，我们关闭句柄但保留文件。
-            flock($fileHandle, LOCK_UN);
-            fclose($fileHandle);
+            self::$lockHandles[$lockId] = $fileHandle;
             return true;
         }
 
@@ -51,54 +52,51 @@ class FileHelper
         return false;
     }
 
-    // 释放与 $key 关联的锁文件，删除锁文件。删除成功返回 true，文件不存在或失败返回 false。
+    // 释放与 $key 关联的锁。锁文件保持稳定，避免解锁后删除路径造成 inode 竞态。
     public static function unlock(string $key): bool
     {
-        $filePath = self::getLockFilePath($key);
-        if (!file_exists($filePath)) {
+        $lockId = md5($key);
+        if (!isset(self::$lockHandles[$lockId])) {
             return false;
         }
 
-        $fileHandle = fopen($filePath, 'w');
-        if (is_resource($fileHandle)) {
-            flock($fileHandle, LOCK_UN);
-            fclose($fileHandle);
-        }
+        $fileHandle = self::$lockHandles[$lockId];
+        unset(self::$lockHandles[$lockId]);
+        $released = flock($fileHandle, LOCK_UN);
+        fclose($fileHandle);
 
-        return unlink($filePath);
+        return $released;
     }
 
-    // 检查锁是否有效。若锁文件存在但过期，自动释放锁。锁有效返回 true，否则 false。
+    // 检查当前是否有进程持有该锁。
     public static function isLocked(string $key): bool
     {
+        $lockId = md5($key);
+        if (isset(self::$lockHandles[$lockId])) {
+            return true;
+        }
+
         $filePath = self::getLockFilePath($key);
-        if (!file_exists($filePath)) {
+        $fileHandle = @fopen($filePath, 'c');
+        if (!is_resource($fileHandle)) {
             return false;
         }
 
-        $expiredFilePath = $filePath . '.expired';
-
-        $expireTime = self::getExpireTime($filePath);
-        if (time() > $expireTime) {
-            // 原子操作：将锁文件重命名为过期文件（避免并发删除冲突）
-            if (rename($filePath, $expiredFilePath)) {
-                // 仅删除已标记为过期的文件
-                self::unlock($expiredFilePath);
-                return false;
-            }
+        if (flock($fileHandle, LOCK_EX | LOCK_NB)) {
+            flock($fileHandle, LOCK_UN);
+            fclose($fileHandle);
             return false;
         }
 
+        fclose($fileHandle);
         return true;
     }
 
-    // 设置过期时间
     private static function expireAt(string $filePath, int $expire): void
     {
         touch($filePath, time() + $expire);
     }
 
-    // 过期时间
     private static function getExpireTime(string $filePath): int
     {
         return (int)filemtime($filePath);

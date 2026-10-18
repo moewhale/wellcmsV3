@@ -68,6 +68,16 @@ class TokenService
             'time' => time()
         ], $extraData);
 
+        if (!is_string($data['user_agent']) || !is_string($data['query_string'])) {
+            throw new \InvalidArgumentException('Token request bindings must be strings.');
+        }
+
+        // 请求头和查询串是原始字节；摘要避免 JSON 编码改变生成/验证的绑定值。
+        $data['token_version'] = 2;
+        $data['user_agent_hash'] = hash('sha256', $data['user_agent']);
+        $data['query_string_hash'] = hash('sha256', $data['query_string']);
+        unset($data['user_agent'], $data['query_string']);
+
         $authKey = $this->appConfig['auth_key'] ?? '';
         $safeKey = empty($salt) ? $authKey : (SecurityHelper::decrypt($salt, $authKey) ?: $authKey);
 
@@ -93,6 +103,10 @@ class TokenService
         $payload = SecurityHelper::decodeToken($safeKey, $token);
         if (!$payload || !is_array($payload)) return false;
 
+        // 已签发的无版本令牌继续使用原始字符串绑定，未知版本不得降级验证。
+        $version = array_key_exists('token_version', $payload) ? $payload['token_version'] : 1;
+        if ($version !== 1 && $version !== 2) return false;
+
         $userAgent = $this->getState('capturedUa', '');
         $capturedIp = $this->getState('capturedIp', '0.0.0.0');
 
@@ -100,21 +114,25 @@ class TokenService
         if (($payload['long_ip'] ?? 0) !== $capturedIp) return false;
 
         // 2. 校验 UserAgent
-        if (($payload['user_agent'] ?? '') !== $userAgent) return false;
-
-        // 3. 校验有效期
-        if (time() - ($payload['time'] ?? 0) > $ttl) return false;
-
-        // 4. 校验 QueryString (防跨站加强)
-        if ($checkQuery) {
-            if (!$this->getState('isAjax')) {
-                $refererQuery = $this->getState('refererQuery', '');
-                if ($refererQuery !== '') {
-                    if (($payload['query_string'] ?? '') !== $refererQuery) return false;
-                }
-            }
+        if ($version === 2) {
+            $uaHash = $payload['user_agent_hash'] ?? null;
+            if (!is_string($uaHash) || !hash_equals($uaHash, hash('sha256', $userAgent))) return false;
+        } elseif (($payload['user_agent'] ?? '') !== $userAgent) {
+            return false;
         }
 
-        return true;
+        // 3. 校验有效期
+        $issuedAt = $payload['time'] ?? null;
+        if (!is_int($issuedAt) || time() - $issuedAt > $ttl) return false;
+
+        // 4. 校验 QueryString (防跨站加强)
+        if (!$checkQuery || $this->getState('isAjax')) return true;
+
+        $refererQuery = $this->getState('refererQuery', '');
+        if ($refererQuery === '') return true;
+        if ($version === 1) return ($payload['query_string'] ?? '') === $refererQuery;
+
+        $queryHash = $payload['query_string_hash'] ?? null;
+        return is_string($queryHash) && hash_equals($queryHash, hash('sha256', $refererQuery));
     }
 }

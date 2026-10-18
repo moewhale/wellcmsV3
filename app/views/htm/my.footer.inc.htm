@@ -8,9 +8,11 @@
 			<p class="font-bold">Debug Info:</p>
 			<p>Processed Time:<?php echo $view->e('website.running.processed_time'); ?></p>
 			<ul class="list-disc pl-4 mt-2 space-y-1">
+				<!--wellcms-debug-sql:start-->
 				<?php foreach ($view->get('website.running.sqls') as $SQLString) { ?>
 				<li><?php echo htmlspecialchars($SQLString); ?></li>
 				<?php } ?>
+				<!--wellcms-debug-sql:end-->
 			</ul>
 			<br>
 			<p>
@@ -38,7 +40,9 @@
 							<?php echo substr($view->get('website.running.processed_time'), 0, 5); ?>
 						</b>, SQL:
 						<b>
+							<?php if (\defined('DEBUG') && \DEBUG > 1) { echo '<!--wellcms-debug-count:start-->'; } ?>
 							<?php echo $view->get('website.running.sql_count'); ?>
+							<?php if (\defined('DEBUG') && \DEBUG > 1) { echo '<!--wellcms-debug-count:end-->'; } ?>
 						</b>
 					</div>
 					<!--{hook my.footer_inc_processed_after.htm}-->

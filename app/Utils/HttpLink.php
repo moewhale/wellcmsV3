@@ -25,7 +25,7 @@ class HttpLink
         
         $len = strrpos($php_self, '//');
         false === $len and $len = strrpos($php_self, '/');
-        $path = substr($php_self, 0, $len);
+        $path = false === $len ? '' : substr($php_self, 0, $len);
         $urlRewriteOn <= 2 and $path = $path . '/';
         $http = IpHelper::scheme();
         

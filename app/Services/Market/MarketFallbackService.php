@@ -13,7 +13,6 @@ use Framework\Utils\Validator;
 /**
  * 应用商店降级服务
  * 职责：服务端不可用时提供本地缓存降级
- * 遵循 Skill #16: 非主键聚合统计冗余化
  */
 class MarketFallbackService
 {
@@ -116,9 +115,7 @@ class MarketFallbackService
     {
         Validator::make(['items' => $items], ['items' => 'required|array']);
 
-        if (empty($items)) {
-            return [];
-        }
+        if (empty($items)) return [];
 
         $result = [];
         $dirs = [];
@@ -126,9 +123,7 @@ class MarketFallbackService
         // 收集需要查询的目录
         foreach ($items as $item) {
             $dir = is_string($item) ? $item : ($item['dir'] ?? '');
-            if ($dir) {
-                $dirs[] = $dir;
-            }
+            if ($dir) $dirs[] = $dir;
         }
 
         // 尝试从服务端获取
@@ -138,11 +133,19 @@ class MarketFallbackService
                 $serverData = $marketClient->queryExtensions($items);
 
                 if (!empty($serverData)) {
-                    // 缓存每个插件信息
-                    // FIX: 服务端 query() 返回 has_bought，不是 is_bought
+                    // 公共商品数据与用户购买投影分开缓存，禁止跨账号泄漏授权状态。
+                    $identityScope = $this->getIdentityScope();
                     foreach ($serverData as $dir => $data) {
-                        $this->cacheData("plugin_detail:{$dir}", $data);
-                        $this->cacheData("plugin_bought:{$dir}", $data['has_bought'] ?? false);
+                        $publicData = $data;
+                        unset($publicData['has_bought'], $publicData['payment_id'], $publicData['is_bought']);
+                        $this->cacheData("plugin_detail:{$dir}", $publicData);
+
+                        $purchaseKey = "plugin_bought:{$identityScope}:{$dir}";
+                        $this->cacheData($purchaseKey, [
+                            'has_bought' => (bool)($data['has_bought'] ?? false),
+                            'payment_id' => (int)($data['payment_id'] ?? 0),
+                        ]);
+                        $this->addPurchaseKeyToIndex($purchaseKey);
                         $this->addToIndex($dir);
                     }
 
@@ -155,10 +158,15 @@ class MarketFallbackService
         }
 
         // 降级到本地缓存
+        $identityScope = $this->getIdentityScope();
         foreach ($dirs as $dir) {
             $cachedDetail = $this->getCachedData("plugin_detail:{$dir}");
             if ($cachedDetail) {
-                $cachedDetail['is_bought'] = $this->getCachedData("plugin_bought:{$dir}") ?? false;
+                $purchase = $this->getCachedData("plugin_bought:{$identityScope}:{$dir}");
+                $purchase = is_array($purchase) ? $purchase : [];
+                $cachedDetail['has_bought'] = (bool)($purchase['has_bought'] ?? false);
+                $cachedDetail['payment_id'] = (int)($purchase['payment_id'] ?? 0);
+                $cachedDetail['is_bought'] = $cachedDetail['has_bought'];
                 $cachedDetail['from_cache'] = true;
                 $result[$dir] = $cachedDetail;
             }
@@ -177,23 +185,26 @@ class MarketFallbackService
     {
         Validator::make(['dir' => $dir], ['dir' => 'required|string']);
 
-        $cacheKey = "plugin_bought:{$dir}";
+        $cacheKey = 'plugin_bought:' . $this->getIdentityScope() . ':' . $dir;
         $cached = $this->getCachedData($cacheKey);
 
         if ($this->circuitBreaker->canRequest()) {
             try {
                 $marketClient = $this->container->get(MarketClient::class);
-                // FIX: bought.html 期望参数 dirs（数组），不是 dir（字符串）
+                // bought.html 参数 dirs（数组）
                 $result = $marketClient->request('bought.html', ['dirs' => [$dir]]);
                 $data = json_decode($result, true);
 
-                // FIX: 服务端 bought() 返回 {status: success, data: {dir: {dir, bought, payment_id}}}
-                // 原代码错误地检查 $data['code']，该字段不存在
+                // 服务端 bought() 返回 {status: success, data: {dir: {dir, bought, payment_id}}}
                 if (isset($data['status']) && $data['status'] === 'success') {
                     $resultData = $data['data'] ?? [];
                     $item = $resultData[$dir] ?? [];
                     $bought = !empty($item['payment_id']);
-                    $this->cacheData($cacheKey, $bought);
+                    $this->cacheData($cacheKey, [
+                        'has_bought' => $bought,
+                        'payment_id' => (int)($item['payment_id'] ?? 0),
+                    ]);
+                    $this->addPurchaseKeyToIndex($cacheKey);
                     return $bought;
                 }
 
@@ -203,7 +214,7 @@ class MarketFallbackService
         }
 
         // 降级：默认未购买（安全策略）
-        return $cached ?? false;
+        return is_array($cached) ? (bool)($cached['has_bought'] ?? false) : false;
     }
 
     /**
@@ -255,6 +266,15 @@ class MarketFallbackService
             $this->kv->delete("fallback:plugin_bought:{$dir}");
         }
         $this->kv->delete($indexKey);
+
+        $purchaseIndexKey = 'fallback:index:purchase_keys';
+        $purchaseKeys = $this->kv->get($purchaseIndexKey) ?? [];
+        foreach ($purchaseKeys as $purchaseKey) {
+            if (is_string($purchaseKey)) {
+                $this->kv->delete('fallback:' . $purchaseKey);
+            }
+        }
+        $this->kv->delete($purchaseIndexKey);
     }
 
     /**
@@ -271,6 +291,29 @@ class MarketFallbackService
             $keys[] = $dir;
             $this->kv->set($indexKey, $keys);
         }
+    }
+
+    protected function addPurchaseKeyToIndex(string $purchaseKey): void
+    {
+        $indexKey = 'fallback:index:purchase_keys';
+        $keys = $this->kv->get($indexKey) ?? [];
+        if (!in_array($purchaseKey, $keys, true)) {
+            $keys[] = $purchaseKey;
+            if (!$this->kv->set($indexKey, $keys)) {
+                throw new \RuntimeException('Failed to persist store purchase cache index');
+            }
+        }
+    }
+
+    protected function getIdentityScope(): string
+    {
+        $credentials = $this->container->get(MarketClient::class)->getCredentials();
+        if (!is_array($credentials)
+            || (int)($credentials['user_id'] ?? 0) <= 0
+            || (string)($credentials['site_id'] ?? '') === '') {
+            return 'anonymous';
+        }
+        return hash('sha256', (int)$credentials['user_id'] . ':' . (string)$credentials['site_id']);
     }
 
     /**

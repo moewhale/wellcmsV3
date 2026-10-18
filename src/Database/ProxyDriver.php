@@ -12,6 +12,7 @@ use PDOStatement;
 use Throwable;
 use Framework\Database\Driver\PdoDriver;
 use Framework\Database\Pool\PoolInterface;
+use Framework\Exception\Infra\RollbackOnlyException;
 
 /**
  * ProxyDriver
@@ -62,10 +63,10 @@ class ProxyDriver extends PdoDriver
         // 惰性校准隔离级别，防止连接池中的状态污染
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $targetLevel = $ctx->dbIsolationLevel ?? $this->defaultIsolationLevel;
+            $targetLevel = $ctx['dbIsolationLevel'] ?? $this->defaultIsolationLevel;
 
             // 将隔离级别映射存入协程上下文，避免进程级 static 共享
-            $isolationLevels = $ctx->dbIsolationLevels ?? [];
+            $isolationLevels = $ctx['dbIsolationLevels'] ?? [];
             $oid = \spl_object_id($pdo);
             $currentLevel = $isolationLevels[$oid] ?? null;
 
@@ -76,7 +77,7 @@ class ProxyDriver extends PdoDriver
                     try {
                         $pdo->exec($this->grammar->compileIsolationLevel($targetLevel));
                         $isolationLevels[$oid] = $targetLevel;
-                        $ctx->dbIsolationLevels = $isolationLevels;
+                        $ctx['dbIsolationLevels'] = $isolationLevels;
                     } catch (\Throwable $e) {
                         try {
                             $this->pool->releaseConnection($pdo);
@@ -85,6 +86,17 @@ class ProxyDriver extends PdoDriver
                         }
                         throw $e;
                     }
+                }
+            }
+        } elseif ($this->pool instanceof \Framework\Database\Pool\FpmConnectionPool) {
+            if (!$this->pool->inTransaction($shard)) {
+                try {
+                    $this->pool->configureIsolationLevel($pdo, $shard, $this->defaultIsolationLevel,
+                        $this->grammar->compileIsolationLevel($this->defaultIsolationLevel));
+                } catch (\Throwable $e) {
+                    $this->pool->reportError($pdo, $e);
+                    $this->pool->releaseConnection($pdo);
+                    throw $e;
                 }
             }
         } else {
@@ -122,9 +134,9 @@ class ProxyDriver extends PdoDriver
         $ctx = self::coroContext();
         if ($ctx !== null) {
             $oid = \spl_object_id($pdo);
-            $isolationLevels = $ctx->dbIsolationLevels ?? [];
+            $isolationLevels = $ctx['dbIsolationLevels'] ?? [];
             unset($isolationLevels[$oid]);
-            $ctx->dbIsolationLevels = $isolationLevels;
+            $ctx['dbIsolationLevels'] = $isolationLevels;
         } else {
             unset($this->isolationLevels[\spl_object_id($pdo)]);
         }
@@ -133,19 +145,26 @@ class ProxyDriver extends PdoDriver
 
     public function beginTransaction(string $shard = ''): bool
     {
+        $ctx = self::coroContext();
+        $fpmPool = $ctx === null && $this->pool instanceof \Framework\Database\Pool\FpmConnectionPool;
+        // 在 BEGIN 之前校准，确保当前事务即使用目标隔离级别。
+        if ($fpmPool && !$this->pool->inTransaction($shard)) $this->connect('master', $shard);
         $result = $this->pool->beginTransaction($shard);
         $this->setTransactionState(true);
 
+        if ($result && $this->pool->getTransactionLevel($shard) === 1) {
+            $this->resetTransactionCallbacks();
+        }
+
         // 仅在事务层级从 0 -> 1 时设置隔离级别，避免嵌套事务重复执行 SET SESSION
-        $ctx = self::coroContext();
         if ($ctx !== null && $this->pool->getTransactionLevel($shard) === 1) {
-            $targetLevel = $ctx->dbIsolationLevel ?? $this->defaultIsolationLevel;
+            $targetLevel = $ctx['dbIsolationLevel'] ?? $this->defaultIsolationLevel;
             $pdo = $this->pool->getConnection('master', $shard);
             $pdo->exec($this->grammar->compileIsolationLevel($targetLevel));
-            $isolationLevels = $ctx->dbIsolationLevels ?? [];
+            $isolationLevels = $ctx['dbIsolationLevels'] ?? [];
             $isolationLevels[\spl_object_id($pdo)] = $targetLevel;
-            $ctx->dbIsolationLevels = $isolationLevels;
-        } elseif ($ctx === null && $this->pool->getTransactionLevel($shard) === 1) {
+            $ctx['dbIsolationLevels'] = $isolationLevels;
+        } elseif ($ctx === null && !$fpmPool && $this->pool->getTransactionLevel($shard) === 1) {
             $targetLevel = $this->defaultIsolationLevel;
             $pdo = $this->pool->getConnection('master', $shard);
             $pdo->exec($this->grammar->compileIsolationLevel($targetLevel));
@@ -157,16 +176,46 @@ class ProxyDriver extends PdoDriver
 
     public function commit(string $shard = ''): bool
     {
-        $result = $this->pool->commit($shard);
-        $this->setTransactionState(false);
-        return $result;
+        try {
+            $result = $this->pool->commit($shard);
+            $active = $this->pool->inTransaction($shard);
+            $this->setTransactionState($active);
+            if ($result && !$active) {
+                $this->finalizeTransactionCallbacks(true);
+            }
+            return $result;
+        } catch (\Throwable $e) {
+            $active = $this->pool->inTransaction($shard);
+            $this->setTransactionState($active);
+            if (!$active) {
+                if ($e instanceof RollbackOnlyException) {
+                    // 内层 rollback-only 在最外层 commit 时已经实际执行回滚。
+                    $this->finalizeTransactionCallbacks(false);
+                } else {
+                    // commit 异常不能证明服务端已回滚，禁止误执行补偿回调。
+                    $this->clearTransactionCallbacks();
+                }
+            }
+            throw $e;
+        }
     }
 
     public function rollback(string $shard = ''): bool
     {
-        $result = $this->pool->rollback($shard);
-        $this->setTransactionState(false);
-        return $result;
+        try {
+            $result = $this->pool->rollback($shard);
+            $active = $this->pool->inTransaction($shard);
+            $this->setTransactionState($active);
+            if ($result && !$active) {
+                $this->finalizeTransactionCallbacks(false);
+            }
+            return $result;
+        } catch (\Throwable $e) {
+            $active = $this->pool->inTransaction($shard);
+            $this->setTransactionState($active);
+            if (!$active) $this->clearTransactionCallbacks();
+            throw $e;
+        }
     }
 
     public function inTransaction(string $shard = ''): bool
@@ -175,16 +224,25 @@ class ProxyDriver extends PdoDriver
     }
 
     /**
-     * 重写隔离级别设置，确保 FPM 连接池模式下后续 connect() 能感知到变更并重新校准
+     * 显式设置成功后同步目标隔离级别，供其它连接与替换连接校准
      */
     public function setIsolationLevel(string $level, string $shard = ''): void
     {
+        $level = strtoupper($level);
         parent::setIsolationLevel($level, $shard);
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $ctx->dbIsolationLevel = $level;
+            $ctx['dbIsolationLevel'] = $level;
         }
         $this->defaultIsolationLevel = $level;
+    }
+
+    protected function applyIsolationLevel(PDO $pdo, string $level, string $shard): void
+    {
+        parent::applyIsolationLevel($pdo, $level, $shard);
+        if (self::coroContext() === null && $this->pool instanceof \Framework\Database\Pool\FpmConnectionPool) {
+            $this->pool->recordIsolationLevel($pdo, $shard, $level);
+        }
     }
 
     /**

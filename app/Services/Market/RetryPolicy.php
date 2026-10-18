@@ -9,7 +9,7 @@ namespace App\Services\Market;
 
 /**
  * 重试策略配置
- * 职责：管理 API 请求的指数退避重试策略
+ * 管理 API 请求的指数退避重试策略
  */
 class RetryPolicy
 {
@@ -62,19 +62,13 @@ class RetryPolicy
      */
     public function shouldRetry(int $attempt, ?int $errorCode = null, ?\Exception $exception = null): bool
     {
-        if ($attempt >= $this->maxRetries) {
-            return false;
-        }
+        if ($attempt >= $this->maxRetries) return false;
 
         // 网络异常一律重试
-        if ($exception instanceof \Framework\Utils\HttpClientNetworkException) {
-            return true;
-        }
+        if ($exception instanceof \Framework\Utils\HttpClientNetworkException) return true;
 
         // 根据错误码判断
-        if ($errorCode !== null && in_array($errorCode, $this->retryableCodes, true)) {
-            return true;
-        }
+        if ($errorCode !== null && in_array($errorCode, $this->retryableCodes, true)) return true;
 
         return false;
     }

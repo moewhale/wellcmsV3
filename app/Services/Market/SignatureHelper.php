@@ -69,7 +69,9 @@ class SignatureHelper
      */
     public static function verifyRequest(array $data, string $key): bool
     {
-        if (empty($data['sign'])) {
+        if (!isset($data['sign'])
+            || !is_string($data['sign'])
+            || !preg_match('/^[a-f0-9]{64}$/i', $data['sign'])) {
             return false;
         }
 

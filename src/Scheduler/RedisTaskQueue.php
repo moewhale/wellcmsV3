@@ -22,6 +22,13 @@ class RedisTaskQueue implements \Framework\Scheduler\Interfaces\TaskQueueInterfa
     private const HASH_KEY = 'scheduler:queue:hash';
     private const FAILED_LIST = 'scheduler:queue:failed_list';
     private const SUCCESS_LIST = 'scheduler:queue:success_list';
+
+    /** HASH payload 与 ZSET 可见性必须在同一个 Redis 原子操作中提交。 */
+    private const S_WRITE_TASK = <<<'LUA'
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('ZADD', KEYS[2], ARGV[3], ARGV[1])
+return 1
+LUA;
     /**
      * Summary of redis
      * @var \Framework\Cache\Drivers\RedisCache
@@ -54,16 +61,7 @@ class RedisTaskQueue implements \Framework\Scheduler\Interfaces\TaskQueueInterfa
     public function push(Task $task): void
     {
         $task->updatedAt = time();
-        // 1. 存储 Task 详细信息到 HASH
-        $json = json_encode($task->toArray(), JSON_UNESCAPED_UNICODE);
-        if ($json === false) {
-            throw new \RuntimeException('Task json encode error: ' . json_last_error_msg());
-        }
-
-        $this->redis->hSet(self::HASH_KEY, $task->id, $json);
-        // 2. 将任务 ID 推入 ZSET，分数= (scheduledAt << 22) | priority
-        $score = $this->calcScore($task);
-        $this->redis->zAdd(self::ZSET_KEY, [$score => $task->id]);
+        $this->pushTaskToQueue($task);
     }
 
     /* public function pop(): ?Task
@@ -154,6 +152,41 @@ LUA;
     }
 
     /**
+     * 从权威存储恢复任务，不改写原始时间字段。
+     */
+    public function restore(Task $task): void
+    {
+        $this->pushTaskToQueue($task);
+    }
+
+    /**
+     * O(1) 核验任务是否仍处于 Redis 待执行或运行索引。
+     */
+    public function hasActiveTask(string $taskId, string $dedupeKey): bool
+    {
+        $raw = $this->redis->hGet(self::HASH_KEY, $taskId);
+        if (!is_string($raw) || $raw === '') {
+            return false;
+        }
+
+        $data = json_decode($raw, true);
+        if (!is_array($data)
+            || ($data['id'] ?? '') !== $taskId
+            || (string)($data['dedupeKey'] ?? '') !== $dedupeKey
+            || !in_array(
+                (int)($data['status'] ?? -1),
+                [Task::STATUS_PENDING, Task::STATUS_RETRYING, Task::STATUS_RUNNING],
+                true
+            )
+        ) {
+            return false;
+        }
+
+        return $this->redis->zScore(self::ZSET_KEY, $taskId) !== false
+            || $this->redis->zScore('scheduler:running:zset', $taskId) !== false;
+    }
+
+    /**
      * 内部：将 Task 写入 HASH + ZSET
      */
     private function pushTaskToQueue(Task $task): void
@@ -163,8 +196,16 @@ LUA;
             throw new \RuntimeException('Task json encode error: ' . json_last_error_msg());
         }
         $score = $this->calcScore($task);
-        $this->redis->hSet(self::HASH_KEY, $task->id, $json);
-        $this->redis->zAdd(self::ZSET_KEY, [$score => $task->id]);
+        $hashKey = $this->redis->withPrefix(self::HASH_KEY);
+        $zsetKey = $this->redis->withPrefix(self::ZSET_KEY);
+        $written = (int)$this->redis->call(
+            self::S_WRITE_TASK,
+            [$hashKey, $zsetKey, $task->id, $json, $score],
+            2
+        );
+        if ($written !== 1) {
+            throw new \RuntimeException('Unable to atomically write scheduler task');
+        }
     }
 
     /**

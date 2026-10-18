@@ -96,13 +96,22 @@ class I18nDateFormatter
             $dateTypeInt = is_int($dateType) ? $dateType : $this->getIntlConstant($dateType);
             $timeTypeInt = is_int($timeType) ? $timeType : $this->getIntlConstant($timeType);
 
-            $fmt = new \IntlDateFormatter(
-                $this->getLocale(), // ICU/BCP47 都可，这里传 ICU 形式
-                $dateTypeInt,
-                $timeTypeInt,
-                $this->getTimezone(),
-                \IntlDateFormatter::GREGORIAN
-            );
+            $locale = $this->getLocale();
+            $timezone = $this->getTimezone();
+            $key = $locale . "\0" . $timezone . "\0" . $dateTypeInt . ':' . $timeTypeInt;
+            $formatters = $this->getState('formatters', []);
+            if (!isset($formatters[$key])) {
+                // 格式器只在当前请求/协程内复用；语言、时区和格式分别作为键。
+                $formatters[$key] = new \IntlDateFormatter(
+                    $locale,
+                    $dateTypeInt,
+                    $timeTypeInt,
+                    $timezone,
+                    \IntlDateFormatter::GREGORIAN
+                );
+                $this->setState('formatters', $formatters);
+            }
+            $fmt = $formatters[$key];
             $out = $fmt->format($dt);
             if ($out === false) {
                 // 极端情况下 ICU 数据不完整时兜底

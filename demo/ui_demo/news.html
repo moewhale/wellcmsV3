@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>筛选-DUX主题演示</title>
+	<link rel="stylesheet" href="assets/css/dux.css">
+	<script>
+		/* 防闪烁：与 WellCMS v3 主题初始化逻辑一致 */
+		if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+			document.documentElement.classList.add('dark');
+		} else {
+			document.documentElement.classList.remove('dark');
+		}
+	</script>
+</head>
+<body class="bg-slate-50 dark:bg-slate-900 text-gray-800 dark:text-gray-200 font-sans min-h-screen flex flex-col">
+
+<!-- Header（结构参考 WellCMS v3 header_nav.inc.htm，Soft UI 风格化） -->
+<header class="sticky top-0 w-full z-50 transition-all duration-300">
+	<div class="absolute inset-0 glass-header -z-10"></div>
+	<div class="max-w-6xl mx-auto px-4 md:px-6 lg:px-8">
+		<div class="flex items-center h-16 relative">
+			<!-- Navigation Backdrop (Mobile Only) -->
+			<div id="nav-backdrop" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm opacity-0 hidden transition-opacity duration-300 z-[60]"></div>
+
+			<!-- Mobile Hamburger -->
+			<div class="flex md:hidden items-center absolute left-0 z-[65]">
+				<button id="mobile-menu-toggle" aria-label="打开菜单" class="p-2 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors focus:outline-none">
+					<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+				</button>
+			</div>
+
+			<!-- Logo -->
+			<div class="flex items-center md:static absolute left-1/2 -translate-x-1/2 md:translate-x-0 h-16 z-10">
+				<a href="index.html" class="flex items-center gap-2 font-semibold text-xl md:text-2xl text-gray-800 dark:text-white whitespace-nowrap">
+					<span class="w-9 h-9 rounded-full bg-indigo-500/10 flex items-center justify-center">
+						<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+					</span>
+					DUX
+				</a>
+			</div>
+
+			<!-- Main Nav -->
+			<nav id="main-nav" class="fixed inset-y-0 left-0 w-72 h-full bg-white dark:bg-slate-900 shadow-2xl transform -translate-x-full transition-transform duration-300 ease-in-out z-[70] md:relative md:translate-x-0 md:inset-auto md:w-auto md:h-auto md:bg-transparent md:dark:bg-transparent md:flex md:items-center md:ml-8 md:shadow-none text-left overflow-y-auto md:overflow-visible">
+				<div class="p-6 md:hidden flex items-center justify-between mb-4 bg-white dark:bg-slate-900">
+					<span class="text-xl font-semibold text-gray-800 dark:text-white">DUX</span>
+					<button id="nav-close" aria-label="关闭菜单" class="p-2 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white">
+						<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+					</button>
+				</div>
+				<div class="flex flex-col md:flex-row p-6 md:p-0 space-y-2 md:space-y-0 md:items-center md:space-x-1 text-sm md:text-base">
+					<a href="index.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">首页</a>
+					<a href="category.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">分类</a>
+					<a href="zhuanti.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">专题</a>
+					<a href="notice.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">短文</a>
+					<a href="kuai.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">快讯</a>
+					<a href="news.html" class="px-4 py-2.5 rounded-2xl font-medium text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 transition-colors">筛选</a>
+					<!-- 产品（下拉） -->
+					<div class="relative group">
+						<button class="flex items-center justify-between w-full md:w-auto px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors focus:outline-none" onclick="if(window.innerWidth < 768) this.nextElementSibling.classList.toggle('hidden')">
+							<span>产品</span>
+							<svg class="w-4 h-4 ml-1 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+						</button>
+						<div class="hidden md:block md:absolute left-0 mt-2 w-52 md:transition-all md:duration-200 md:opacity-0 md:invisible md:translate-y-2 md:group-hover:opacity-100 md:group-hover:visible md:group-hover:translate-y-0 z-50">
+							<div class="mt-2 md:mt-0 md:bg-white md:dark:bg-slate-800 md:rounded-2xl md:shadow-xl md:shadow-gray-200/50 md:dark:shadow-slate-900/50 overflow-hidden p-2 space-y-1 md:space-y-0 ml-4 md:ml-0">
+								<a href="product.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">产品中心</a>
+								<a href="product.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">产品二级目录</a>
+								<a href="product.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors md:pl-8 pl-8">产品三级目录</a>
+							</div>
+						</div>
+					</div>
+					<!-- 页面（下拉） -->
+					<div class="relative group">
+						<button class="flex items-center justify-between w-full md:w-auto px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors focus:outline-none" onclick="if(window.innerWidth < 768) this.nextElementSibling.classList.toggle('hidden')">
+							<span>页面</span>
+							<svg class="w-4 h-4 ml-1 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+						</button>
+						<div class="hidden md:block md:absolute left-0 mt-2 w-52 md:transition-all md:duration-200 md:opacity-0 md:invisible md:translate-y-2 md:group-hover:opacity-100 md:group-hover:visible md:group-hover:translate-y-0 z-50">
+							<div class="mt-2 md:mt-0 md:bg-white md:dark:bg-slate-800 md:rounded-2xl md:shadow-xl md:shadow-gray-200/50 md:dark:shadow-slate-900/50 overflow-hidden p-2 space-y-1 md:space-y-0 ml-4 md:ml-0">
+								<a href="zcd.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">子菜单页面</a>
+								<a href="sample-page.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">友情链接</a>
+								<a href="archives.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">页面存档</a>
+								<a href="readers.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">读者墙</a>
+								<a href="navs.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">网址导航</a>
+								<a href="tags.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">标签云</a>
+								<a href="has-side.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">有边栏页面</a>
+								<a href="no-sidebar.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">无边栏页面</a>
+								<a href="blank.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">空白内容</a>
+								<a href="full.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">全宽屏幕空白页面</a>
+							</div>
+						</div>
+					</div>
+				</div>
+			</nav>
+
+			<!-- Actions -->
+			<div class="flex items-center space-x-2 ml-auto">
+				<!-- 暗色切换（与 WellCMS v3 一致） -->
+				<button onclick="wellcms.toggleDarkMode()" aria-label="切换夜间模式" class="p-2 rounded-full text-gray-500 hover:text-gray-900 hover:bg-indigo-500/10 dark:text-gray-400 dark:hover:text-white transition-colors">
+					<span class="dark:hidden">
+						<svg class="w-5 h-5 text-gray-600 dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+					</span>
+					<span class="hidden dark:inline">
+						<svg class="w-5 h-5 text-yellow-400 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+					</span>
+				</button>
+				<a href="#" rel="nofollow" class="hidden md:inline-flex px-5 py-2 rounded-2xl text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-slate-800 shadow-lg shadow-gray-200/50 dark:shadow-slate-900/40 hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200">注册</a>
+				<a href="#" rel="nofollow" class="inline-flex px-5 py-2 rounded-2xl text-sm font-medium text-white bg-indigo-600 shadow-lg shadow-indigo-600/30 hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200">登录</a>
+			</div>
+		</div>
+	</div>
+</header>
+
+<!-- Main -->
+<main class="flex-1 w-full max-w-6xl mx-auto px-4 md:px-6 lg:px-8 py-8 md:py-12">
+	<div class="flex flex-col lg:flex-row gap-6 md:gap-8">
+
+		<!-- Content -->
+		<div class="flex-1 min-w-0 space-y-6 md:space-y-8">
+
+			<!-- 广告位 -->
+			<a href="https://themebetter.com/theme/dux" target="_blank" rel="external nofollow" class="soft-card p-6 md:p-8 flex items-center justify-center gap-3 text-sm md:text-base font-medium text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200">
+				<span class="w-9 h-9 rounded-full bg-indigo-500/10 flex items-center justify-center flex-shrink-0">
+					<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z"></path></svg>
+				</span>
+				广告位，电脑和手机可分别设置，可放任何广告代码
+			</a>
+
+			<!-- 分类筛选器 -->
+			<section class="soft-card p-6 md:p-8">
+				<div class="flex items-center gap-3 mb-6">
+					<span class="w-10 h-10 rounded-full bg-indigo-500/10 flex items-center justify-center flex-shrink-0">
+						<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"></path></svg>
+					</span>
+					<h1 class="font-semibold text-2xl md:text-3xl text-gray-800 dark:text-gray-100">筛选</h1>
+				</div>
+				<ul class="space-y-4">
+					<li class="flex flex-col sm:flex-row sm:items-center gap-3">
+						<strong class="text-sm font-medium text-gray-800 dark:text-gray-100 flex-shrink-0 sm:w-20">二级分类</strong>
+						<div class="flex flex-wrap gap-2">
+							<a href="news.html" rel="nofollow" class="px-4 py-1.5 rounded-full text-xs bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20 transition-colors">三级分类1</a>
+							<a href="news.html" rel="nofollow" class="px-4 py-1.5 rounded-full text-xs bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20 transition-colors">三级分类2</a>
+							<a href="news.html" rel="nofollow" class="px-4 py-1.5 rounded-full text-xs bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20 transition-colors">三级分类3</a>
+						</div>
+					</li>
+					<li class="flex flex-col sm:flex-row sm:items-center gap-3">
+						<strong class="text-sm font-medium text-gray-800 dark:text-gray-100 flex-shrink-0 sm:w-20">二级分类2</strong>
+						<div class="flex flex-wrap gap-2">
+							<a href="news.html" rel="nofollow" class="px-4 py-1.5 rounded-full text-xs bg-pink-500/10 text-pink-500 hover:bg-pink-500/20 transition-colors">三级分类21</a>
+							<a href="news.html" rel="nofollow" class="px-4 py-1.5 rounded-full text-xs bg-pink-500/10 text-pink-500 hover:bg-pink-500/20 transition-colors">三级分类22</a>
+							<a href="news.html" rel="nofollow" class="px-4 py-1.5 rounded-full text-xs bg-pink-500/10 text-pink-500 hover:bg-pink-500/20 transition-colors">三级分类23</a>
+							<a href="news.html" rel="nofollow" class="px-4 py-1.5 rounded-full text-xs bg-pink-500/10 text-pink-500 hover:bg-pink-500/20 transition-colors">三级分类24</a>
+						</div>
+					</li>
+					<li class="flex flex-col sm:flex-row sm:items-center gap-3">
+						<strong class="text-sm font-medium text-gray-800 dark:text-gray-100 flex-shrink-0 sm:w-20">二级分类3</strong>
+						<div class="flex flex-wrap gap-2">
+							<a href="news.html" rel="nofollow" class="px-4 py-1.5 rounded-full text-xs bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 transition-colors">三级分类31</a>
+						</div>
+					</li>
+				</ul>
+			</section>
+
+			<!-- 文章列表 -->
+			<div class="space-y-6 md:space-y-8">
+
+				<!-- 全宽横幅文章 -->
+				<article class="soft-card overflow-hidden hover:-translate-y-1 hover:shadow-2xl transition-all duration-300">
+					<a href="article.html" class="block">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2021/01/zt02.jpg" alt="DUX主题 8.0 版本强势上新，全新UI、提速2倍、夜间模式、横幅缩略图等等42项" class="w-full h-48 md:h-64 object-cover hover:scale-105 transition-transform duration-300">
+					</a>
+					<div class="p-6 md:p-8">
+						<header>
+							<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100"><a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">DUX主题 8.0 版本强势上新，全新UI、提速2倍、夜间模式、横幅缩略图等等42项</a></h2>
+						</header>
+						<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7 line-clamp-2">DUX主题8.0来了，有史以来最强大的主题更新。 DUX 8.0 带来了很多全新的展示和功能，这得益于我们对DUX主题做了一次大手术。42+的主题更新，毫不客气的说，一个全新等于10项新增。作为themebetter的C位一哥，DUX主题一...</p>
+						<div class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-400">
+							<span class="inline-flex items-center gap-1 text-pink-500"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5"></path></svg>赞(108)</span>
+							<span class="inline-flex items-center gap-1.5"><img class="w-5 h-5 rounded-full" src="https://cravatar.cn/avatar/62cd7ca13a42d9f02a51dc486a2c7d4691b6244d4253fdf83a8588bdecc4b683?s=96&d=mystery" alt="浩子">浩子</span>
+							<time>2022-10-31</time>
+							<span>阅读(7545)</span>
+							<a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">去评论</a>
+						</div>
+					</div>
+				</article>
+
+				<article class="soft-card p-6 md:p-8 flex flex-col sm:flex-row gap-6">
+					<a href="article.html" class="sm:w-48 md:w-56 flex-shrink-0 rounded-2xl overflow-hidden">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2015/06/110-220x150.jpg" alt="云适配获千万美金B轮融资，将开发移动端企业安全浏览器" class="w-full h-36 sm:h-full object-cover hover:scale-105 transition-transform duration-300">
+					</a>
+					<div class="flex-1 min-w-0">
+						<header>
+							<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100"><a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">云适配获千万美金B轮融资，将开发移动端企业安全浏览器</a></h2>
+						</header>
+						<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7 line-clamp-2">不论是打车，买菜，交水电费，乃至于按摩，现在几乎你能想到的消费行为都能通过移动端进行操作——事实已经证明移动端的对消费者服务是个大市场。那么对企业移动端的服务的市场又怎样呢？至少近日晨兴创投和 IDG 资本对云适配千万美元级的投资能告诉我们...</p>
+						<div class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-400">
+							<span class="inline-flex items-center gap-1 text-pink-500"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5"></path></svg>赞(332)</span>
+							<span class="inline-flex items-center gap-1.5"><img class="w-5 h-5 rounded-full" src="https://cravatar.cn/avatar/62cd7ca13a42d9f02a51dc486a2c7d4691b6244d4253fdf83a8588bdecc4b683?s=96&d=mystery" alt="浩子">浩子</span>
+							<time>2015-06-27</time>
+							<a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">去评论</a>
+						</div>
+					</div>
+				</article>
+
+				<article class="soft-card p-6 md:p-8">
+					<header>
+						<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100"><a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">TB Member 会员交易插件，WordPress建站好帮手</a></h2>
+					</header>
+					<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7 line-clamp-2">付费阅读/评论阅读/登录阅读、付费下载/评论下载/登录下载、登录（邮箱/手机/QQ/微信/支付宝/微博）、支付（微信支付/支付宝）、积分、签到、收藏、点赞、身份认证等超多功能...</p>
+					<div class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-400">
+						<span class="inline-flex items-center gap-1.5"><img class="w-5 h-5 rounded-full" src="https://cravatar.cn/avatar/62cd7ca13a42d9f02a51dc486a2c7d4691b6244d4253fdf83a8588bdecc4b683?s=96&d=mystery" alt="浩子">浩子</span>
+						<time>2026-08-22</time>
+					</div>
+				</article>
+
+				<article class="soft-card p-6 md:p-8 flex flex-col sm:flex-row gap-6">
+					<a href="article.html" class="sm:w-48 md:w-56 flex-shrink-0 rounded-2xl overflow-hidden">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2015/06/19-220x150.jpg" alt="辛苦创业赚的钱不受银行待见，于是我们做了“企业活期宝”" class="w-full h-36 sm:h-full object-cover hover:scale-105 transition-transform duration-300">
+					</a>
+					<div class="flex-1 min-w-0">
+						<header>
+							<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100"><a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">辛苦创业赚的钱不受银行待见，于是我们做了“企业活期宝”</a></h2>
+						</header>
+						<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7 line-clamp-2">写下这个标题的时候，我是很心酸的。每天和创业者打交道让我深切地感受到创业的艰难和创业者们时时刻刻都在经历的焦虑。很多人只看到“创业”这两个字带来的光环，却不知道创业者背后付出的艰辛。最令人难过的是，很多大型企业轻而易举就能获得的服务，对于创...</p>
+						<div class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-400">
+							<span class="inline-flex items-center gap-1 text-pink-500"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5"></path></svg>赞(174)</span>
+							<span class="inline-flex items-center gap-1.5"><img class="w-5 h-5 rounded-full" src="https://cravatar.cn/avatar/62cd7ca13a42d9f02a51dc486a2c7d4691b6244d4253fdf83a8588bdecc4b683?s=96&d=mystery" alt="浩子">浩子</span>
+							<time>2015-06-27</time>
+							<a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">去评论</a>
+						</div>
+					</div>
+				</article>
+
+				<article class="soft-card p-6 md:p-8 flex flex-col sm:flex-row gap-6">
+					<a href="article.html" class="sm:w-48 md:w-56 flex-shrink-0 rounded-2xl overflow-hidden">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2015/06/Cg-4WlV-hq2IHjVBAAPc7teoM4UAAFYigItZPcAA90G612-220x150.jpg" alt="程维发布股东公开信，确认滴滴快的正在进行15亿美元以上的融资" class="w-full h-36 sm:h-full object-cover hover:scale-105 transition-transform duration-300">
+					</a>
+					<div class="flex-1 min-w-0">
+						<header>
+							<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100"><a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">程维发布股东公开信，确认滴滴快的正在进行15亿美元以上的融资</a></h2>
+						</header>
+						<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7 line-clamp-2">前段时间，有传言称滴滴快的即将再融15亿美金，此后又将新一轮融资的目标设定为20亿美元。今天，程维在一封向股东的公开信中确认了这一消息，称“已在上周宣布面向全球投资者融资15亿美金，”在5天时间内该轮融资被超额认购后，滴滴快的决定增加融资规...</p>
+						<div class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-400">
+							<span class="inline-flex items-center gap-1 text-pink-500"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5"></path></svg>赞(129)</span>
+							<span class="inline-flex items-center gap-1.5"><img class="w-5 h-5 rounded-full" src="https://cravatar.cn/avatar/62cd7ca13a42d9f02a51dc486a2c7d4691b6244d4253fdf83a8588bdecc4b683?s=96&d=mystery" alt="浩子">浩子</span>
+							<time>2015-06-27</time>
+							<a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">去评论</a>
+						</div>
+					</div>
+				</article>
+
+				<article class="soft-card p-6 md:p-8 flex flex-col sm:flex-row gap-6">
+					<a href="article.html" class="sm:w-48 md:w-56 flex-shrink-0 rounded-2xl overflow-hidden">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2015/06/18-220x150.jpg" alt="轻轻家教C轮1亿美元，好未来升级“智康1对1”，资本和巨头同时入场" class="w-full h-36 sm:h-full object-cover hover:scale-105 transition-transform duration-300">
+					</a>
+					<div class="flex-1 min-w-0">
+						<header>
+							<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100"><a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">轻轻家教C轮1亿美元，好未来升级“智康1对1”，资本和巨头同时入场</a></h2>
+						</header>
+						<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7 line-clamp-2">在今年 5月 8 日宣布获得好未来战略融资的时候，轻轻家教的创始人胡国志曾经说过，C 轮融资已经在路上，将会在 8 月份前后进行。今日，轻轻家教对外宣布完成 C 轮 1 亿美元融资，由好未来领投，此前所有的投资方 IDG、挚信和红杉跟投。C...</p>
+						<div class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-400">
+							<span class="inline-flex items-center gap-1 text-pink-500"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5"></path></svg>赞(80)</span>
+							<span class="inline-flex items-center gap-1.5"><img class="w-5 h-5 rounded-full" src="https://cravatar.cn/avatar/62cd7ca13a42d9f02a51dc486a2c7d4691b6244d4253fdf83a8588bdecc4b683?s=96&d=mystery" alt="浩子">浩子</span>
+							<time>2015-06-27</time>
+							<span>阅读(7944)</span>
+							<a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">去评论</a>
+						</div>
+					</div>
+				</article>
+
+				<article class="soft-card p-6 md:p-8 flex flex-col sm:flex-row gap-6">
+					<a href="article.html" class="sm:w-48 md:w-56 flex-shrink-0 rounded-2xl overflow-hidden">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2015/06/17-220x150.jpg" alt="新三板垂直服务平台“三板富”获1000万元天使轮融资，估值近1亿元" class="w-full h-36 sm:h-full object-cover hover:scale-105 transition-transform duration-300">
+					</a>
+					<div class="flex-1 min-w-0">
+						<header>
+							<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100"><a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">新三板垂直服务平台“三板富”获1000万元天使轮融资，估值近1亿元</a></h2>
+						</header>
+						<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7 line-clamp-2">新三板垂直服务平台“三板富”近日宣布完成天使轮融资，融资金额近1000万人民币，领投方为深圳恒泰华盛资产管理公司。此轮融资后“三板富”估值已接近1亿元，公司预计在今年7月底启动A轮融资。 三板富是一家专注于新三板的垂直服务平台，目前已经开展...</p>
+						<div class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-400">
+							<span class="inline-flex items-center gap-1 text-pink-500"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5"></path></svg>赞(76)</span>
+							<span class="inline-flex items-center gap-1.5"><img class="w-5 h-5 rounded-full" src="https://cravatar.cn/avatar/62cd7ca13a42d9f02a51dc486a2c7d4691b6244d4253fdf83a8588bdecc4b683?s=96&d=mystery" alt="浩子">浩子</span>
+							<time>2015-06-27</time>
+							<span>阅读(8908)</span>
+							<a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">去评论</a>
+						</div>
+					</div>
+				</article>
+
+				<article class="soft-card p-6 md:p-8 flex flex-col sm:flex-row gap-6">
+					<a href="article.html" class="sm:w-48 md:w-56 flex-shrink-0 rounded-2xl overflow-hidden">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2015/06/1-220x150.png" alt="没有什么能够阻挡我们不断趋近于完美 这是DUX态度" class="w-full h-36 sm:h-full object-cover hover:scale-105 transition-transform duration-300">
+					</a>
+					<div class="flex-1 min-w-0">
+						<header>
+							<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100"><a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">没有什么能够阻挡我们不断趋近于完美 这是DUX态度</a></h2>
+						</header>
+						<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7 line-clamp-2">今年早些时候，现代艺术博物馆设计和建筑的高级馆长 Paola Antonelli 给博物馆的永久收藏品中增加了一个有趣的东西。这是一个透明的塑料芯片，和一个普通的U盘差不多大，它有可能很快改变科学家开发和测试挽救生命的药品的方式。 雷锋网了...</p>
+						<div class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-400">
+							<span class="inline-flex items-center gap-1 text-pink-500"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5"></path></svg>赞(196)</span>
+							<span class="inline-flex items-center gap-1.5"><img class="w-5 h-5 rounded-full" src="https://cravatar.cn/avatar/62cd7ca13a42d9f02a51dc486a2c7d4691b6244d4253fdf83a8588bdecc4b683?s=96&d=mystery" alt="浩子">浩子</span>
+							<time>2015-06-27</time>
+							<span>阅读(8680)</span>
+							<a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">去评论</a>
+						</div>
+					</div>
+				</article>
+
+				<article class="soft-card p-6 md:p-8 flex flex-col sm:flex-row gap-6">
+					<a href="article.html" class="sm:w-48 md:w-56 flex-shrink-0 rounded-2xl overflow-hidden">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2015/06/13-220x150.jpg" alt="明年90万买个喷气背包，土豪们冲上云霄！" class="w-full h-36 sm:h-full object-cover hover:scale-105 transition-transform duration-300">
+					</a>
+					<div class="flex-1 min-w-0">
+						<header>
+							<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100"><a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">明年90万买个喷气背包，土豪们冲上云霄！</a></h2>
+						</header>
+						<p class="mt-3 text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7 line-clamp-2">近些年，小型飞行器不断地进入人们的视野，人们对于飞行的渴望促使大批从业者去开发小型飞行器，其中不乏飞行汽车、乘骑式无人机等等，然而在这些小型飞行器中，最受人欢迎和期待的则是喷气式飞行背包。 雷锋网曾经报道过关于飞行家伊夫·罗西利用喷气背包实...</p>
+						<div class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-400">
+							<span class="inline-flex items-center gap-1 text-pink-500"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5"></path></svg>赞(41)</span>
+							<span class="inline-flex items-center gap-1.5"><img class="w-5 h-5 rounded-full" src="https://cravatar.cn/avatar/62cd7ca13a42d9f02a51dc486a2c7d4691b6244d4253fdf83a8588bdecc4b683?s=96&d=mystery" alt="浩子">浩子</span>
+							<time>2015-06-27</time>
+							<span>阅读(8150)</span>
+							<a href="article.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">去评论</a>
+						</div>
+					</div>
+				</article>
+
+			</div>
+		</div>
+
+		<!-- Sidebar -->
+		<aside class="lg:w-80 flex-shrink-0 space-y-6 md:space-y-8">
+
+			<!-- 网站公告 -->
+			<div class="soft-card p-6">
+				<div class="flex gap-2 mb-4">
+					<span class="px-4 py-1.5 rounded-full text-xs font-medium bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">网站公告</span>
+					<span class="px-4 py-1.5 rounded-full text-xs font-medium text-gray-400 hover:bg-indigo-500/5 transition-colors cursor-pointer">会员中心</span>
+				</div>
+				<ul class="space-y-3 text-sm">
+					<li class="flex items-center gap-2"><time class="text-xs text-gray-400 flex-shrink-0">10-17</time><a href="article.html" class="text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors truncate">就是想睡觉，不想上班班~</a></li>
+					<li class="flex items-center gap-2"><time class="text-xs text-gray-400 flex-shrink-0">10-17</time><a href="article.html" class="text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors truncate">谁还不会写 Hello Word！</a></li>
+					<li class="flex items-center gap-2"><time class="text-xs text-gray-400 flex-shrink-0">10-17</time><a href="article.html" class="text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors truncate">一起听歌呀！</a></li>
+					<li class="flex items-center gap-2"><time class="text-xs text-gray-400 flex-shrink-0">10-17</time><a href="article.html" class="text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors truncate">分享一下我最近喜欢的桌面图</a></li>
+					<li class="flex items-center gap-2"><time class="text-xs text-gray-400 flex-shrink-0">10-17</time><a href="article.html" class="text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors truncate">看吧，就说这个最好看！</a></li>
+				</ul>
+				<div class="mt-5 flex gap-3">
+					<a href="#" class="soft-btn-primary flex-1 text-sm !py-2.5">立即登录</a>
+					<a href="#" class="soft-btn-ghost flex-1 text-sm !py-2.5">现在注册</a>
+				</div>
+			</div>
+
+			<!-- 快讯 -->
+			<div class="soft-card p-6">
+				<div class="flex items-center justify-between mb-4">
+					<h3 class="font-semibold text-lg text-gray-800 dark:text-gray-100">快讯</h3>
+					<a href="kuai.html" class="text-xs text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">查看更多</a>
+				</div>
+				<ul class="space-y-4 text-sm">
+					<li>
+						<a href="kuai.html" class="text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors leading-6">传滴滴有意并购曹操出行，官方回应称不予置评</a>
+						<time class="block mt-1 text-xs text-gray-400">06-18</time>
+					</li>
+					<li>
+						<a href="kuai.html" class="text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors leading-6">亚马逊云科技推出六项新能力，助力机器学习</a>
+						<time class="block mt-1 text-xs text-gray-400">06-18</time>
+					</li>
+				</ul>
+			</div>
+
+			<!-- 热门专题 -->
+			<div class="soft-card p-6">
+				<h3 class="font-semibold text-lg text-gray-800 dark:text-gray-100 mb-4">热门专题</h3>
+				<div class="grid grid-cols-2 gap-4">
+					<a href="zhuanti.html" class="relative rounded-2xl overflow-hidden group">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2021/01/zt04.jpg" alt="DUX主题专题示例" class="w-full h-20 object-cover group-hover:scale-105 transition-transform duration-300">
+						<span class="absolute inset-0 bg-slate-900/40 flex items-center justify-center text-white text-xs font-medium">主题示例</span>
+					</a>
+					<a href="zhuanti.html" class="relative rounded-2xl overflow-hidden group">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2021/01/zt06.jpg" alt="2021手机行业爆点" class="w-full h-20 object-cover group-hover:scale-105 transition-transform duration-300">
+						<span class="absolute inset-0 bg-slate-900/40 flex items-center justify-center text-white text-xs font-medium">手机行业</span>
+					</a>
+					<a href="zhuanti.html" class="relative rounded-2xl overflow-hidden group">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2021/01/zt05.jpg" alt="科技依然改变世界" class="w-full h-20 object-cover group-hover:scale-105 transition-transform duration-300">
+						<span class="absolute inset-0 bg-slate-900/40 flex items-center justify-center text-white text-xs font-medium">科技世界</span>
+					</a>
+					<a href="zhuanti.html" class="relative rounded-2xl overflow-hidden group">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2021/01/zt03-220x150.jpg" alt="更多专题" class="w-full h-20 object-cover group-hover:scale-105 transition-transform duration-300">
+						<span class="absolute inset-0 bg-slate-900/40 flex items-center justify-center text-white text-xs font-medium">更多专题</span>
+					</a>
+				</div>
+			</div>
+
+			<!-- 随机推荐 -->
+			<div class="soft-card p-6">
+				<h3 class="font-semibold text-lg text-gray-800 dark:text-gray-100 mb-4">随机推荐</h3>
+				<ul class="space-y-4">
+					<li class="flex gap-3">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2021/01/zt02.jpg" alt="" class="w-20 h-14 rounded-2xl object-cover flex-shrink-0">
+						<a href="article.html" class="text-sm text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors leading-6 line-clamp-2">DUX主题 8.0 版本强势上新，全新UI、提速2倍</a>
+					</li>
+					<li class="flex gap-3">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2018/10/35-220x150.jpg" alt="" class="w-20 h-14 rounded-2xl object-cover flex-shrink-0">
+						<a href="article.html" class="text-sm text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors leading-6 line-clamp-2">DUX主题文章图片暗箱功能测试</a>
+					</li>
+					<li class="flex gap-3">
+						<img src="https://demo.themebetter.com/dux/wp-content/uploads/sites/3/2015/11/0-tb-220x150.jpg" alt="" class="w-20 h-14 rounded-2xl object-cover flex-shrink-0">
+						<a href="article.html" class="text-sm text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors leading-6 line-clamp-2">一篇测试 音乐、视频的文章</a>
+					</li>
+				</ul>
+			</div>
+
+			<!-- 热门标签 -->
+			<div class="soft-card p-6">
+				<h3 class="font-semibold text-lg text-gray-800 dark:text-gray-100 mb-4">热门标签</h3>
+				<div class="flex flex-wrap gap-2">
+					<a href="tags.html" class="px-3 py-1.5 rounded-full text-xs bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20 transition-colors">星链</a>
+					<a href="tags.html" class="px-3 py-1.5 rounded-full text-xs bg-pink-500/10 text-pink-500 hover:bg-pink-500/20 transition-colors">SpaceX</a>
+					<a href="tags.html" class="px-3 py-1.5 rounded-full text-xs bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 transition-colors">移动支付</a>
+					<a href="tags.html" class="px-3 py-1.5 rounded-full text-xs bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 transition-colors">app</a>
+					<a href="tags.html" class="px-3 py-1.5 rounded-full text-xs bg-sky-500/10 text-sky-600 dark:text-sky-400 hover:bg-sky-500/20 transition-colors">融资</a>
+					<a href="tags.html" class="px-3 py-1.5 rounded-full text-xs bg-violet-500/10 text-violet-600 dark:text-violet-400 hover:bg-violet-500/20 transition-colors">浏览器</a>
+					<a href="tags.html" class="px-3 py-1.5 rounded-full text-xs bg-rose-500/10 text-rose-500 hover:bg-rose-500/20 transition-colors">背包</a>
+				</div>
+			</div>
+
+			<!-- 最新评论 -->
+			<div class="soft-card p-6">
+				<h3 class="font-semibold text-lg text-gray-800 dark:text-gray-100 mb-4">最新评论</h3>
+				<ul class="space-y-4">
+					<li class="flex gap-3">
+						<img src="https://cravatar.cn/avatar/62cd7ca13a42d9f02a51dc486a2c7d4691b6244d4253fdf83a8588bdecc4b683?s=96&d=mystery" alt="" class="w-9 h-9 rounded-full flex-shrink-0">
+						<div class="min-w-0">
+							<p class="text-xs text-gray-400">浩子</p>
+							<p class="text-sm text-gray-600 dark:text-gray-300 leading-6 line-clamp-2">这个功能演示很不错，主题越来越强大了！</p>
+						</div>
+					</li>
+					<li class="flex gap-3">
+						<img src="https://cravatar.cn/avatar/62cd7ca13a42d9f02a51dc486a2c7d4691b6244d4253fdf83a8588bdecc4b683?s=96&d=mystery" alt="" class="w-9 h-9 rounded-full flex-shrink-0">
+						<div class="min-w-0">
+							<p class="text-xs text-gray-400">路人甲</p>
+							<p class="text-sm text-gray-600 dark:text-gray-300 leading-6 line-clamp-2">夜间模式用起来很舒服，点赞。</p>
+						</div>
+					</li>
+				</ul>
+			</div>
+
+			<!-- 置顶推荐 -->
+			<div class="soft-card p-6">
+				<h3 class="font-semibold text-lg text-gray-800 dark:text-gray-100 mb-4">置顶推荐</h3>
+				<ul class="space-y-3 text-sm">
+					<li class="flex items-center gap-3">
+						<span class="w-6 h-6 rounded-full bg-pink-500/10 text-pink-500 text-xs flex items-center justify-center font-medium flex-shrink-0">1</span>
+						<a href="article.html" class="text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors truncate">评论阅读文章内容功能演示</a>
+					</li>
+					<li class="flex items-center gap-3">
+						<span class="w-6 h-6 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-xs flex items-center justify-center font-medium flex-shrink-0">2</span>
+						<a href="article.html" class="text-gray-600 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors truncate">DUX主题代码高亮、复制 测试</a>
+					</li>
+				</ul>
+			</div>
+
+			<!-- 网站统计 -->
+			<div class="soft-card p-6">
+				<h3 class="font-semibold text-lg text-gray-800 dark:text-gray-100 mb-4">网站统计</h3>
+				<ul class="space-y-3 text-sm text-gray-500 dark:text-gray-400">
+					<li class="flex justify-between"><span>文章总数</span><span class="font-medium text-gray-800 dark:text-gray-200">128</span></li>
+					<li class="flex justify-between"><span>评论总数</span><span class="font-medium text-gray-800 dark:text-gray-200">1,356</span></li>
+					<li class="flex justify-between"><span>标签总数</span><span class="font-medium text-gray-800 dark:text-gray-200">46</span></li>
+					<li class="flex justify-between"><span>运行天数</span><span class="font-medium text-gray-800 dark:text-gray-200">3,650 天</span></li>
+				</ul>
+			</div>
+
+		</aside>
+	</div>
+</main>
+
+<!-- Footer -->
+<footer class="bg-white dark:bg-slate-800 text-gray-600 dark:text-gray-400 mt-auto">
+	<div class="max-w-6xl mx-auto px-4 md:px-6 lg:px-8 py-16">
+		<div class="grid grid-cols-1 md:grid-cols-3 gap-8 md:gap-12">
+			<div>
+				<a href="index.html" class="flex items-center gap-2 font-semibold text-xl md:text-2xl text-gray-800 dark:text-white">
+					<span class="w-9 h-9 rounded-full bg-indigo-500/10 flex items-center justify-center">
+						<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+					</span>
+					DUX
+				</a>
+				<p class="mt-4 text-xs leading-6">DUX主题官方演示站（Soft UI 复刻版）。温和友好的界面设计，柔和的阴影、圆润的边角、低饱和度的配色。</p>
+			</div>
+			<div>
+				<h4 class="font-semibold text-base text-gray-800 dark:text-gray-100 mb-4">快捷导航</h4>
+				<ul class="space-y-2 text-xs">
+					<li><a href="tags.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">标签云</a></li>
+					<li><a href="readers.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">读者墙</a></li>
+					<li><a href="archives.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">页面存档</a></li>
+					<li><a href="sample-page.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">友情链接</a></li>
+					<li><a href="navs.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">网址导航</a></li>
+				</ul>
+			</div>
+			<div>
+				<h4 class="font-semibold text-base text-gray-800 dark:text-gray-100 mb-4">关注我们</h4>
+				<ul class="space-y-2 text-xs">
+					<li><a href="https://themebetter.com" target="_blank" rel="external nofollow" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">themebetter</a></li>
+					<li><a href="https://themebetter.com" target="_blank" rel="external nofollow" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">更好的主题</a></li>
+				</ul>
+			</div>
+		</div>
+		<div class="mt-12 pt-6 text-center text-xs text-gray-400">
+			© 2026 DUX主题官方演示站 · Soft UI 复刻版（Tailwind CSS + WellCMS v3 暗色模式）
+		</div>
+	</div>
+</footer>
+
+<!-- 回到顶部 -->
+<button id="back-to-top" aria-label="回到顶部" class="fixed bottom-6 right-6 z-40 w-11 h-11 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-600/30 flex items-center justify-center opacity-0 pointer-events-none transition-all duration-300 hover:-translate-y-0.5 hover:shadow-xl">
+	<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg>
+</button>
+
+<script src="assets/js/dux.js"></script>
+</body>
+</html>

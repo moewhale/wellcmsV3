@@ -31,24 +31,20 @@ class CsrfMiddleware implements \Framework\Http\Interfaces\MiddlewareInterface
     {
         // hook app_Middleware_CsrfMiddleware_process_start.php
         try {
-            $method = strtoupper($request->getMethod());
-
             // hook app_Middleware_CsrfMiddleware_process_before.php
-            if (in_array($method, ['POST', 'PUT', 'DELETE', 'PATCH'], true)) {
-                $params = array_merge($request->getQueryParams(), (array)$request->getParsedBody());
-                $messageController = $this->container->get(\App\Controllers\Base\MessageController::class);
+            $params = array_merge($request->getQueryParams(), (array)$request->getParsedBody());
+            $messageController = $this->container->get(\App\Controllers\Base\MessageController::class);
 
-                // hook app_Middleware_CsrfMiddleware_process_center.php
+            // hook app_Middleware_CsrfMiddleware_process_center.php
 
-                $user = $request->getAttribute('user');
-                if (empty($user)) return $messageController->errorMessage('Forbidden', 8);
-                $token = $params['_csrf_token'] ?? $request->getHeaderLine('X-CSRF-TOKEN') ?: ($params['X-CSRF-TOKEN'] ?? '');
+            $user = $request->getAttribute('user');
+            if (empty($user)) return $messageController->errorMessage('Forbidden', 8);
+            $token = $params['_csrf_token'] ?? $request->getHeaderLine('X-CSRF-TOKEN') ?: ($params['X-CSRF-TOKEN'] ?? '');
 
-                // hook app_Middleware_CsrfMiddleware_process_after.php
+            // hook app_Middleware_CsrfMiddleware_process_after.php
 
-                if (!$this->tokenService->verifyToken($token, $user['salt'], $this->ttl, true)) {
-                    return $messageController->errorMessage('Forbidden', 8);
-                }
+            if (!$this->tokenService->verifyToken($token, $user['salt'], $this->ttl, true)) {
+                return $messageController->errorMessage('Forbidden', 8);
             }
 
             // hook app_Middleware_CsrfMiddleware_process_end.php

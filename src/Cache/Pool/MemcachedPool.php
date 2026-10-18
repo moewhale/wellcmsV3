@@ -24,6 +24,12 @@ class MemcachedPool
     /** @var array 记录连接最后活跃时间 */
     private $lastUsed = [];
 
+    /** @var array<string,bool> 已发生操作异常、归还时必须丢弃的连接 */
+    private $suspect = [];
+
+    /** @var array<string,bool> 已借给调用方、尚未合法归还的连接 */
+    private $borrowed = [];
+
     /** @var int 最大连接数上限 */
     private $maxSize;
 
@@ -81,9 +87,10 @@ class MemcachedPool
                     $last = $this->lastUsed[$hash] ?? 0;
                     // 消极心跳：若空闲超过 60s 或从未记录，则验证状态
                     if (time() - $last < 60 || ($mc->getVersion() && $mc->getResultCode() === \Memcached::RES_SUCCESS)) {
+                        $this->borrowed[$hash] = true;
                         return $mc;
                     }
-                    $this->currentSize--;
+                    $this->discardConnection($mc);
                 }
             }
         } else {
@@ -93,16 +100,24 @@ class MemcachedPool
                 $last = $this->lastUsed[$hash] ?? 0;
                 // 验证空闲连接状态（消极心跳）
                 if (time() - $last < 60 || ($mc->getVersion() && $mc->getResultCode() === \Memcached::RES_SUCCESS)) {
+                    $this->borrowed[$hash] = true;
                     return $mc;
                 }
-                $this->currentSize--;
+                $this->discardConnection($mc);
             }
         }
 
         // 2. 池空且未超限，新建连接
         if ($this->currentSize < $this->maxSize) {
-            $mc = $this->createConnection();
+            // 在可 yield 的建连 I/O 前保留容量，防止多协程同时越过 maxSize。
             $this->currentSize++;
+            try {
+                $mc = $this->createConnection();
+            } catch (\Throwable $e) {
+                $this->currentSize = max(0, $this->currentSize - 1);
+                throw $e;
+            }
+            $this->borrowed[spl_object_hash($mc)] = true;
             return $mc;
         }
 
@@ -110,7 +125,10 @@ class MemcachedPool
         if ($isCoroutine) {
             /** @noinspection PhpUndefinedMethodInspection */
             $mc = $this->getChannel()->pop($this->config['timeout'] ?? 1.0);
-            if ($mc instanceof \Memcached) return $mc;
+            if ($mc instanceof \Memcached) {
+                $this->borrowed[spl_object_hash($mc)] = true;
+                return $mc;
+            }
         }
 
         throw new \RuntimeException("Memcached 连接池已满（maxSize={$this->maxSize}）");
@@ -162,27 +180,50 @@ class MemcachedPool
      */
     public function markSuspect(\Memcached $mc): void
     {
-        $this->lastUsed[spl_object_hash($mc)] = 0;
+        $this->suspect[spl_object_hash($mc)] = true;
     }
 
     public function releaseConnection(\Memcached $mc): void
     {
-        $this->lastUsed[spl_object_hash($mc)] = time();
+        $hash = spl_object_hash($mc);
+        if (!isset($this->borrowed[$hash])) {
+            return;
+        }
+        unset($this->borrowed[$hash]);
+
+        if (isset($this->suspect[$hash])) {
+            $this->discardConnection($mc);
+            return;
+        }
+
+        $this->lastUsed[$hash] = time();
 
         $coroClass = "\\Swoole\\Coroutine";
         if (\extension_loaded('swoole') && call_user_func([$coroClass, 'getCid']) > 0) {
             /** @noinspection PhpUndefinedMethodInspection */
-            $this->getChannel()->push($mc);
+            if (!$this->getChannel()->push($mc, $this->config['timeout'] ?? 1.0)) {
+                $this->discardConnection($mc);
+            }
         } else {
             // 用空闲队列上限判断
             if (count($this->pool) < $this->maxSize) {
                 $this->pool[] = $mc;
             } else {
-                // 直接丢弃引用
-                $mc = null;
-                $this->currentSize = max(0, $this->currentSize - 1);
+                $this->discardConnection($mc);
             }
         }
+    }
+
+    /**
+     * 丢弃不可复用连接并同步池计数/元数据。
+     */
+    private function discardConnection(\Memcached $mc): void
+    {
+        $hash = spl_object_hash($mc);
+        unset($this->lastUsed[$hash], $this->suspect[$hash], $this->borrowed[$hash]);
+
+        // Memcached 扩展没有单连接 close；不再入池即可在借用闭包结束后释放引用。
+        $this->currentSize = max(0, $this->currentSize - 1);
     }
 
     /**
@@ -193,19 +234,17 @@ class MemcachedPool
         // 1. 清理 FPM 池
         $this->pool = [];
 
-        // 2. 清理协程通道
-        $channel = $this->getChannel();
-        /** @noinspection PhpUndefinedMethodInspection */
-        while (!$channel->isEmpty()) {
+        // 2. Worker 停机可处于非协程上下文，禁止在此调用 Channel::pop() 或创建新 Channel。
+        $channelKey = spl_object_hash($this);
+        if (isset(self::$channels[$channelKey])) {
             /** @noinspection PhpUndefinedMethodInspection */
-            $mc = $channel->pop(0.001);
-            if ($mc instanceof \Memcached) {
-                // Memcached 扩展通常没有显式的 close()，直接丢弃引用即可
-                $mc = null;
-            }
+            self::$channels[$channelKey]->close();
+            unset(self::$channels[$channelKey]);
         }
 
         $this->currentSize = 0;
         $this->lastUsed = [];
+        $this->suspect = [];
+        $this->borrowed = [];
     }
 }

@@ -24,6 +24,14 @@ interface TaskStorageInterface
     public function insertTask(Task $task): void;
 
     /**
+     * 按任务主键读取最小权威状态。
+     *
+     * @param string $taskId
+     * @return array|null 固定为 taskId/status/dedupeKey；不存在返回 null
+     */
+    public function readTaskState(string $taskId): ?array;
+
+    /**
      * 更新任务状态（自动记录 heartbeat_at）
      *
      * @param string $taskId

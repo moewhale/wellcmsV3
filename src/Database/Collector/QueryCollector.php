@@ -24,7 +24,8 @@ class QueryCollector
     {
         $coroClass = "\\Swoole\\Coroutine";
         if (\extension_loaded('swoole') && call_user_func([$coroClass, 'getCid']) > 0) {
-            call_user_func([$coroClass, 'getContext'])->queryStartTime = microtime(true);
+            $ctx = call_user_func([$coroClass, 'getContext']);
+            $ctx['queryStartTime'] = microtime(true);
         } else {
             self::$startTime = microtime(true);
         }
@@ -37,7 +38,8 @@ class QueryCollector
     {
         $coroClass = "\\Swoole\\Coroutine";
         if (\extension_loaded('swoole') && call_user_func([$coroClass, 'getCid']) > 0) {
-            $start = call_user_func([$coroClass, 'getContext'])->queryStartTime ?? 0;
+            $ctx = call_user_func([$coroClass, 'getContext']);
+            $start = $ctx['queryStartTime'] ?? 0;
             return $start > 0 ? microtime(true) - (float)$start : 0.0;
         }
         return self::$startTime > 0 ? microtime(true) - self::$startTime : 0.0;
@@ -48,10 +50,9 @@ class QueryCollector
         $coroClass = "\\Swoole\\Coroutine";
         if (\extension_loaded('swoole') && call_user_func([$coroClass, 'getCid']) > 0) {
             $ctx = call_user_func([$coroClass, 'getContext']);
-            /** @noinspection PhpUndefinedFieldInspection */
-            $ctx->queries = $ctx->queries ?? [];
-            /** @noinspection PhpUndefinedFieldInspection */
-            $ctx->queries[] = $entry;
+            $queries = $ctx['queries'] ?? [];
+            $queries[] = $entry;
+            $ctx['queries'] = $queries;
         } else {
             self::$queries[] = $entry;
             // 防御 FPM/CLI 静态变量累积泄漏：超过阈值时自动截断
@@ -68,7 +69,8 @@ class QueryCollector
     {
         $coroClass = "\\Swoole\\Coroutine";
         if (\extension_loaded('swoole') && call_user_func([$coroClass, 'getCid']) > 0) {
-            return count(call_user_func([$coroClass, 'getContext'])->queries ?? []);
+            $ctx = call_user_func([$coroClass, 'getContext']);
+            return count($ctx['queries'] ?? []);
         }
         return count(self::$queries);
     }
@@ -82,8 +84,8 @@ class QueryCollector
     {
         $coroClass = "\\Swoole\\Coroutine";
         if (\extension_loaded('swoole') && call_user_func([$coroClass, 'getCid']) > 0) {
-            /** @noinspection PhpUndefinedFieldInspection */
-            return call_user_func([$coroClass, 'getContext'])->queries ?? [];
+            $ctx = call_user_func([$coroClass, 'getContext']);
+            return $ctx['queries'] ?? [];
         }
         return self::$queries;
     }
@@ -96,7 +98,7 @@ class QueryCollector
         $coroClass = "\\Swoole\\Coroutine";
         if (\extension_loaded('swoole') && call_user_func([$coroClass, 'getCid']) > 0) {
             $ctx = call_user_func([$coroClass, 'getContext']);
-            unset($ctx->queries, $ctx->queryStartTime);
+            unset($ctx['queries'], $ctx['queryStartTime']);
         } else {
             self::$queries = [];
             self::$startTime = 0;
@@ -111,9 +113,9 @@ class QueryCollector
         $coroClass = "\\Swoole\\Coroutine";
         if (\extension_loaded('swoole') && call_user_func([$coroClass, 'getCid']) > 0) {
             $ctx = call_user_func([$coroClass, 'getContext']);
-            $queries = $ctx->queries ?? [];
+            $queries = $ctx['queries'] ?? [];
             if (count($queries) > $limit) {
-                $ctx->queries = array_slice($queries, -$keep);
+                $ctx['queries'] = array_slice($queries, -$keep);
             }
         } else {
             if (count(self::$queries) > $limit) {

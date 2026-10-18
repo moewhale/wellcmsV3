@@ -397,14 +397,20 @@ class MyController extends \App\Controllers\Base\BaseController
             $msg = $this->validateEmail($email);
             if ($msg !== 'success') return $this->errorMessage($msg, 'email');
 
-            $code = RequestUtils::param('code', '');
-            if (!$code) return $this->errorMessage($this->language->get('verification_code_is_empty'), 6);
-
             $sessionData = $this->userSession->get('originalEmail', []);
             $sess_email = $sessionData['email'] ?? '';
             $sess_email && $sess_email = strtolower($sess_email);
             $sess_code = $sessionData['code'] ?? '';
-            if (!$sess_code || !$sess_email || $originalEmail != $sess_email || strtoupper($code) != $sess_code) return $this->errorMessage($this->language->get('comparison_data_error'), 8);
+            if (empty($sessionData['verified'])) {
+                $code = RequestUtils::param('code', '');
+                if (!$code) return $this->errorMessage($this->language->get('verification_code_is_empty'), 6);
+
+                if (!$sess_code || !$sess_email || $originalEmail != $sess_email || strtoupper($code) != $sess_code) return $this->errorMessage($this->language->get('comparison_data_error'), 8);
+                $sessionData['verified'] = true;
+                $this->userSession->set('originalEmail', $sessionData);
+            } elseif (!$sess_email || $originalEmail != $sess_email) {
+                return $this->errorMessage($this->language->get('comparison_data_error'), 8);
+            }
 
             if ($originalEmail !== $user['email']) return $this->errorMessage($this->language->get('original_email_error'), 8);
         }
@@ -444,6 +450,7 @@ class MyController extends \App\Controllers\Base\BaseController
             'page_link_string' => $page_link_string,
             'email' => $email ?? '',
             'action' => $this->urlGenerator->url('my/postEmail'),
+            'verify_original_email_action' => $this->urlGenerator->url('my/PostVerifyOriginalEmail'),
             'modify_basic_link' => $this->urlGenerator->url('my/basic'),
             'verify_code_link' => $this->urlGenerator->url('auth/postVerifyCode', ['verifyKey' => 'verifyEmail']),
             'originalEmail' => $originalEmail,
@@ -470,6 +477,42 @@ class MyController extends \App\Controllers\Base\BaseController
         return $this->render($routeMeta['layout'], $data, false);
     }
 
+    public function postVerifyOriginalEmail(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
+    {
+        $user = $request->getAttribute('user', []);
+        if (empty($user['id'])) {
+            return $this->errorMessage($this->language->get('user_not_logged_in'), 1);
+        }
+
+        $email = RequestUtils::param('email', '');
+        if (!$email) return $this->errorMessage($this->language->get('email_is_empty'), 'email');
+
+        $msg = $this->validateEmail($email);
+        if ($msg !== 'success') return $this->errorMessage($msg, 'email');
+
+        $originalEmail = strtolower($email);
+        if ($originalEmail !== $user['email']) return $this->errorMessage($this->language->get('original_email_error'), 8);
+
+        $code = RequestUtils::param('code', '');
+        if (!$code) return $this->errorMessage($this->language->get('verification_code_is_empty'), 'code');
+
+        $sessionData = $this->userSession->get('originalEmail', []);
+        $sess_email = $sessionData['email'] ?? '';
+        $sess_email && $sess_email = strtolower($sess_email);
+        $sess_code = $sessionData['code'] ?? '';
+        if (!$sess_code || !$sess_email || $originalEmail != $sess_email || strtoupper($code) != $sess_code) return $this->errorMessage($this->language->get('comparison_data_error'), 8);
+
+        $sessionData['verified'] = true;
+        $this->userSession->set('originalEmail', $sessionData);
+
+        return $this->successMessage(
+            $this->language->get('operation_success'),
+            0,
+            $this->urlGenerator->url('my/email', ['email' => $originalEmail]),
+            1
+        );
+    }
+
     public function postEmail(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
         $user = $request->getAttribute('user', []);
@@ -489,6 +532,7 @@ class MyController extends \App\Controllers\Base\BaseController
         $sess_email = $sessionData['email'] ?? '';
         $sess_email && $sess_email = strtolower($sess_email);
         if ($originalEmail != $sess_email) return $this->errorMessage($this->language->get('comparison_data_error'), 8);
+        if (empty($sessionData['verified'])) return $this->errorMessage($this->language->get('comparison_data_error'), 8);
 
         $newEmail = RequestUtils::param('email', '');
         $msg = $this->validateEmail($newEmail);

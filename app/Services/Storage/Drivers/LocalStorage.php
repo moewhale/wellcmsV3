@@ -28,12 +28,12 @@ class LocalStorage implements \App\Services\Storage\Interfaces\StorageInterface
         $path = str_replace(['\\', '/'], DIRECTORY_SEPARATOR, $path);
         $root = rtrim(str_replace(['\\', '/'], DIRECTORY_SEPARATOR, $this->root), DIRECTORY_SEPARATOR);
 
-        // A. 如果路径已经是系统绝对路径（如 /home/...）且它已经包含了 root，说明已经适配好。
+        // 如果路径已经是系统绝对路径（如 /home/...）且它已经包含了 root，说明已经适配好。
         if (strpos($path, $root . DIRECTORY_SEPARATOR) === 0 || $path === $root) {
             return $path;
         }
 
-        // B. 关键点：检查路径是否是属于本项目的绝对路径
+        // 关键点：检查路径是否是属于本项目的绝对路径
         $appRoot = rtrim(str_replace(['\\', '/'], DIRECTORY_SEPARATOR, (\defined('APP_PATH') ? \APP_PATH : '')), DIRECTORY_SEPARATOR);
         if ($appRoot !== '' && strpos($path, $appRoot . DIRECTORY_SEPARATOR) === 0) {
             // 这是一条项目内的绝对路径。即使它没在当前 root 下，我们也不应该粗暴地给它加个 root 前缀。
@@ -41,7 +41,7 @@ class LocalStorage implements \App\Services\Storage\Interfaces\StorageInterface
             return $path;
         }
 
-        // C. 只有真正的相对路径才进行拼接
+        // 只有真正的相对路径才进行拼接
         return $root . DIRECTORY_SEPARATOR . ltrim($path, DIRECTORY_SEPARATOR . '\\');
     }
 

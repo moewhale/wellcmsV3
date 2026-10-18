@@ -183,7 +183,6 @@ abstract class BaseController
             'code' => $code,
             'message' => $message,
             'status' => $status,
-            //'success' => ($code === 0),
             'data' => [
                 'title' => $this->language->get('operation_notice'),
                 'keywords' => $this->language->get('operation_notice'),
@@ -270,6 +269,14 @@ abstract class BaseController
 
         // 调用菜单服务
         $userData = $this->menuService->getUserMenuData($user, $param0);
+        if (!empty($user['id'])
+            && !empty($user['salt'])
+            && isset($userData['user']['links']['logout'])
+        ) {
+            $userData['user']['links']['logout']['arg'] = [
+                '_csrf_token' => $this->getCsrfToken((string)$user['salt']),
+            ];
+        }
         $data = array_merge($data, $userData);
 
         // hook app_Controllers_Base_BaseController_processUserData_end.php

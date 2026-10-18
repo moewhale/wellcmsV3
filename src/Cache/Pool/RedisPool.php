@@ -30,6 +30,12 @@ class RedisPool
     /** @var array 记录连接最后活跃时间 */
     private $lastUsed = [];
 
+    /** @var array<string,bool> 已发生操作异常、归还时必须丢弃的连接 */
+    private $suspect = [];
+
+    /** @var array<string,bool> 已借给调用方、尚未合法归还的连接 */
+    private $borrowed = [];
+
     /** @var array<string,self> 多例实例（按配置哈希区分） */
     private static $instances = [];
 
@@ -84,12 +90,12 @@ class RedisPool
                         $last = $this->lastUsed[$hash] ?? 0;
                         // 消极心跳：若空闲超过 60s 或从未记录，则 ping 校验
                         if (time() - $last < 60 || $redis->ping()) {
+                            $this->borrowed[$hash] = true;
                             return $redis;
                         }
-                        // 校验失败，减少当前计数
-                        $this->currentSize--;
+                        $this->discardConnection($redis);
                     } catch (\RedisException $e) {
-                        $this->currentSize--;
+                        $this->discardConnection($redis);
                     }
                 }
             }
@@ -100,19 +106,27 @@ class RedisPool
                     $hash = spl_object_hash($redis);
                     $last = $this->lastUsed[$hash] ?? 0;
                     if (time() - $last < 60 || $redis->ping()) {
+                        $this->borrowed[$hash] = true;
                         return $redis;
                     }
-                    $this->currentSize--;
+                    $this->discardConnection($redis);
                 } catch (\RedisException $e) {
-                    $this->currentSize--;
+                    $this->discardConnection($redis);
                 }
             }
         }
 
         // 2. 池空且未超限，新建连接
         if ($this->currentSize < $this->maxSize) {
-            $redis = $this->createConnection();
+            // 在可 yield 的建连 I/O 前保留容量，防止多协程同时越过 maxSize。
             $this->currentSize++;
+            try {
+                $redis = $this->createConnection();
+            } catch (\Throwable $e) {
+                $this->currentSize = max(0, $this->currentSize - 1);
+                throw $e;
+            }
+            $this->borrowed[spl_object_hash($redis)] = true;
             return $redis;
         }
 
@@ -120,7 +134,10 @@ class RedisPool
         if ($isCoroutine) {
             /** @noinspection PhpUndefinedMethodInspection */
             $redis = $this->getChannel()->pop($this->config['timeout'] ?? 1.0);
-            if ($redis instanceof \Redis) return $redis;
+            if ($redis instanceof \Redis) {
+                $this->borrowed[spl_object_hash($redis)] = true;
+                return $redis;
+            }
         }
 
         throw new \RuntimeException("Redis 连接池已满（maxSize={$this->maxSize}）");
@@ -137,19 +154,35 @@ class RedisPool
         $timeout    = (float)($this->config['timeout'] ?? 1.0);
         $persistent = $this->config['persistent_id'] ?? null;
         try {
-            if ($persistent) {
-                $redis->pconnect($host, $port, $timeout, $persistent);
-            } else {
-                $redis->connect($host, $port, $timeout);
+            $connected = $persistent
+                ? $redis->pconnect($host, $port, $timeout, $persistent)
+                : $redis->connect($host, $port, $timeout);
+            if (!$connected) {
+                throw new \RuntimeException('Redis connect returned false');
             }
             if (!empty($this->config['password'])) {
-                $redis->auth($this->config['password']);
+                if (!$redis->auth($this->config['password'])) {
+                    throw new \RuntimeException('Redis authentication returned false');
+                }
             }
             if (!empty($this->config['dbname'])) {
-                $redis->select((int)$this->config['dbname']);
+                if (!$redis->select((int)$this->config['dbname'])) {
+                    throw new \RuntimeException('Redis database selection returned false');
+                }
             }
-        } catch (\RedisException $e) {
-            throw new \RuntimeException("Redis 连接失败: {$host}:{$port}, 错误: " . $e->getMessage());
+            if (!$redis->ping()) {
+                throw new \RuntimeException('Redis ping returned false');
+            }
+        } catch (\Throwable $e) {
+            try {
+                $redis->close();
+            } catch (\Throwable $_) {
+            }
+            throw new \RuntimeException(
+                "Redis 连接失败: {$host}:{$port}, 错误: " . $e->getMessage(),
+                0,
+                $e
+            );
         }
         return $redis;
     }
@@ -173,28 +206,53 @@ class RedisPool
      */
     public function markSuspect(\Redis $redis): void
     {
-        $this->lastUsed[spl_object_hash($redis)] = 0;
+        $this->suspect[spl_object_hash($redis)] = true;
     }
 
     public function releaseConnection(\Redis $redis): void
     {
-        $this->lastUsed[spl_object_hash($redis)] = time();
+        $hash = spl_object_hash($redis);
+        if (!isset($this->borrowed[$hash])) {
+            return;
+        }
+        unset($this->borrowed[$hash]);
+
+        if (isset($this->suspect[$hash])) {
+            $this->discardConnection($redis);
+            return;
+        }
+
+        $this->lastUsed[$hash] = time();
 
         $coroClass = "\\Swoole\\Coroutine";
         if (\extension_loaded('swoole') && call_user_func([$coroClass, 'getCid']) > 0) {
             /** @noinspection PhpUndefinedMethodInspection */
-            $this->getChannel()->push($redis);
+            if (!$this->getChannel()->push($redis, $this->config['timeout'] ?? 1.0)) {
+                $this->discardConnection($redis);
+            }
         } else {
             if (count($this->pool) < $this->maxSize) {
                 $this->pool[] = $redis;
             } else {
-                try {
-                    $redis->close();
-                } catch (\Throwable $_) {
-                }
-                $this->currentSize = max(0, $this->currentSize - 1);
+                $this->discardConnection($redis);
             }
         }
+    }
+
+    /**
+     * 销毁不可复用连接并同步池计数/元数据。
+     */
+    private function discardConnection(\Redis $redis): void
+    {
+        $hash = spl_object_hash($redis);
+        unset($this->lastUsed[$hash], $this->suspect[$hash], $this->borrowed[$hash]);
+
+        try {
+            $redis->close();
+        } catch (\Throwable $_) {
+        }
+
+        $this->currentSize = max(0, $this->currentSize - 1);
     }
 
     /**
@@ -211,21 +269,17 @@ class RedisPool
         }
         $this->pool = [];
 
-        // 2. 清理协程模式下的连接
-        $channel = $this->getChannel();
-        /** @noinspection PhpUndefinedMethodInspection */
-        while (!$channel->isEmpty()) {
+        // 2. Worker 停机可处于非协程上下文，禁止在此调用 Channel::pop() 或创建新 Channel。
+        $channelKey = spl_object_hash($this);
+        if (isset(self::$channels[$channelKey])) {
             /** @noinspection PhpUndefinedMethodInspection */
-            $redis = $channel->pop(0.001);
-            if ($redis instanceof \Redis) {
-                try {
-                    $redis->close();
-                } catch (\Throwable $_) {
-                }
-            }
+            self::$channels[$channelKey]->close();
+            unset(self::$channels[$channelKey]);
         }
 
         $this->currentSize = 0;
         $this->lastUsed = [];
+        $this->suspect = [];
+        $this->borrowed = [];
     }
 }

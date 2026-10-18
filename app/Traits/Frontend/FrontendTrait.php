@@ -10,7 +10,7 @@ namespace App\Traits\Frontend;
 trait FrontendTrait
 {
     /**
-     * 个人中心菜单项（由钩子注入，显式声明以避免 PHP 8.2+ 动态属性弃用）
+     * 个人中心菜单项（由钩子注入）
      * @var array
      */
     public $myMenu = [];

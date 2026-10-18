@@ -236,43 +236,41 @@ class ExtensionManager
     public function forceSyncSingle(string $dir): void
     {
         if (!$this->market->isLogged()) {
-            return;
+            throw new \RuntimeException('Store credentials are required for purchase synchronization');
         }
 
-        try {
-            $this->withSyncLock('market:payment:' . $dir, function () use ($dir) {
-                $officialData = $this->kv->settingGet('officialData') ?? [];
-                $marketData = $this->market->queryExtensions([$dir]);
-
-                if (!empty($marketData[$dir])) {
-                    $data = $marketData[$dir];
-                    // 服务端返回 name 为空表示已下架，支付场景下不应删除，仅跳过更新
-                    if (!empty($data['name'])) {
-                        $data['last_sync'] = time();
-                        $officialData[$dir] = array_merge($officialData[$dir] ?? [], $data);
-                        $this->kv->settingSet('officialData', $officialData);
-                    }
-                }
-            });
-        } catch (\Exception $e) {
-            // 静默降级：记录日志，不阻塞支付流程
-            if ($this->container) {
-                try {
-                    $this->container->get(\Framework\Logger\LoggerInterface::class)
-                        ->warning('forceSyncSingle failed: ' . $e->getMessage(), ['dir' => $dir]);
-                } catch (\Throwable $t) {
-                    error_log('forceSyncSingle failed: ' . $e->getMessage());
-                }
+        $completed = $this->withSyncLock('market:payment:' . $dir, function () use ($dir) {
+            $officialData = (array)($this->kv->settingGet('officialData') ?? []);
+            $marketData = $this->market->queryExtensions(
+                $this->buildMarketQueryItems([$dir], $officialData)
+            );
+            $data = $marketData[$dir] ?? null;
+            if (!is_array($data)
+                || !hash_equals($dir, (string)($data['dir'] ?? ''))
+                || !in_array((int)($data['type'] ?? 0), [1, 2], true)
+                || empty($data['name'])) {
+                throw new \RuntimeException('Purchased extension was not returned by the store');
             }
+            if (empty($data['has_bought']) || (int)($data['payment_id'] ?? 0) <= 0) {
+                throw new \RuntimeException('Store purchase projection was not committed');
+            }
+            $data['last_sync'] = time();
+            $officialData[$dir] = array_merge($officialData[$dir] ?? [], $data);
+            if (!$this->kv->settingSet('officialData', $officialData)) {
+                throw new \RuntimeException('Failed to persist purchased extension metadata');
+            }
+        });
+        if (!$completed) {
+            throw new \RuntimeException('Purchase synchronization is already in progress');
         }
     }
 
     /**
-     * 获取扩展的 storeid（用于构造下载 URL，避免 download 方法回退查询）
+     * 获取扩展的 storeid。
      */
     public function getStoreId(string $dir): int
     {
-        $officialData = $this->kv->settingGet('officialData') ?? [];
+        $officialData = (array)($this->kv->settingGet('officialData') ?? []);
         return (int)($officialData[$dir]['storeid'] ?? 0);
     }
 
@@ -412,8 +410,17 @@ class ExtensionManager
                 break;
         }
 
-        file_put_contents($configFile, SecurityHelper::jsonEncode($config, true));
-        $this->runActionScript($dir, $type, $action);
+        $this->writeConfigAtomically($configFile, SecurityHelper::jsonEncode($config, true));
+        try {
+            $this->runActionScript($dir, $type, $action);
+            if ($type === 'plugin' && $action === 'upgrade') {
+                $this->container->get(\Framework\Database\Partition\PartitionRegistry::class)
+                    ->invalidateAllPhysicalPartitions();
+            }
+        } catch (\Throwable $e) {
+            $this->writeConfigAtomically($configFile, $json);
+            throw $e;
+        }
         return ['status' => 'success'];
     }
 
@@ -423,7 +430,10 @@ class ExtensionManager
         if (!isset($localList[$dir])) return ['status' => 'error', 'message' => 'Extension not found'];
 
         $name = $localList[$dir]['name'];
-        \Framework\Utils\FileHelper::lock($dir);
+        $fileLockKey = $this->getBasePath($type) . $dir;
+        if (!\Framework\Utils\FileHelper::lock($fileLockKey)) {
+            return ['status' => 'error', 'message' => 'Extension operation is already in progress'];
+        }
         try {
             $missing = $this->checkDependencies($dir, $type, $action);
             if ($missing) {
@@ -496,36 +506,102 @@ class ExtensionManager
             }
 
             // 插件/主题状态变更，强制清除全站编译缓存（重触发聚合、钩子注入和语言包编译）
-            \App\Core\Compile::flushCache('all');
+            \App\Core\Compile::flushCache();
 
             \Framework\Utils\Runtime::reload();
             return ['status' => 'success', 'name' => $name];
         } finally {
-            \Framework\Utils\FileHelper::unlock($dir);
+            \Framework\Utils\FileHelper::unlock($fileLockKey);
         }
     }
 
     public function deploy(string $dir, string $type, int $storeId): array
     {
-        $action = $this->isLocal($dir, $type) ? 'upgrade' : 'install';
-        $res = $this->installer->execute($dir, $type, $storeId);
-        if ($res['status'] !== 'success') return $res;
-
-        $this->updateStatus($dir, $type, $action);
-        $this->syncMarketData([$dir]);
-
-        // 通知服务端下载完成，清理临时文件
-        $credentials = $this->market->getCredentials();
-        if (!empty($credentials) && !empty($credentials['user_id'])) {
-            try {
-                $this->market->notifyDownloadComplete((int)$credentials['user_id']);
-            } catch (\Exception $e) {
-                // 清理通知失败不影响主流程
-            }
+        if (!$this->container) {
+            throw new \RuntimeException('Extension deployment requires the application container');
+        }
+        $lockKey = $this->getBasePath($type) . $dir;
+        if (!\Framework\Utils\FileHelper::lock($lockKey, 900)) {
+            return ['status' => 'error', 'message' => 'Extension deployment is already in progress'];
         }
 
-        \Framework\Utils\Runtime::reload();
-        return ['status' => 'success', 'dir' => $dir];
+        $transaction = null;
+        $officialDataBefore = null;
+        $officialDataWriteAttempted = false;
+        try {
+            $action = $this->isLocal($dir, $type) ? 'upgrade' : 'install';
+            $transaction = $this->installer->execute($dir, $type, $storeId);
+
+            // 商店部署必须以刚刚验证并切换的新包声明为准检查依赖。
+            // 依赖不满足时会进入现有部署回滚边界，不执行生命周期脚本。
+            $missing = $this->checkDependencies($dir, $type, $action);
+            if ($missing) {
+                $list = implode(', ', array_keys($missing));
+                throw new \RuntimeException(
+                    $this->language->get('extension_dependency_following', ['s' => $list])
+                );
+            }
+
+            $officialDataBefore = $this->kv->settingGet('officialData') ?? null;
+            if ($officialDataBefore === null) {
+                $officialDataBefore = [];
+            }
+            if (!is_array($officialDataBefore)) {
+                throw new \RuntimeException('Official store data is malformed');
+            }
+            $officialData = $officialDataBefore;
+            $officialData[$dir] = array_merge($officialData[$dir] ?? [], [
+                'storeid' => $storeId,
+                'type' => $type === 'theme' ? 2 : 1,
+                'version' => (string)$transaction['version'],
+                'cloud_version' => (string)$transaction['version'],
+                'has_upgrade' => false,
+                'last_sync' => time(),
+            ]);
+            $officialDataWriteAttempted = true;
+            if (!$this->kv->settingSet('officialData', $officialData)) {
+                throw new \RuntimeException('Failed to persist deployed extension metadata');
+            }
+
+            $status = $this->updateStatus($dir, $type, $action);
+            if (($status['status'] ?? '') !== 'success') {
+                throw new \RuntimeException((string)($status['message'] ?? 'Extension lifecycle update failed'));
+            }
+
+            $this->installer->commit($transaction);
+            $transaction = null;
+
+            $credentials = $this->market->getCredentials();
+            if (!empty($credentials['user_id'])) {
+                $this->market->notifyDownloadComplete((int)$credentials['user_id']);
+            }
+
+            \Framework\Utils\Runtime::reload();
+            return ['status' => 'success', 'dir' => $dir];
+        } catch (\Throwable $e) {
+            if ($transaction !== null) {
+                $rollbackFailures = [];
+                if ($officialDataWriteAttempted && $officialDataBefore !== null
+                    && !$this->kv->settingSet('officialData', $officialDataBefore)) {
+                    $rollbackFailures[] = 'metadata restore failed';
+                }
+                try {
+                    $this->installer->rollback($transaction);
+                } catch (\Throwable $rollbackError) {
+                    $rollbackFailures[] = $rollbackError->getMessage();
+                }
+                if ($rollbackFailures) {
+                    throw new \RuntimeException(
+                        'Extension deployment failed and rollback failed: ' . implode('; ', $rollbackFailures),
+                        0,
+                        $e
+                    );
+                }
+            }
+            return ['status' => 'error', 'message' => $e->getMessage()];
+        } finally {
+            \Framework\Utils\FileHelper::unlock($lockKey);
+        }
     }
 
     /**
@@ -606,8 +682,53 @@ class ExtensionManager
 
     private function runActionScript(string $dir, string $type, string $action): void
     {
-        $script = $this->getBasePath($type) . $dir . DIRECTORY_SEPARATOR . $action . '.php';
-        if (file_exists($script)) include \App\Core\Compile::include($script);
+        $extensionPath = $this->getBasePath($type) . $dir . DIRECTORY_SEPARATOR;
+        $configFile = $extensionPath . 'config.json';
+        $config = SecurityHelper::jsonDecode((string)file_get_contents($configFile));
+        if (isset($config[$action])) {
+            $relative = is_array($config[$action]) ? (string)($config[$action]['file'] ?? '') : '';
+            if (!$this->isSafeLifecyclePath($relative)) {
+                throw new \RuntimeException('Invalid extension lifecycle script path: ' . $action);
+            }
+        } else {
+            // 保留旧扩展按固定文件名声明生命周期脚本的既有协议。
+            $relative = $action . '.php';
+        }
+
+        $script = $extensionPath . str_replace('/', DIRECTORY_SEPARATOR, $relative);
+        if (!is_file($script)) {
+            if (!isset($config[$action])) {
+                return;
+            }
+            throw new \RuntimeException('Extension lifecycle script is missing: ' . $action);
+        }
+        include \App\Core\Compile::include($script);
+    }
+
+    private function isSafeLifecyclePath(string $path): bool
+    {
+        if ($path === '' || strpos($path, "\0") !== false || strpos($path, '\\') !== false
+            || $path[0] === '/' || preg_match('/^[A-Za-z]:/', $path)) {
+            return false;
+        }
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private function writeConfigAtomically(string $configFile, string $contents): void
+    {
+        $temporary = $configFile . '.tmp-' . bin2hex(random_bytes(8));
+        $written = file_put_contents($temporary, $contents, LOCK_EX);
+        if ($written !== strlen($contents) || !@rename($temporary, $configFile)) {
+            if (is_file($temporary)) {
+                @unlink($temporary);
+            }
+            throw new \RuntimeException('Failed to atomically update extension config.json');
+        }
     }
 
     public function checkDependencies(string $dir, string $type, string $action): array
@@ -666,18 +787,21 @@ class ExtensionManager
      * 使用 CacheManager::lock()（Redis SET NX），协程安全
      * 锁获取失败时静默跳过，避免阻塞用户
      */
-    private function withSyncLock(string $name, callable $callback): void
+    private function withSyncLock(string $name, callable $callback): bool
     {
-        if (!$this->container) return;
+        if (!$this->container) {
+            throw new \RuntimeException('Synchronization requires the application container');
+        }
         $cache = $this->container->get(\Framework\Cache\Interfaces\CacheInterface::class);
         $lockKey = 'lock:sync:' . $name . ':' . md5($this->appConfig['path'] ?? '');
         // 锁 TTL 60 秒，匹配 MarketClient 超时（30s）+ 网络抖动 + 分页查询耗时
         $token = $cache->lock($lockKey, 60);
         if (!$token) {
-            return;
+            return false;
         }
         try {
             $callback();
+            return true;
         } finally {
             $cache->unlock($lockKey, $token);
         }
@@ -686,7 +810,12 @@ class ExtensionManager
     public function syncMarketData(array $dirs, bool $force = false): void
     {
         if (empty($dirs)) return;
-        if (!$this->market->isLogged() && !$force) return;
+        if (!$this->market->isLogged()) {
+            if ($force) {
+                throw new \RuntimeException('Store credentials are required for forced synchronization');
+            }
+            return;
+        }
 
         // force=true 时（点击"重新获取数据"）增加 60 秒防抖
         if ($force) {
@@ -696,7 +825,7 @@ class ExtensionManager
             }
         }
 
-        $this->withSyncLock('market', function () use ($dirs, $force) {
+        $completed = $this->withSyncLock('market', function () use ($dirs, $force) {
             // 双重检查
             if ($force) {
                 $lastForceSync = (int)($this->kv->settingGet('storeForceSyncLastTime') ?? 0);
@@ -721,37 +850,97 @@ class ExtensionManager
                 $batchSize = 50;
                 $dirBatches = array_chunk($toSync, $batchSize);
                 foreach ($dirBatches as $batch) {
-                    $marketData = $this->market->queryExtensions($batch);
-                    if ($marketData) {
-                        foreach ($marketData as $dir => $data) {
-                            // 服务端未找到该扩展（已下架/删除），从本地缓存中移除
-                            if (empty($data['name'])) {
-                                unset($officialData[$dir]);
-                                continue;
-                            }
-                            $data['last_sync'] = $now;
-                            // P2 FIX: 若服务端响应未返回关键购买字段，显式重置默认值，防止旧缓存状态残留
-                            if (!array_key_exists('payment_id', $data)) {
-                                $data['payment_id'] = 0;
-                            }
-                            if (!array_key_exists('has_bought', $data)) {
-                                $data['has_bought'] = false;
-                            }
-                            if (!array_key_exists('price', $data)) {
-                                $data['price'] = 0;
-                            }
-                            $officialData[$dir] = array_merge($officialData[$dir] ?? [], $data);
+                    $queryItems = $this->buildMarketQueryItems($batch, $officialData);
+                    $marketData = $this->market->queryExtensions($queryItems);
+                    $expected = [];
+                    foreach ($queryItems as $queryItem) {
+                        $expected[$queryItem['dir']] = $queryItem;
+                    }
+                    if (count($marketData) !== count($expected)
+                        || array_diff_key($expected, $marketData)
+                        || array_diff_key($marketData, $expected)) {
+                        throw new \RuntimeException('Store query response does not match the requested extension set');
+                    }
+
+                    foreach ($expected as $dir => $queryItem) {
+                        $data = $marketData[$dir];
+                        $expectedType = $queryItem['type'] === 'theme' ? 2 : 1;
+                        if (!is_array($data)
+                            || !hash_equals($dir, (string)($data['dir'] ?? ''))
+                            || (int)($data['type'] ?? 0) !== $expectedType) {
+                            throw new \RuntimeException('Store query response contains an invalid extension identity');
                         }
+
+                        // 服务端未找到该扩展（已下架/删除），从本地缓存中移除
+                        if (empty($data['name'])) {
+                            unset($officialData[$dir]);
+                            continue;
+                        }
+                        $data['last_sync'] = $now;
+                        // 购买态字段由当前用户查询结果完整覆盖，禁止沿用旧用户缓存。
+                        if (!array_key_exists('payment_id', $data)
+                            || !array_key_exists('has_bought', $data)
+                            || !array_key_exists('price', $data)) {
+                            throw new \RuntimeException('Store query response is missing purchase-state fields');
+                        }
+                        $officialData[$dir] = array_merge($officialData[$dir] ?? [], $data);
                     }
                 }
             }
 
-            $this->kv->settingSet('officialData', $officialData);
+            if (!$this->kv->settingSet('officialData', $officialData)) {
+                throw new \RuntimeException('Failed to persist official store data');
+            }
 
             if ($force) {
-                $this->kv->settingSet('storeForceSyncLastTime', $now);
+                if (!$this->kv->settingSet('storeForceSyncLastTime', $now)) {
+                    throw new \RuntimeException('Failed to persist forced synchronization timestamp');
+                }
             }
         });
+        if ($force && !$completed) {
+            throw new \RuntimeException('Store synchronization is already in progress');
+        }
+    }
+
+    /**
+     * 构建唯一的批量查询协议：目录、扩展类型、本地版本。
+     */
+    private function buildMarketQueryItems(array $dirs, array $officialData): array
+    {
+        $items = [];
+        foreach ($dirs as $dir) {
+            $dir = (string)$dir;
+            $config = null;
+            $type = '';
+            foreach (['plugin' => $this->pluginPath, 'theme' => $this->themePath] as $candidateType => $basePath) {
+                $configFile = $basePath . $dir . DIRECTORY_SEPARATOR . 'config.json';
+                if (is_file($configFile)) {
+                    if ($config !== null) {
+                        throw new \RuntimeException('Extension directory is ambiguous across plugin and theme roots: ' . $dir);
+                    }
+                    $config = SecurityHelper::jsonDecode((string)file_get_contents($configFile));
+                    $type = $candidateType;
+                }
+            }
+
+            if ($config !== null) {
+                $version = (string)($config['version'] ?? '');
+            } else {
+                $remote = $officialData[$dir] ?? [];
+                $remoteType = (int)($remote['type'] ?? 0);
+                $type = $remoteType === 1 ? 'plugin' : ($remoteType === 2 ? 'theme' : '');
+                $version = (string)($remote['version'] ?? '');
+            }
+
+            if (!preg_match('/^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/', $dir)
+                || !in_array($type, ['plugin', 'theme'], true)
+                || $version === '') {
+                throw new \RuntimeException('Cannot build a complete market query identity for: ' . $dir);
+            }
+            $items[] = ['dir' => $dir, 'type' => $type, 'version' => $version];
+        }
+        return $items;
     }
 
     /**
@@ -759,7 +948,7 @@ class ExtensionManager
      * 调用服务端 sync.html 游标分页接口，获取全部上架扩展
      * 300 秒 TTL + 互斥锁 + DCL
      */
-    public function syncOfficialCatalog(): void
+    public function syncOfficialCatalog(bool $force = false): void
     {
         if (!$this->market->isLogged()) {
             return;
@@ -768,82 +957,86 @@ class ExtensionManager
         // 外层 TTL 检查（避免不必要的锁竞争）
         $lastCatalogSync = (int)($this->kv->settingGet('officialCatalogLastSync') ?? 0);
         $catalogSyncInterval = 300; // 5 分钟
-        if ((time() - $lastCatalogSync) < $catalogSyncInterval) {
+        if (!$force && (time() - $lastCatalogSync) < $catalogSyncInterval) {
             return;
         }
 
-        $this->withSyncLock('catalog', function () {
+        $completed = $this->withSyncLock('catalog', function () use ($force) {
             // 双重检查锁（DCL）：锁内再检查一次 TTL
             $lastCatalogSync = (int)($this->kv->settingGet('officialCatalogLastSync') ?? 0);
-            if ((time() - $lastCatalogSync) < 300) {
+            if (!$force && (time() - $lastCatalogSync) < 300) {
                 return;
             }
 
-            $officialData = $this->kv->settingGet('officialData') ?? [];
-            $now = time();
+            $previousData = $this->kv->settingGet('officialData') ?? [];
+            $snapshot = [];
             $cursor = null;
             $hasMore = true;
-            $maxPages = 10; // 安全上限，防止无限循环
-            $page = 0;
-            $syncedCount = 0;
-            $requestSuccess = false;
+            $maxId = 0;
+            $seenCursors = [];
 
-            while ($hasMore && $page < $maxPages) {
-                $page++;
-
+            while ($hasMore) {
                 $params = [
                     'cursor' => $cursor,
                     'limit' => 100,
                     'last_sync' => 0,
                     'dir_flag' => 'next',
                 ];
+                if ($maxId > 0) {
+                    $params['max_id'] = $maxId;
+                }
 
                 $response = $this->market->request('sync.html', $params);
                 $result = SecurityHelper::jsonDecode($response);
 
                 if (empty($result) || ($result['status'] ?? '') !== 'success') {
-                    break;
+                    throw new \RuntimeException((string)($result['message'] ?? 'Official catalog snapshot request failed'));
                 }
+                $responseData = $result['data'] ?? null;
+                if (!is_array($responseData) || !is_array($responseData['items'] ?? null)) {
+                    throw new \RuntimeException('Official catalog snapshot response is incomplete');
+                }
+                $responseMaxId = (int)($responseData['max_id'] ?? 0);
+                if ($responseMaxId <= 0 || ($maxId > 0 && $responseMaxId !== $maxId)) {
+                    throw new \RuntimeException('Official catalog snapshot anchor changed during pagination');
+                }
+                $maxId = $responseMaxId;
 
-                $requestSuccess = true;
-
-                $items = $result['data']['items'] ?? [];
+                $items = $responseData['items'];
                 foreach ($items as $item) {
-                    $dir = $item['dir'] ?? '';
-                    if (empty($dir)) continue;
+                    $dir = (string)($item['dir'] ?? '');
+                    if (!preg_match('/^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/', $dir)
+                        || !in_array((int)($item['type'] ?? 0), [1, 2], true)) {
+                        throw new \RuntimeException('Official catalog snapshot contains an invalid extension identity');
+                    }
 
-                    $item['last_sync'] = $now;
-                    $officialData[$dir] = array_merge($officialData[$dir] ?? [], $item);
-                    $syncedCount++;
+                    $item['last_sync'] = $maxId;
+                    $item['has_bought'] = (bool)($previousData[$dir]['has_bought'] ?? false);
+                    $item['payment_id'] = (int)($previousData[$dir]['payment_id'] ?? 0);
+                    $snapshot[$dir] = $item;
                 }
 
-                $hasMore = !empty($result['data']['has_more']);
-                $cursor = $hasMore ? ($result['data']['cursor'] ?? null) : null;
+                $hasMore = !empty($responseData['has_more']);
+                if ($hasMore) {
+                    $nextCursor = (int)($responseData['cursor'] ?? 0);
+                    if ($nextCursor <= 0 || isset($seenCursors[$nextCursor])) {
+                        throw new \RuntimeException('Official catalog snapshot cursor did not advance');
+                    }
+                    $seenCursors[$nextCursor] = true;
+                    $cursor = $nextCursor;
+                }
             }
 
-            // 使用 $requestSuccess 替代 $syncedCount > 0
-            // 原因：请求成功但 items 为空时（所有扩展下架/服务端无数据），仍需清理旧数据
-            if ($requestSuccess) {
-                // 清理：1) 未被本轮同步覆盖的旧条目；2) 明确标记为非官方的条目
-                // syncOfficialCatalog 是全量同步（last_sync=0），本轮所有已上架扩展都会被返回。
-                // 已下架的扩展不会被覆盖 last_sync，应在本轮同步后立即清理。
-                // $now 在函数开始时固定，所有分页批次共用同一标记，不存在多批时间差问题。
-                if (!empty($officialData)) {
-                    foreach ($officialData as $dir => $item) {
-                        if (($item['last_sync'] ?? 0) < $now) {
-                            unset($officialData[$dir]);
-                            continue;
-                        }
-                        if (isset($item['is_official']) && empty($item['is_official'])) {
-                            unset($officialData[$dir]);
-                        }
-                    }
-                    $this->kv->settingSet('officialData', $officialData);
-                }
-                // 无论 officialData 是否为空，都更新 lastSync，避免下次又触发全量同步
-                $this->kv->settingSet('officialCatalogLastSync', $now);
+            if (!$this->kv->settingSet('officialData', $snapshot)) {
+                throw new \RuntimeException('Failed to persist official catalog snapshot');
+            }
+            if (!$this->kv->settingSet('officialCatalogLastSync', $maxId)) {
+                throw new \RuntimeException('Failed to persist official catalog timestamp');
             }
         });
+        if ($force && !$completed) {
+            throw new \RuntimeException('Official catalog synchronization is already in progress');
+        }
     }
 
     /**
@@ -855,66 +1048,104 @@ class ExtensionManager
      */
     public function syncRemovedDirs(): void
     {
-        if (!$this->market->isLogged()) {
-            return;
-        }
+        if (!$this->market->isLogged()) return;
 
         $lastRemovedSync = (int)($this->kv->settingGet('storeRemovedSyncLastTime') ?? 0);
-        if ((time() - $lastRemovedSync) < 60) {
-            return;
-        }
+        if ((time() - $lastRemovedSync) < 60) return;
 
         $this->withSyncLock('removed', function () {
             $lastRemovedSync = (int)($this->kv->settingGet('storeRemovedSyncLastTime') ?? 0);
-            if ((time() - $lastRemovedSync) < 60) {
-                return;
-            }
+            if ((time() - $lastRemovedSync) < 60) return;
 
             $lastCatalogSync = (int)($this->kv->settingGet('officialCatalogLastSync') ?? 0);
-            if ($lastCatalogSync <= 0) {
-                return;
-            }
+            if ($lastCatalogSync <= 0) return;
 
             $officialData = $this->kv->settingGet('officialData') ?? [];
+            $changed = false;
+            $now = time();
+            $cursor = null;
+            $hasMore = true;
+            $maxId = 0;
+            $seenCursors = [];
+            $removedSeen = [];
 
-            // limit 仅影响增量上架 items，不影响 removed_dirs（独立查询，上限 1000）
-            $response = $this->market->request('sync.html', [
-                'last_sync' => $lastCatalogSync,
-                'limit' => 100,
-                'dir_flag' => 'next',
-            ]);
-            $result = SecurityHelper::jsonDecode($response);
+            // 增量上架与下架共用服务端时间锚点；items 必须完整翻页后才写入。
+            while ($hasMore) {
+                $params = [
+                    'cursor' => $cursor,
+                    'last_sync' => $lastCatalogSync,
+                    'limit' => 100,
+                    'dir_flag' => 'next',
+                ];
+                if ($maxId > 0) {
+                    $params['max_id'] = $maxId;
+                }
 
-            if (empty($result) || ($result['status'] ?? '') !== 'success') {
-                return;
+                $response = $this->market->request('sync.html', $params);
+                $result = SecurityHelper::jsonDecode($response);
+                if (empty($result) || ($result['status'] ?? '') !== 'success') {
+                    throw new \RuntimeException((string)($result['message'] ?? 'Removed extension synchronization failed'));
+                }
+                $responseData = $result['data'] ?? null;
+                if (!is_array($responseData)
+                    || !is_array($responseData['removed_dirs'] ?? null)
+                    || !is_array($responseData['items'] ?? null)) {
+                    throw new \RuntimeException('Removed extension synchronization response is incomplete');
+                }
+                $responseMaxId = (int)($responseData['max_id'] ?? 0);
+                if ($responseMaxId <= 0 || ($maxId > 0 && $responseMaxId !== $maxId)) {
+                    throw new \RuntimeException('Removed extension synchronization anchor changed during pagination');
+                }
+                $maxId = $responseMaxId;
+
+                foreach ($responseData['removed_dirs'] as $dir) {
+                    if (!is_string($dir)
+                        || !preg_match('/^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/', $dir)) {
+                        throw new \RuntimeException('Removed extension synchronization contains an invalid directory');
+                    }
+                    $removedSeen[$dir] = true;
+                }
+
+                foreach ($responseData['items'] as $item) {
+                    if (!is_array($item)) {
+                        throw new \RuntimeException('Removed extension synchronization contains an invalid item');
+                    }
+                    $dir = (string)($item['dir'] ?? '');
+                    if (!preg_match('/^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/', $dir)
+                        || !in_array((int)($item['type'] ?? 0), [1, 2], true)) {
+                        throw new \RuntimeException('Removed extension synchronization contains an invalid identity');
+                    }
+                    $item['last_sync'] = $maxId;
+                    $officialData[$dir] = array_merge($officialData[$dir] ?? [], $item);
+                    $changed = true;
+                }
+
+                $hasMore = !empty($responseData['has_more']);
+                if ($hasMore) {
+                    $nextCursor = (int)($responseData['cursor'] ?? 0);
+                    if ($nextCursor <= 0 || isset($seenCursors[$nextCursor])) {
+                        throw new \RuntimeException('Removed extension synchronization cursor did not advance');
+                    }
+                    $seenCursors[$nextCursor] = true;
+                    $cursor = $nextCursor;
+                }
             }
 
-            $changed = false;
-
-            // 1) 下架清理
-            $removedDirs = $result['data']['removed_dirs'] ?? [];
-            foreach ($removedDirs as $dir) {
+            foreach (array_keys($removedSeen) as $dir) {
                 if (isset($officialData[$dir])) {
                     unset($officialData[$dir]);
                     $changed = true;
                 }
             }
 
-            // 2) 重新上架发现：增量 items 包含 updated_at > lastCatalogSync 的已上架扩展
-            $items = $result['data']['items'] ?? [];
-            $now = time();
-            foreach ($items as $item) {
-                $dir = $item['dir'] ?? '';
-                if (empty($dir)) continue;
-                $item['last_sync'] = $now;
-                $officialData[$dir] = array_merge($officialData[$dir] ?? [], $item);
-                $changed = true;
-            }
-
             if ($changed) {
-                $this->kv->settingSet('officialData', $officialData);
+                if (!$this->kv->settingSet('officialData', $officialData)) {
+                    throw new \RuntimeException('Failed to persist removed extension synchronization');
+                }
             }
-            $this->kv->settingSet('storeRemovedSyncLastTime', $now);
+            if (!$this->kv->settingSet('storeRemovedSyncLastTime', $now)) {
+                throw new \RuntimeException('Failed to persist removed extension synchronization timestamp');
+            }
         });
     }
 }

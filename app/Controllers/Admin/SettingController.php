@@ -24,7 +24,7 @@ class SettingController extends BaseController
 
     // hook app_Controllers_Admin_SettingController_start.php
 
-    public function base(\Framework\Http\Interfaces\ServerRequestInterface $request)
+    public function base(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
         $user = $request->getAttribute('user', []);
         $extra = [];
@@ -82,8 +82,10 @@ class SettingController extends BaseController
         return $this->render($routeMeta['layout'], $data, true);
     }
 
-    public function postBase(\Framework\Http\Interfaces\ServerRequestInterface $request)
+    public function postBase(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
+        $params = $request->getParsedBody();
+
         // hook app_Controllers_Admin_SettingController_base_postBase_start.php
 
         $sitename = RequestUtils::param('sitename');
@@ -100,8 +102,8 @@ class SettingController extends BaseController
         $locale = RequestUtils::param('language');
         $externalLinkWhitelist = RequestUtils::param('external_link_whitelist', '');
         $externalLinkRedirectEnabled = RequestUtils::param('external_link_redirect_enabled', 0);
-        // external_link_modules 是多选数组，从 $_POST 原生读取
-        $externalLinkModules = isset($_POST['external_link_modules']) ? (array)$_POST['external_link_modules'] : [];
+        // external_link_modules 是多选数组，从 POST 原生读取
+        $externalLinkModules = isset($params['external_link_modules']) ? (array)$params['external_link_modules'] : [];
         $externalLinkModules = array_values(array_unique(array_filter($externalLinkModules)));
 
         // hook app_Controllers_Admin_SettingController_base_postBase_before.php
@@ -126,11 +128,6 @@ class SettingController extends BaseController
         FileHelper::fileReplaceVar(APP_PATH . 'config/App.php', $replace);
 
         // 外链配置变更 → 缓存失效钩子
-        // 插件在此钩子中监听并清除各自的外链聚合缓存：
-        //   well_forum: forum_thread_full_v2_*, forum_reply_full_v2_*, fmtFullThreads_*
-        //   well_page: page_cache_*
-        //   well_article: article_cache_*, comment_cache_*
-        //   well_store_server: store_item_*, store_review_*
         // hook app_Controllers_Admin_SettingController_base_postBase_after_external_link.php
 
         $replace = [
@@ -470,7 +467,7 @@ class SettingController extends BaseController
         $user = $request->getAttribute('user', []);
         $extra = [];
 
-        $id = RequestUtils::param('id', 0);
+        $id = RequestUtils::param('id', -1);
         $extra['id'] = $id;
 
         // hook app_Controllers_Admin_SettingController_smtpOperation_start.php
@@ -486,6 +483,7 @@ class SettingController extends BaseController
             'email' => '',
             'host' => '',
             'port' => '',
+            'encryption' => 'auto',
             'username' => '',
             'password' => '',
             'dkim_domain' => '',
@@ -493,6 +491,7 @@ class SettingController extends BaseController
             'dkim_selector' => 'default',
             'dkim_passphrase' => ''
         ];
+        $read['encryption'] = $read['encryption'] ?? 'auto';
 
         // hook app_Controllers_Admin_SettingController_smtpOperation_before.php
 
@@ -528,6 +527,11 @@ class SettingController extends BaseController
             'action' => $this->urlGenerator->url($page_link_string, $extra),
             'language' => [
                 'submit' => $this->language->get('submit'),
+                'smtp_password_format' => $this->language->get('smtp_password_format'),
+                'smtp_encryption' => $this->language->get('smtp_encryption'),
+                'smtp_encryption_auto' => $this->language->get('smtp_encryption_auto'),
+                'smtp_encryption_ssl' => $this->language->get('smtp_encryption_ssl'),
+                'smtp_encryption_tls' => $this->language->get('smtp_encryption_tls'),
             ]
         ];
 
@@ -543,7 +547,7 @@ class SettingController extends BaseController
 
         // hook app_Controllers_Admin_SettingController_postSmtp_start.php
 
-        $id = RequestUtils::param('id', 0);
+        $id = RequestUtils::param('id', -1);
         $email = RequestUtils::param('email', '');
         $email = trim($email);
         if (!preg_match('#^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)*@[a-zA-Z0-9-]+(\.[a-zA-Z]{2,})+$#', $email)) return $this->errorMessage($this->language->get('email_format_incorrect'), 'email');
@@ -553,20 +557,34 @@ class SettingController extends BaseController
         if (!$host) return $this->errorMessage($this->language->get('no_data_available'), 'host');
 
         $port = RequestUtils::param('port', 0);
-        if (!$port) return $this->errorMessage($this->language->get('no_data_available'), 'port');
+        if ($port < 1 || $port > 65535) return $this->errorMessage($this->language->get('configuration_error'), 'port');
+
+        $encryption = RequestUtils::param('encryption', 'auto');
+        if (!in_array($encryption, ['auto', 'ssl', 'tls'], true)) {
+            return $this->errorMessage($this->language->get('configuration_error'), 'encryption');
+        }
 
         $username = RequestUtils::param('username', '');
         $username = trim($username);
         if (!$username) return $this->errorMessage($this->language->get('email_format_incorrect'), 'username');
+        if (preg_match('/[&<>"\']/', $username)) {
+            return $this->errorMessage($this->language->get('smtp_username_format'), 'username');
+        }
 
         $password = RequestUtils::param('password', '');
-        $password = trim($password);
-        if (!$password) return $this->errorMessage($this->language->get('password_is_empty'), 'password');
+        if ($password === '') return $this->errorMessage($this->language->get('password_is_empty'), 'password');
+        // 用户要求保留 XSS 中间件：仅允许不会被过滤器改写的 SMTP 密码字符。
+        if (!preg_match('/\A[A-Za-z0-9_-]+\z/', $password)) {
+            return $this->errorMessage($this->language->get('smtp_password_format'), 'password');
+        }
 
         $dkim_domain = RequestUtils::param('dkim_domain', '');
         $dkim_private = RequestUtils::param('dkim_private', '');
         $dkim_selector = RequestUtils::param('dkim_selector', 'default');
         $dkim_passphrase = RequestUtils::param('dkim_passphrase', '');
+        if ($dkim_passphrase !== '' && !preg_match('/\A[A-Za-z0-9_-]+\z/', $dkim_passphrase)) {
+            return $this->errorMessage($this->language->get('smtp_password_format'), 'dkim_passphrase');
+        }
 
         // hook app_Controllers_Admin_SettingController_postSmtp_before.php
 
@@ -574,6 +592,7 @@ class SettingController extends BaseController
             'email' => $email,
             'host' => $host,
             'port' => $port,
+            'encryption' => $encryption,
             'username' => $username,
             'password' => $password,
             'dkim_domain' => $dkim_domain,
@@ -583,7 +602,6 @@ class SettingController extends BaseController
         ];
 
         if (isset($smtpList[$id])) {
-            unset($smtpList[$id]['id'], $smtpList[$id]['operation_links']);
             $smtpList[$id] = $data;
         } else {
             $smtpList[] = $data;
@@ -591,7 +609,7 @@ class SettingController extends BaseController
 
         // hook app_Controllers_Admin_SettingController_postSmtp_after.php
 
-        $result = FileHelper::filePutContentsTry($this->smtpConfigFile, "<?php\r\nreturn " . var_export($smtpList, true) . ";\r\n?" . htmlspecialchars_decode('&gt;'));
+        $result = $this->saveSmtpList($smtpList);
         if (!$result) return $this->errorMessage($this->language->get('data_error', ['msg' => 'postSmtp']), 14);
 
         // hook app_Controllers_Admin_SettingController_postSmtp_end.php
@@ -601,22 +619,44 @@ class SettingController extends BaseController
 
     public function postSmtpDelete(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
-        $id = RequestUtils::param('id', 0);
-        if (!$id) return $this->errorMessage($this->language->get('params_error', ['error' => 'param[id]']), 6);
+        $id = RequestUtils::param('id', -1);
+        if ($id < 0) return $this->errorMessage($this->language->get('params_error', ['error' => 'param[id]']), 6);
 
         $smtpList = $this->smtpInit($this->smtpConfigFile);
         if (isset($smtpList[$id])) unset($smtpList[$id]);
 
-        $result = FileHelper::filePutContentsTry($this->smtpConfigFile, "<?php\r\nreturn " . var_export($smtpList, true) . ";\r\n?" . htmlspecialchars_decode('&gt;'));
+        $result = $this->saveSmtpList($smtpList);
         if (!$result) return $this->errorMessage($this->language->get('data_error', ['msg' => 'smtpDelete']), 14);
 
         return $this->successMessage($this->language->get('delete_success'), 0, $this->urlGenerator->url('admin/setting/smtp'), 2);
     }
 
-    // $this->smtpInit(APP_PATH . 'config/Smtp.php');
     /**
-     * @param string $configFile
+     * 保存 SMTP 配置并发布对应的运行产物。
      */
+    private function saveSmtpList(array $smtpList): bool
+    {
+        try {
+            foreach ($smtpList as &$smtp) {
+                unset($smtp['id'], $smtp['operation_links']);
+            }
+            unset($smtp);
+            $content = "<?php\r\nreturn " . var_export($smtpList, true) . ";\r\n";
+            if (FileHelper::filePutContentsTry($this->smtpConfigFile, $content) !== strlen($content)) {
+                throw new \RuntimeException('Unable to save complete SMTP configuration');
+            }
+            // 仅刷新 SMTP 产物；上传等共用链路的缓存与失效合同保持不变。
+            \App\Core\Compile::refreshFile($this->smtpConfigFile);
+            return true;
+        } catch (\Throwable $e) {
+            $this->container->get(\Framework\Logger\LoggerInterface::class)->error('SMTP configuration publication failed', [
+                'exception' => get_class($e),
+                'message' => $e->getMessage(),
+            ]);
+            return false;
+        }
+    }
+
     private function smtpInit(string $configFile)
     {
         if (is_file($configFile)) {

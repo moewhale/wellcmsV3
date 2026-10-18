@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+    演示文件：调试错误页（对应 app/views/htm/error_debug.htm）
+    仅 DEBUG 模式可见；演示数据：Request ID / 时间 / 异常信息 / 堆栈均为静态示例
+-->
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>调试错误 | WellCMS</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 2rem; background: #fafaf9; }
+        .box { max-width: 1024px; margin: 0 auto; background: #fff; padding: 2rem; border-radius: 12px; border: 1px solid #e7e5e4; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
+        h1 { color: #f43f5e; margin-top: 0; }
+        pre { background: #f5f5f4; padding: 1rem; overflow: auto; font-size: 0.9rem; border-radius: 8px; border: 1px solid #e7e5e4; }
+        .meta { color: #78716c; margin-bottom: 1rem; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h1>系统异常（调试模式）</h1>
+        <p class="meta">
+            请求 ID: req_9f3c2a71b4d8468e<br>
+            时间: 2026-09-17 14:32:08
+        </p>
+        <p><strong>错误信息：</strong> Attempt to read property "title" on null</p>
+        <p><strong>文件位置：</strong> /app/Services/ThreadService.php : 128</p>
+        <p><strong>异常类型：</strong> Framework\Exception\RuntimeException</p>
+        <pre>[
+  {
+    "file": "/app/Controllers/ThreadController.php",
+    "line": 64,
+    "function": "read",
+    "class": "App\\Services\\ThreadService"
+  },
+  {
+    "file": "/src/Core/ dispatcher.php",
+    "line": 92,
+    "function": "detailAction",
+    "class": "App\\Controllers\\ThreadController"
+  }
+]</pre>
+    </div>
+</body>
+</html>

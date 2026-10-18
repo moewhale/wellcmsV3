@@ -277,6 +277,7 @@ CREATE TABLE `well_file_storage` (
   `path` varchar(120) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '', -- 本地完整路径含文件名 /storage/upload/tmp/READ.md
   `url` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '', -- 文件URL /upload/tmp/READ.md
   `cloud_url` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '', -- 云存储URL或ID
+  `disk_key` VARCHAR(64) NOT NULL DEFAULT '', -- 已确认云盘身份 本地为空
   `filetype` varchar(7) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',  -- 文件类型
   `comment` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '', -- 文件注释
   -- 新增
@@ -318,6 +319,7 @@ CREATE TABLE `well_attachment` (
   -- 支持模块 + 主题查询
   KEY `idx_module_target_storage` (`module`, `target_id`, `storage_id`),
   KEY `idx_module_reply_storage` (`module`, `reply_id`, `storage_id`),
+  KEY `idx_storage_id` (`storage_id`),
 
   -- 用户维度：个人中心-我的附件
   KEY `idx_user_created` (`user_id`, `id`)

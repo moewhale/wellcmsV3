@@ -696,7 +696,7 @@ class WellCMSUI {
                     ${admin}
                 </div>
                 <div class="p-2 border-t border-gray-100 dark:border-gray-700">
-                    <button class="ajax-get w-full flex items-center px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors" data-href="${user.links.logout.url}" data-confirm="Are you sure you want to logout?">
+                    <button class="ajax-post w-full flex items-center px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors" data-href="${user.links.logout.url}" data-arg='${JSON.stringify(user.links.logout.arg || {})}' data-confirm="Are you sure you want to logout?">
                         <svg class="mr-3 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
                         </svg>
@@ -1201,6 +1201,41 @@ class WellCMSUI {
     return Math.floor(Date.now() / 1000);
   }
 
+  // 仅由邮件认证与 SMTP 设置页面调用；不改变共用 POST 或上传行为。
+  guardPageToken(formSelector = "#form", ttlSeconds = 600) {
+    const form = document.querySelector(formSelector);
+    if (!form) return;
+    const send = form.querySelector("#send-code");
+    const deadline = Date.now() + Math.max(1, ttlSeconds - 60) * 1000;
+    let timer;
+    const cleanup = () => {
+      clearTimeout(timer);
+      form.removeEventListener("submit", checkExpiry, true);
+      if (send) send.removeEventListener("click", checkExpiry, true);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+    const checkExpiry = (event) => {
+      if (!form.isConnected) {
+        cleanup();
+        return;
+      }
+      if (Date.now() < deadline) return;
+      if (event) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+      cleanup();
+      window.location.reload();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") checkExpiry();
+    };
+    timer = setTimeout(checkExpiry, Math.max(1, deadline - Date.now()));
+    form.addEventListener("submit", checkExpiry, true);
+    if (send) send.addEventListener("click", checkExpiry, true);
+    document.addEventListener("visibilitychange", onVisibility);
+  }
+
   jsonEncode(data) {
     try {
       return JSON.stringify(data);
@@ -1390,6 +1425,9 @@ class WellCMSUI {
 
   /**
    * Chunked File Upload with Resume/Fast Upload capability
+   * 上传链路保护（用户要求，2026-10-10；见根目录 AGENTS.md）：
+   * 此组件由所有插件共用。未经用户明确授权，AI 禁止修改上传协议、秒传、分片和回执契约；
+   * 审计、重构、优化或修复测试均不构成授权，必须保留此备注。
    * @param {Object} options { url, file, onProgress(%), onChunk(i, total), chunkSize }
    */
   async uploadFileWithProgress(options) {
@@ -1448,12 +1486,23 @@ class WellCMSUI {
     try {
       initResp = await this.post(url, initFd);
     } catch (e) {
-      // Fallback for servers not supporting chunking: Direct Upload
+      // Only legacy/direct-only endpoints use these explicit HTTP responses.
+      if (
+        e.message !== "HTTP 400" &&
+        e.message !== "HTTP 404" &&
+        e.message !== "HTTP 405"
+      ) {
+        throw e;
+      }
       console.warn("Init failed, falling back to direct upload");
       const directFd = new FormData();
       directFd.append("file", file);
       appendExtra(directFd);
       return await this.post(url, directFd, onProgress);
+    }
+
+    if (initResp.code) {
+      return initResp;
     }
 
     if (
@@ -1487,7 +1536,10 @@ class WellCMSUI {
       fd.append("file", chunk, `${filename}.part${i}`);
       appendExtra(fd);
 
-      await this.post(url, fd);
+      const chunkResp = await this.post(url, fd);
+      if (chunkResp.code) {
+        return chunkResp;
+      }
 
       if (onChunk) onChunk(i, totalChunks);
       if (onProgress) onProgress(Math.min(99, (i / totalChunks) * 100));

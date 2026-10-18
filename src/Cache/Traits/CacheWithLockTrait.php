@@ -25,9 +25,7 @@ trait CacheWithLockTrait
     ) {
         // 1. 先尝试直接从缓存里拿
         $data = $this->get($key);
-        if ($data !== null) {
-            return $data;
-        }
+        if ($data !== null) return $data;
 
         $attempt = 0;
         while ($attempt < $maxAttempts) {
@@ -56,9 +54,7 @@ trait CacheWithLockTrait
                 try {
                     // “双查”：加锁后再查看一次缓存
                     $data = $this->get($key);
-                    if ($data !== null) {
-                        return $data;
-                    }
+                    if ($data !== null) return $data;
 
                     // 4. 真正去执行业务拿数据
                     $data = call_user_func($cacheGetter);
@@ -74,9 +70,7 @@ trait CacheWithLockTrait
                     error_log("CacheWithLock Error: " . $e->getMessage());
                 }
                 $attempt++;
-                if ($attempt >= $maxAttempts) {
-                    return null;
-                }
+                if ($attempt >= $maxAttempts) return null;
             }
         }
 

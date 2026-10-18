@@ -1,177 +1,160 @@
 <?php
 
 declare(strict_types=1);
-/*
- * Copyright (C) www.wellcms.com
-*/
 
 namespace App\Jobs;
 
-/**
- * 异步图片清洗任务
- * 职责：读取文件 -> 清洗EXIF/重绘 -> 会导致文件尺寸和hash改为必须更新Hash和大小 -> 标记已清洗
- */
+/** 上传链路保护：获授权按全链路方案修复，清洗准备与持久化发布阶段分离。 */
 class ImageCleanupJob implements \Framework\Scheduler\Interfaces\JobInterface
 {
-    /** @var object */
-    protected $attachmentService;
-    /** @var object */
     protected $fileStorageService;
-    /** @var \Framework\Logger\LoggerInterface */
     protected $logger;
 
-    // TaskExecutor 会通过 Container 自动注入这些依赖
-    public function __construct(
-        \App\Services\Storage\FileStorageService $fileStorageService,
-        \Framework\Logger\LoggerInterface $logger
-    ) {
+    public function __construct(\App\Services\Storage\FileStorageService $fileStorageService, \Framework\Logger\LoggerInterface $logger)
+    {
         $this->fileStorageService = $fileStorageService;
         $this->logger = $logger;
     }
 
-    /**
-     * @param int $fileStorageId
-     * @param string $path
-     * @return array
-     */
-    public function handle(int $fileStorageId, string $path): array
+    public function handle(int $fileStorageId, string $path, array $phaseContext = []): array
     {
-        if (!$fileStorageId || !$path) {
-            throw new \InvalidArgumentException("Missing fileStorageId");
+        if ($fileStorageId <= 0) throw new \InvalidArgumentException('Missing file storage ID');
+        if (($phaseContext['phase'] ?? '') === 'clean_commit') {
+            return $this->publish($fileStorageId, $phaseContext['source'], $phaseContext['prepared']);
         }
-
-        // 1. 获取附件信息
-        $file = $this->fileStorageService->read(['id' => $fileStorageId]);
-        if (!$file) {
-            $this->logger->warning("ImageCleanupJob: File not found in DB", ['file_storage_id' => $fileStorageId]);
-            return ['status' => 'skipped', 'reason' => 'db_not_found'];
+        $row = $this->fileStorageService->readOnMaster($fileStorageId);
+        if (!$row) return ['status' => 'skipped', 'reason' => 'db_not_found'];
+        $expected = $phaseContext['source'] ?? $this->fileStorageService->resolveStoredFile($row)['artifact'];
+        $prepared = $this->prepare($fileStorageId, $expected);
+        if ($prepared['state'] !== 'prepared') return ['status' => 'skipped', 'reason' => $prepared['state']];
+        // 唯一云插件生产者须先可靠保存 source/prepared，再允许后继发布源文件。
+        $handoff = [];
+        // hook app_Jobs_ImageCleanupJob_prepared.php
+        if (!\Framework\Scheduler\TaskDispatchResult::isAccepted($handoff)) {
+            throw new \RuntimeException('Image cleanup publish stage has not been durably registered');
         }
-
-        $path = $file['path'];
-        if (!file_exists($path)) {
-            $this->logger->error("ImageCleanupJob: File not found on disk", ['path' => $path]);
-            return ['status' => 'failed', 'reason' => 'file_missing'];
-        }
-
-        // 2. 执行清洗
-        $mime = $file['mime'] ?? mime_content_type($path);
-
-        // 性能熔断：大于 10MB 的图片暂不处理，避免 CLI 内存溢出
-        if (filesize($path) > 10 * 1024 * 1024) {
-            return ['status' => 'skipped', 'reason' => 'file_too_large'];
-        }
-
-        $cleaned = $this->cleanImageMetadata($path, $mime);
-
-        if ($cleaned) {
-            // 3. 更新文件元数据 (Hash 和 Size 可能变化)
-            clearstatcache(true, $path);
-            $newSize = filesize($path);
-            $newHashRaw = \Framework\Utils\FileHasher::sha256($path, 'raw');
-
-            // 更新数据库
-            $updateData = [
-                'filehash' => $newHashRaw,
-                'filesize' => $newSize,
-                'newhash' => $newHashRaw,
-                'newsize' => $newSize,
-                'exif_cleaned' => 1, // 已清理EXIF
-            ];
-
-            $this->fileStorageService->update($fileStorageId, $updateData);
-
-            //$this->logger->info("ImageCleanupJob: Cleaned success", ['file_storage_id' => $fileStorageId, 'old_size' => $file['filesize'], 'new_size' => $newSize]);
-            return ['status' => 'success'];
-        } else {
-            // 清洗失败或无需清洗（非图片）
-            return ['status' => 'skipped', 'reason' => 'not_supported_or_failed'];
-        }
+        return ['status' => 'success', 'reason' => 'publish_registered', 'taskId' => \Framework\Scheduler\TaskDispatchResult::taskId($handoff)];
     }
 
-    /**
-     * 核心清洗逻辑
-     */
-    private function cleanImageMetadata(string $path, string $mime): bool
+    public function prepare(int $fileStorageId, array $expected): array
     {
-        if (!extension_loaded('gd')) return false;
-        @ini_set('memory_limit', '256M'); // 临时提权
+        return $this->fileStorageService->withFileProtection($fileStorageId, function () use ($fileStorageId, $expected): array {
+            $row = $this->fileStorageService->readOnMaster($fileStorageId);
+            if (!$row) return ['state' => 'stale'];
+            if (empty($row['is_image'])) return ['state' => 'not_image'];
+            $file = $this->fileStorageService->resolveStoredFile($row);
+            if (!$this->fileStorageService->matchesArtifact($file['artifact'], $expected)) return ['state' => 'stale'];
+            if ((int)$row['exif_cleaned'] === 1) return ['state' => 'already_completed'];
+            if ((int)$row['cloud_type'] !== 0) throw new \RuntimeException('Cloud image cannot be reprocessed in place');
+            $path = $this->fileStorageService->resolveStoredFilePath((string)$row['path']);
+            $this->fileStorageService->verifyArtifactFile($path, $expected);
+            $info = getimagesize($path);
+            if (!$info) throw new \RuntimeException('Cannot decode image metadata');
+            if ($expected['size'] > 10485760 || (int)$info[0] * (int)$info[1] > 16777216) return ['state' => 'unsupported_size'];
+            if (!extension_loaded('gd')) return ['state' => 'processor_unavailable'];
+            if (!in_array($expected['mime'], ['image/jpeg', 'image/png'], true)) return ['state' => 'unsupported_format'];
+            if (!$this->preservesImageSemantics($path, $expected['mime'])) return ['state' => 'unsupported_metadata_or_animation'];
+            $workFile = $path . '.clean-' . $expected['sha256'];
+            if (file_exists($workFile)) {
+                $workFile = $this->fileStorageService->resolveStoredFilePath($workFile);
+                if (!unlink($workFile)) throw new \RuntimeException('Cannot reset unpublished image work file');
+            }
+            $image = $expected['mime'] === 'image/png' ? imagecreatefrompng($path) : imagecreatefromjpeg($path);
+            if (!$image) throw new \RuntimeException('Image cleanup decoder failed');
+            $output = fopen($workFile, 'x+b');
+            if (!is_resource($output)) { imagedestroy($image); throw new \RuntimeException('Cannot create image cleanup work file'); }
+            try {
+                imagealphablending($image, false);
+                imagesavealpha($image, true);
+                $written = $expected['mime'] === 'image/png' ? imagepng($image, $output, 8) : imagejpeg($image, $output, 85);
+                if (!$written || !fflush($output)) throw new \RuntimeException('Image cleanup encoder failed');
+            } catch (\Throwable $error) {
+                fclose($output);
+                imagedestroy($image);
+                unlink($workFile);
+                throw $error;
+            }
+            fclose($output);
+            imagedestroy($image);
+            clearstatcache(true, $workFile);
+            $processed = getimagesize($workFile);
+            if (!$processed || $processed['mime'] !== $expected['mime'] || $processed[0] !== $info[0] || $processed[1] !== $info[1]) {
+                throw new \RuntimeException('Image cleanup output does not preserve source dimensions/type');
+            }
+            return ['state' => 'prepared', 'workFile' => $workFile, 'width' => (int)$processed[0], 'height' => (int)$processed[1],
+                'artifact' => ['sha256' => \Framework\Utils\FileHasher::sha256($workFile, 'hex'), 'size' => filesize($workFile), 'mime' => $processed['mime']]];
+        });
+    }
 
+    public function publish(int $fileStorageId, array $source, array $prepared): array
+    {
+        return $this->fileStorageService->withFileProtection($fileStorageId, function () use ($fileStorageId, $source, $prepared): array {
+            $row = $this->fileStorageService->readOnMaster($fileStorageId);
+            if (!$row) return ['status' => 'skipped', 'reason' => 'stale'];
+            $file = $this->fileStorageService->resolveStoredFile($row);
+            if ((int)$row['exif_cleaned'] === 1) {
+                if (!$this->fileStorageService->matchesArtifact($file['artifact'], $prepared['artifact'])) throw new \RuntimeException('Image cleanup result conflicts with committed artifact');
+                return ['status' => 'success', 'reason' => 'already_completed'];
+            }
+            if (!$this->fileStorageService->matchesArtifact($file['artifact'], $source) || (int)$row['cloud_type'] !== 0) return ['status' => 'skipped', 'reason' => 'stale'];
+            $path = $this->fileStorageService->resolveStoredFilePath((string)$row['path']);
+            $workFile = $path . '.clean-' . $source['sha256'];
+            if (!hash_equals($workFile, (string)($prepared['workFile'] ?? ''))) throw new \RuntimeException('Invalid image work file identity');
+            clearstatcache(true, $path);
+            $alreadyPublished = filesize($path) === $prepared['artifact']['size']
+                && hash_equals($prepared['artifact']['sha256'], \Framework\Utils\FileHasher::sha256($path, 'hex'));
+            if (!$alreadyPublished) {
+                $this->fileStorageService->verifyArtifactFile($path, $source);
+                $workFile = $this->fileStorageService->resolveStoredFilePath($workFile);
+                $this->fileStorageService->verifyArtifactFile($workFile, $prepared['artifact']);
+                if (!rename($workFile, $path)) throw new \RuntimeException('Cannot publish cleaned image');
+            }
+            $result = $this->fileStorageService->commitCleanedArtifact($fileStorageId, $source, $prepared);
+            if ($result['state'] === 'stale') throw new \RuntimeException('Image source changed during cleanup commit');
+            return ['status' => 'success', 'reason' => $alreadyPublished ? 'metadata_recovered' : 'cleanup_committed'];
+        });
+    }
+
+    /** 保守支持无方向 EXIF 的 JPEG 和非动画 PNG；不把扁平化动画报告为成功。 */
+    private function preservesImageSemantics(string $path, string $mime): bool
+    {
+        $stream = fopen($path, 'rb');
+        if (!is_resource($stream)) throw new \RuntimeException('Cannot inspect image format');
         try {
-            $srcImage = null;
-            switch ($mime) {
-                case 'image/jpeg':
-                    $srcImage = @imagecreatefromjpeg($path);
-                    break;
-                case 'image/png':
-                    $srcImage = @imagecreatefrompng($path);
-                    imagealphablending($srcImage, false);
-                    imagesavealpha($srcImage, true);
-                    break;
-                case 'image/webp':
-                    if (function_exists('imagecreatefromwebp')) {
-                        $srcImage = @imagecreatefromwebp($path);
-                        imagealphablending($srcImage, false);
-                        imagesavealpha($srcImage, true);
-                    }
-                    break;
-                case 'image/gif':
-                    $srcImage = @imagecreatefromgif($path);
-                    break;
+            if ($mime === 'image/png') {
+                if (fread($stream, 8) !== "\x89PNG\r\n\x1a\n") return false;
+                $hasData = false;
+                $size = filesize($path);
+                while (!feof($stream)) {
+                    $header = fread($stream, 8);
+                    if (strlen($header) !== 8) return false;
+                    $length = unpack('Nlength', substr($header, 0, 4))['length'];
+                    $type = substr($header, 4, 4);
+                    if (in_array($type, ['acTL', 'eXIf', 'iCCP', 'gAMA', 'cHRM'], true)) return false;
+                    if ($type === 'IDAT') $hasData = true;
+                    if ($length > 10485760 || ftell($stream) + $length + 4 > $size) return false;
+                    if ($type === 'IEND') return $hasData && $length === 0;
+                    if (fseek($stream, $length + 4, SEEK_CUR) !== 0) return false;
+                }
+                return false;
             }
-
-            if (!$srcImage) return false;
-
-            $result = false;
-            switch ($mime) {
-                case 'image/jpeg':
-                    $result = @imagejpeg($srcImage, $path, 85);
-                    break;
-                case 'image/png':
-                    $result = @imagepng($srcImage, $path, 8);
-                    break;
-                case 'image/webp':
-                    if (function_exists('imagewebp')) $result = @imagewebp($srcImage, $path, 85);
-                    break;
-                case 'image/gif':
-                    $result = @imagegif($srcImage, $path);
-                    break;
+            if (fread($stream, 2) !== "\xff\xd8") return false;
+            while (!feof($stream)) {
+                $marker = fread($stream, 2);
+                if (strlen($marker) !== 2 || $marker[0] !== "\xff") return false;
+                if ($marker[1] === "\xda" || $marker[1] === "\xd9") return true;
+                $lengthBytes = fread($stream, 2);
+                if (strlen($lengthBytes) !== 2) return false;
+                $length = unpack('nlength', $lengthBytes)['length'] - 2;
+                if ($length < 0) return false;
+                $prefix = fread($stream, min(6, $length));
+                if ($marker[1] === "\xe1" && strpos($prefix, 'Exif') === 0) return false;
+                if ($marker[1] === "\xe2" && $prefix === 'ICC_PR') return false;
+                if (fseek($stream, $length - strlen($prefix), SEEK_CUR) !== 0) return false;
             }
-
-            if (PHP_VERSION_ID < 80000) imagedestroy($srcImage);
-            else unset($srcImage);
-
-            return $result;
-        } catch (\Throwable $e) {
-            $this->logger->error("ImageCleanupJob GD Error", ['msg' => $e->getMessage()]);
             return false;
+        } finally {
+            fclose($stream);
         }
     }
 }
-
-// UploadController
-// 关键：触发异步清洗任务，应该判断是否启用redis和Scheduler，如果未启用则跳过清洗
-/* $redis = $this->cache->original('redis');
-if ($redis && $isImage && !empty($this->cfg['clean_exif'])) {
-    // Temp 阶段不清洗
-    // 获取 TaskManage 实例（包含是否启用检查）
-    $scheduler = $this->getTaskManage();
-    if ($scheduler) {
-        // 推送异步清洗任务
-        try {
-            $scheduler->createTask([
-                'className' => 'App\\Jobs\\ImageCleanupJob',
-                'methodName' => 'handle',
-                'args' => [
-                    'id' => $fileStorageId,
-                    'path' => $finalPath
-                ],
-                'priority' => 5,
-                'retryDelay' => 10,
-                'maxRetries' => 3
-            ]);
-        } catch (\Throwable $e) {
-            // 容错：推送任务失败不应阻断上传流程，改为降级处理或仅记录日志
-            $this->container->get(LoggerInterface::class)->error('Failed to push cleanup task', ['error' => $e->getMessage()]);
-        }
-    }
-} */

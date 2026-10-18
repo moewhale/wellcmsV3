@@ -9,6 +9,7 @@ namespace App\Services\Content;
 
 use Framework\Utils\Validator;
 use Framework\Exception\BusinessException;
+use Framework\Exception\Infra\DatabaseException;
 
 class RecycleService
 {
@@ -36,7 +37,7 @@ class RecycleService
         // hook app_Services_RecycleService_insert_start.php
 
         $result = $this->dbModel->insert($data);
-        if (!$result) throw new BusinessException('RecycleService -> insert(): Data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        if (!$result) throw new DatabaseException('RecycleService -> insert(): data writing failed');
 
         // hook app_Services_RecycleService_insert_end.php
 
@@ -50,7 +51,7 @@ class RecycleService
         // hook app_Services_RecycleService_bulkInsert_start.php
 
         $result = $this->dbModel->bulkInsert($data);
-        if (!$result) throw new BusinessException('RecycleService -> bulkInsert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        if (!$result) throw new DatabaseException('RecycleService -> bulkInsert(): data writing failed');
 
         // hook app_Services_RecycleService_bulkInsert_end.php
 
@@ -64,7 +65,7 @@ class RecycleService
         // hook app_Services_RecycleService_update_start.php
 
         $result = $this->dbModel->update(['id' => $id], $update);
-        if ($result === 0) throw new BusinessException('RecycleService -> update() Update failed : ' . json_encode(['id' => $id, 'update' => $update], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        if ($result === 0) throw new BusinessException('RecycleService -> update(): update failed');
 
         // hook app_Services_RecycleService_update_end.php
 

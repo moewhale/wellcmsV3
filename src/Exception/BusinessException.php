@@ -17,6 +17,7 @@ class BusinessException extends \Exception implements \Framework\Exception\Excep
 
     public function getStatusCode(): int
     {
-        return $this->getCode() ?: 422;
+        $code = $this->getCode();
+        return $code >= 400 && $code <= 599 ? $code : 422;
     }
 }

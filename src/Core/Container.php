@@ -33,6 +33,8 @@ class Container
     protected $params = [];
     /** @var array [abstract => ['concrete'=>…, 'singleton'=>…]] */
     protected $bindings = [];
+    /** @var array 尚未解析具体类型的延迟类绑定 */
+    private $pendingDeferredBindings = [];
     /** @var array 别名 => 真实类名 */
     protected $aliases = [];
 
@@ -68,6 +70,27 @@ class Container
     {
         $abstract = $this->resolveAlias($abstract);
 
+        // 首次注册尚未加载的延迟类时，不触发自动加载。已有实例或代理的重绑定
+        // 仍立即解析，保留原有代理身份、隐藏绑定和单例清理规则。
+        if ($defer && is_string($concrete)
+            && !class_exists($concrete, false) && !interface_exists($concrete, false)
+            && !isset($this->instances[$abstract])
+            && !isset($this->bindings['deferred:' . $abstract])) {
+            $this->bindings[$abstract] = [
+                'concrete' => $concrete,
+                'singleton' => $singleton,
+                'defer' => true,
+            ];
+            $this->pendingDeferredBindings[$abstract] = true;
+            return;
+        }
+
+        $this->bindResolved($abstract, $concrete, $singleton, $defer);
+    }
+
+    /** 使用原有类型分派规则注册绑定；类型检查失败时保留旧绑定。 */
+    private function bindResolved(string $abstract, $concrete, bool $singleton, bool $defer): void
+    {
         if (true === $defer && is_string($concrete) && class_exists($concrete) && !interface_exists($concrete)) {
             $deferredId = 'deferred:' . $abstract;
             $classToBuild = $concrete;
@@ -95,7 +118,15 @@ class Container
             'defer' => $defer
         ];
 
+        unset($this->pendingDeferredBindings[$abstract]);
         if (true !== $singleton) unset($this->instances[$abstract]);
+    }
+
+    /** 首次使用时解析延迟绑定；加载异常时保留待解析状态，允许后续重试。 */
+    private function resolveDeferredBinding(string $abstract): void
+    {
+        $binding = $this->bindings[$abstract];
+        $this->bindResolved($abstract, $binding['concrete'], $binding['singleton'], $binding['defer']);
     }
 
     // 直接注册实例到容器（如配置对象），只支持实例，不支持闭包。无依赖或单一依赖直接实例化，实例化前需要提前注册依赖
@@ -148,6 +179,12 @@ class Container
         // 单例直接返回
         if (isset($this->instances[$class])) return $this->instances[$class];
 
+        if (isset($this->pendingDeferredBindings[$class])) {
+            $this->resolveDeferredBinding($class);
+            // 自动加载可能让出协程；恢复后复用另一协程已生成的单例。
+            if (isset($this->instances[$class])) return $this->instances[$class];
+        }
+
         // 处理绑定
         if (isset($this->bindings[$class])) {
             $binding   = $this->bindings[$class];
@@ -174,15 +211,49 @@ class Container
      */
     public function make(string $class, array $params = [])
     {
-        // 解析别名
+        return $this->build($class, $params, true);
+    }
+
+    /**
+     * 构建不进入容器实例缓存的请求级对象。
+     * 主要用于持有 Request/Session 等上下文的 Controller。
+     *
+     * @return mixed
+     */
+    public function makeTransient(string $class, array $params = [])
+    {
+        if ($class === self::class || $class === Container::class) return $this;
+
         $class = $this->resolveAlias($class);
+        if (isset($this->pendingDeferredBindings[$class])) $this->resolveDeferredBinding($class);
+
+        if (isset($this->bindings[$class])) {
+            $concrete = $this->bindings[$class]['concrete'];
+            if ($concrete !== $class) {
+                return \is_string($concrete)
+                    ? $this->makeTransient($concrete, $params)
+                    : $concrete($this, $params + $this->params);
+            }
+        }
+
+        return $this->build($class, $params, false);
+    }
+
+    /**
+     * @return mixed
+     */
+    protected function build(string $class, array $params, bool $allowCache)
+    {
+        // 解析别名，并在直接 make() 时保留延迟绑定原有的单例缓存规则。
+        $class = $this->resolveAlias($class);
+        if (isset($this->pendingDeferredBindings[$class])) $this->resolveDeferredBinding($class);
 
         // 循环依赖检测（O(1)）
-        if (isset($this->buildingMap[$class])) {
+        if ($this->isBuilding($class)) {
             throw new \RuntimeException("Circular dependency: $class");
         }
 
-        $this->buildingMap[$class] = true;
+        $this->markBuilding($class);
 
         try {
             // 优先使用编译缓存
@@ -196,7 +267,7 @@ class Container
                 $object = self::$factoryCache[$class]($this, $params);
             }
         } finally {
-            unset($this->buildingMap[$class]);
+            $this->unmarkBuilding($class);
         }
 
         // 生成 / 调用工厂闭包（无反射热路径）
@@ -210,11 +281,66 @@ class Container
 
         // 是否存入单例缓存
         $isSingleton = isset($this->bindings[$class]) ? (bool)$this->bindings[$class]['singleton'] : true;
-        if ($isSingleton) {
+        if ($allowCache && $isSingleton) {
             $this->instances[$class] = $object;
         }
 
         return $object;
+    }
+
+    protected function isBuilding(string $class): bool
+    {
+        if ($this->inCoroutine()) {
+            $ctx = \Swoole\Coroutine::getContext();
+            $map = $ctx[$this->buildingContextKey()] ?? [];
+            return isset($map[$class]);
+        }
+
+        return isset($this->buildingMap[$class]);
+    }
+
+    protected function markBuilding(string $class): void
+    {
+        if ($this->inCoroutine()) {
+            $ctx = \Swoole\Coroutine::getContext();
+            $key = $this->buildingContextKey();
+            $map = $ctx[$key] ?? [];
+            $map[$class] = true;
+            $ctx[$key] = $map;
+            return;
+        }
+
+        $this->buildingMap[$class] = true;
+    }
+
+    protected function unmarkBuilding(string $class): void
+    {
+        if ($this->inCoroutine()) {
+            $ctx = \Swoole\Coroutine::getContext();
+            $key = $this->buildingContextKey();
+            $map = $ctx[$key] ?? [];
+            unset($map[$class]);
+            if (empty($map)) {
+                unset($ctx[$key]);
+            } else {
+                $ctx[$key] = $map;
+            }
+            return;
+        }
+
+        unset($this->buildingMap[$class]);
+    }
+
+    protected function inCoroutine(): bool
+    {
+        return \extension_loaded('swoole')
+            && \class_exists('\\Swoole\\Coroutine')
+            && \Swoole\Coroutine::getCid() > 0;
+    }
+
+    protected function buildingContextKey(): string
+    {
+        return static::class . ':buildingMap:' . \spl_object_hash($this);
     }
 
     public function clear(): void{

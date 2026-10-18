@@ -323,6 +323,21 @@ class CacheManager implements \Framework\Cache\Interfaces\CacheInterface
         return $okAll;
     }
 
+    /** 批量删除所有选定缓存层，并同步清除请求内缓存。 */
+    public function deleteMulti(array $keys, array $only = []): int
+    {
+        if (empty($keys)) return 0;
+        $drivers = empty($only) ? $this->drivers : (array_intersect_key($this->drivers, array_flip($only)) ?: $this->drivers);
+        $count = 0;
+        foreach ($drivers as $drv) {
+            $count += $drv->deleteMulti($keys);
+        }
+        foreach ($keys as $key) {
+            unset($this->static[$key]);
+        }
+        return $count;
+    }
+
     /**
      * 自增缓存值（仅在“第一个”驱动执行）
      *

@@ -61,7 +61,10 @@
                 </div>
 
                 <div class="flex justify-center pt-4">
-                    <button id="btn-upgrade" onclick="executeUpgrade()"
+                    <form id="upgrade-form" method="post" action="<?php echo $view->e('upgrade_url');?>">
+                        <input type="hidden" name="_csrf_token" value="<?php echo $view->e('_csrf_token');?>">
+                    </form>
+                    <button type="button" id="btn-upgrade" onclick="executeUpgrade()"
                         class="px-12 py-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-lg font-bold rounded-full hover:from-blue-700 hover:to-indigo-700 transition-all transform hover:scale-105 shadow-xl shadow-blue-500/20">
                         <?php echo $view->e('language.upgrade_start_now');?>
                     </button>
@@ -95,7 +98,7 @@
             btn.disabled = true;
             btn.innerText = "<?php echo $view->e('language.upgrade_processing');?>";
             btn.classList.add('opacity-50', 'cursor-not-allowed');
-            location.href = "<?php echo $view->get('upgrade_url');?>";
+            document.getElementById('upgrade-form').submit();
         });
     }
 </script>

@@ -529,7 +529,7 @@ async showUserMenu(btn, userData = null) {
                   ${admin}
               </div>
               <div class="p-2 border-t border-gray-100 dark:border-gray-700">
-                  <button class="ajax-get w-full flex items-center px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors" data-href="${user.links.logout.url}" data-confirm="Are you sure you want to logout?">
+                  <button class="ajax-post w-full flex items-center px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors" data-href="${user.links.logout.url}" data-arg='${JSON.stringify(user.links.logout.arg || {})}' data-confirm="Are you sure you want to logout?">
                       <svg class="mr-3 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
                       </svg>

@@ -192,7 +192,7 @@ class ExceptionHandler
         try {
             if ($this->container && $this->container->has(ErrorViewModelInterface::class)) {
                 $viewModel = $this->container->get(ErrorViewModelInterface::class);
-                if ($viewModel instanceof ConfiguredErrorViewModel) {
+                if ($viewModel instanceof \App\View\Error\ConfiguredErrorViewModel) {
                     $viewModel->setRuntimeData($runtimeData);
                 }
                 return $viewModel;
@@ -251,12 +251,11 @@ class ExceptionHandler
             return;
         }
         try {
-            $context = array_merge(\Framework\Utils\LoggerContext::all(), [
-                'exception' => \get_class($e),
-                'file'      => \App\Utils\PathHelper::relative($e->getFile()),
-                'line'      => $e->getLine(),
-                'trace'     => \App\Utils\PathHelper::relativeTrace($e->getTrace()),
-            ]);
+            $context = array_merge(
+                \Framework\Utils\LoggerContext::all(),
+                \Framework\Logger\Formatter\JsonFormatter::exceptionContext($e),
+                ['exception' => \get_class($e)]
+            );
 
             if (\defined('LOG_ABSOLUTE_PATH') && \LOG_ABSOLUTE_PATH) {
                 $context['absolute_file'] = $e->getFile();
@@ -265,7 +264,7 @@ class ExceptionHandler
             if ($this->container && \is_object($this->container) && \method_exists($this->container, 'has') && $this->container->has(\Framework\Logger\LoggerInterface::class)) {
                 $this->container->get(\Framework\Logger\LoggerInterface::class)->error($e->getMessage(), $context);
             } else {
-                error_log($e->getMessage() . ' | ' . json_encode($context, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+                error_log(rtrim((new \Framework\Logger\Formatter\JsonFormatter())->format('error', $e->getMessage(), $context)));
             }
         } catch (\Throwable $t) {
             error_log('Failed to log exception: ' . $t->getMessage());

@@ -80,8 +80,6 @@ class ThrottleMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
 
     public function process(\Framework\Http\Interfaces\ServerRequestInterface $request, \Framework\Http\Interfaces\RequestHandlerInterface $handler): ResponseInterface
     {
-        try {
-
             $rateConf = $this->sessionConfig['rate_limit'] ?? [];
             $this->urlPrefixAllow = $rateConf['url_prefix_allow'] ?? ['admin', 'my', 'api'];
             $this->staticExt = $rateConf['static_ext'] ?? ['css' => 1, 'js' => 1, 'png' => 1, 'jpg' => 1, 'jpeg' => 1, 'gif' => 1, 'svg' => 1, 'woff' => 1, 'woff2' => 1];
@@ -91,8 +89,28 @@ class ThrottleMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
             $this->verifyDns = (bool)($rateConf['verify_dns'] ?? false);
             $this->bots = empty($rateConf['bots']) ? [] : $rateConf['bots'];
 
+            // Router 已注入路由元数据。显式路由限流覆盖 URL、管理员和爬虫放行，
+            // 未声明限流的既有 API 仍保持全局白名单兼容。
+            $routeMeta = $request->getAttribute('_route_meta', []);
+            $routeRateConf = isset($routeMeta['api_rate_limit']) && is_array($routeMeta['api_rate_limit'])
+                ? $routeMeta['api_rate_limit']
+                : [];
+            $routeScope = '';
+            $hasRouteLimit = false;
+            if (!empty($routeRateConf)) {
+                list($routeRateConf, $routeScope) = $this->normalizeRouteRateConfig(
+                    $routeRateConf,
+                    $request->getMethod() . ' ' . $request->getUri()->getPath()
+                );
+                // 路由显式关闭即完整旁路限流，不再执行空 UA、黑名单等全局限流分支。
+                if (empty($routeRateConf['enable'])) return $handler->handle($request);
+
+                $hasRouteLimit = true;
+                $rateConf = array_replace_recursive($rateConf, $routeRateConf);
+            }
+
             // 白名单：后台 & 静态资源
-            if ($this->urlAllow($request) || $this->isRealStatic($request)) return $handler->handle($request);
+            if ((!$hasRouteLimit && $this->urlAllow($request)) || $this->isRealStatic($request)) return $handler->handle($request);
 
             // 1. 获取由 SessionMiddleware 注入的 Session 对象
             /** @var mixed */
@@ -115,7 +133,7 @@ class ThrottleMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
             $fingerprint = $request->getHeaderLine('X-Device-Fingerprint') ?: md5($userAgent . $ip);
 
             // 综合行为 Key
-            $behaviorKey = 'throttle:behavior:' . md5($ip . $fingerprint);
+            $behaviorKey = 'throttle:behavior:' . $routeScope . md5($ip . $fingerprint);
 
             $userId = 0;
             $this->userService->captureContext($request);
@@ -129,26 +147,18 @@ class ThrottleMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
                 }
 
                 $groupId = (int)$user['group_id'];
-                if (
+                if (!$hasRouteLimit && (
                     $this->groupService->access($groupId, 'punishment') ||
                     $this->groupService->access($groupId, 'reward') ||
                     $this->groupService->access($groupId, 'ban') ||
                     $this->groupService->access($groupId, 'administer')
-                ) {
+                )) {
                     return $handler->handle($request);
                 }
             }
 
             // 空UA限制访问
             if (empty($userAgent)) return $this->restrictAccess($sessionId, $ip, $userId, $now, 1);
-
-
-            // 路由元数据级限流参数覆盖 (Meta-driven Override)
-            $routeMeta = $request->getAttribute('_route_meta', []);
-            if (!empty($routeMeta['api_rate_limit']) && is_array($routeMeta['api_rate_limit'])) {
-                // 深度合并，确保仅覆盖定义的子参数，其余保留全局默认策略（如白名单等）
-                $rateConf = array_replace_recursive($rateConf, $routeMeta['api_rate_limit']);
-            }
 
             $addBlacklist = (bool)($rateConf['add_to_blacklist'] ?? false);
 
@@ -172,7 +182,7 @@ class ThrottleMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
 
             // 验证搜索引擎爬虫关闭 || 返回true蜘蛛放行，false伪造 / 继续向下走流程
             $this->verifyRobot = (bool)($rateConf['verify_robot'] ?? false);
-            if (!$this->verifyRobot || $this->isCrawler($userAgent, $ip)) return $handler->handle($request);
+            if (!$hasRouteLimit && (!$this->verifyRobot || $this->isCrawler($userAgent, $ip))) return $handler->handle($request);
 
             // 此处可检测共享的 Token 失败计数
             $tokenFailKey = 'token_fail_count:' . $sessionId;
@@ -241,7 +251,7 @@ class ThrottleMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
 
             // -------------以下开始确保可以生成固定sid---------------
             // Session 限流
-            if ($this->isOverLimit('sessionRateLimit:' . $sessionId, $sessLimit, $sessWindow)) {
+            if ($this->isOverLimit('sessionRateLimit:' . $routeScope . $sessionId, $sessLimit, $sessWindow)) {
                 return $this->handleViolation($behaviorKey, $sessionId, $ip, $userId, $now, 3, $addBlacklist);
             }
 
@@ -267,23 +277,6 @@ class ThrottleMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
             }
 
             return $handler->handle($request);
-        } catch (\Throwable $e) {
-            // 路由未命中属于正常 HTTP 语义，不应被限流层接管
-            if ($e instanceof \Framework\Exception\Http\NotFoundException) {
-                throw $e;
-            }
-
-            $this->logger->error("Error in " . get_class($this) . ": " . $e->getMessage(), ['exception' => $e]);
-
-            if (\defined('DEBUG') && \DEBUG >= 2) {
-                throw $e;
-            }
-
-            $message = $this->container->get(\App\Controllers\Base\MessageController::class);
-
-            // 保持现有错误码 8 不变
-            return $message->errorMessage('Throttle verification error', 8);
-        }
     }
 
     // URL 前缀放行
@@ -291,7 +284,8 @@ class ThrottleMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
     {
         $path = trim($request->getUri()->getPath(), '/');
         foreach ($this->urlPrefixAllow as $prefix) {
-            if (strncmp($path, $prefix, strlen($prefix)) === 0) return true;
+            $prefix = trim((string)$prefix, '/');
+            if ($prefix !== '' && ($path === $prefix || strpos($path, $prefix . '/') === 0)) return true;
         }
         return false;
     }
@@ -330,6 +324,47 @@ class ThrottleMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
     }
 
     /**
+     * 统一两代 api_rate_limit 契约：
+     * - legacy: limit / interval / key_prefix
+     * - current: enable / session / ip / key_prefix
+     *
+     * @return array{0:array,1:string}
+     */
+    private function normalizeRouteRateConfig(array $config, string $routeIdentity): array
+    {
+        $legacyLimit = isset($config['limit']) ? max(1, (int)$config['limit']) : 0;
+        $legacyWindow = isset($config['interval']) ? max(1, (int)$config['interval']) : 0;
+        if ($legacyLimit > 0 || $legacyWindow > 0) {
+            $legacyLimit = $legacyLimit > 0 ? $legacyLimit : 60;
+            $legacyWindow = $legacyWindow > 0 ? $legacyWindow : 60;
+            if (!isset($config['session']) || !is_array($config['session'])) {
+                $config['session'] = ['limit' => $legacyLimit, 'window' => $legacyWindow];
+            }
+            if (!isset($config['ip']) || !is_array($config['ip'])) {
+                $config['ip'] = ['limit' => $legacyLimit, 'window' => $legacyWindow];
+            }
+        }
+
+        if (!array_key_exists('enable', $config)) {
+            $config['enable'] = true;
+        } else {
+            $config['enable'] = (bool)$config['enable'];
+        }
+
+        foreach (['session', 'ip'] as $dimension) {
+            if (!isset($config[$dimension]) || !is_array($config[$dimension])) continue;
+            $config[$dimension]['limit'] = max(1, (int)($config[$dimension]['limit'] ?? 1));
+            $config[$dimension]['window'] = max(1, (int)($config[$dimension]['window'] ?? 60));
+        }
+
+        $scopeSeed = !empty($config['key_prefix']) ? (string)$config['key_prefix'] : $routeIdentity;
+        $scope = 'route:' . hash('sha256', $scopeSeed) . ':';
+        unset($config['limit'], $config['interval'], $config['key_prefix']);
+
+        return [$config, $scope];
+    }
+
+    /**
      * 通用：判断某个缓存 Key 是否超过限流阈值
      *
      * @param string $cacheKey   缓存 Key，例如 "rl:session:abcd1234"
@@ -340,7 +375,7 @@ class ThrottleMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
     private function isOverLimit(string $cacheKey, int $limit, int $window): bool
     {
         $count = $this->cache->increment($cacheKey, 1, $window);
-        return $count >= $limit;
+        return $count > $limit;
     }
 
     /**

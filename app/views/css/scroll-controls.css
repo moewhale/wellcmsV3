@@ -1,0 +1,9 @@
+.wellcms-scroll-control {
+    background-color: rgba(255, 255, 255, 0.9);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+}
+
+[data-scroll-controls] [data-scroll-direction="bottom"]:hover {
+    transform: translateY(0.25rem);
+}

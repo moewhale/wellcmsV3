@@ -89,7 +89,7 @@ class PluginController extends BaseController
         $pluginList = ArrayHelper::arrayListConditionOrderBy($this->localPlugins, $condition, [], $page, $pageSize);
         $pluginList = $this->extensionManager->formatList($pluginList);
 
-        // 方案A: 控制器层预解析确认操作语言键（替代模板层 str_replace）
+        // 控制器层预解析确认操作语言键（替代模板层 str_replace）
         foreach ($pluginList as $index => $item) {
             $name = $item['name'] ?? '';
             $ops = &$pluginList[$index]['operation_links'];
@@ -104,6 +104,7 @@ class PluginController extends BaseController
                     'name' => $name,
                     'version' => $item['cloud_version'] ?? ''
                 ]);
+                $this->protectUpgradeLink($ops, $item, (int)($user['id'] ?? 0), $csrfToken);
             }
         }
         unset($ops);
@@ -195,11 +196,17 @@ class PluginController extends BaseController
         $read['icon_url'] = $this->extensionManager->getIconUrl($dir, $this->currentType, $read['icon'] ?? '');
 
         $read['operation_links'] = $this->extensionManager->buildOperationLinks($read);
-        foreach (['enable', 'disable', 'install', 'uninstall', 'upgrade'] as $action) {
+        foreach (['enable', 'disable', 'install', 'uninstall'] as $action) {
             if (!empty($read['operation_links'][$action])) {
                 $read['operation_links'][$action]['arg'] = ['dir' => $dir, '_csrf_token' => $csrfToken];
             }
         }
+        $this->protectUpgradeLink(
+            $read['operation_links'],
+            $read,
+            (int)($user['id'] ?? 0),
+            $csrfToken
+        );
 
         $menu = $this->getAdminMenu();
         $page_link_string = 'admin/plugin/detail';
@@ -288,6 +295,26 @@ class PluginController extends BaseController
         return $this->render($routeMeta['layout'], $data, true);
     }
 
+    private function protectUpgradeLink(array &$links, array $item, int $userId, string $csrfToken): void
+    {
+        if (empty($links['upgrade'])) return;
+        $dir = (string)($item['dir'] ?? '');
+        $storeId = (int)($item['storeid'] ?? 0);
+        if ($userId <= 0 || $dir === '' || $storeId <= 0) {
+            $links['upgrade'] = '';
+            return;
+        }
+
+        $operationTokens = $this->container->get(\App\Services\Extension\ExtensionOperationTokenService::class);
+        $links['upgrade']['url'] = $this->urlGenerator->url('admin/store/upgrade');
+        $links['upgrade']['arg'] = [
+            'dir' => $dir,
+            'storeid' => $storeId,
+            '_csrf_token' => $csrfToken,
+            '_operation_token' => $operationTokens->issue($userId, 'upgrade', $dir, $storeId),
+        ];
+    }
+
     public function enable(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
         return $this->handleAction($request, 'enable');
@@ -369,10 +396,15 @@ class PluginController extends BaseController
 
         $compiledFile = \App\Core\Compile::include($settingFile);
 
-        // 科学修复：使用 static 闭包隔离作用域，彻底阻断 $this 和局部变量向插件泄漏
-        $response = (static function (string $file) {
+        // 使用 static 闭包隔离作用域，彻底阻断 $this 和局部变量向插件泄漏
+        $response = (static function (
+            string $file,
+            \Framework\Core\Container $container,
+            \Framework\Http\Interfaces\ServerRequestInterface $request,
+            string $method
+        ) {
             return include $file;
-        })($compiledFile);
+        })($compiledFile, $this->container, $request, $method);
 
         // 类型安全：强制校验返回值必须为 ResponseInterface
         if (!$response instanceof ResponseInterface) {

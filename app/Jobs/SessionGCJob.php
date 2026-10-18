@@ -52,7 +52,7 @@ class SessionGCJob implements \Framework\Scheduler\Interfaces\JobInterface
         // 间隔时间取 gc_recycle_time (默认 600 秒)
         $interval = (int)($this->sessionConfig['gc_recycle_time'] ?? 600);
 
-        $this->taskManage->createTask([
+        $dispatch = $this->taskManage->createTask([
             'className'   => self::class,
             'methodName'  => 'handle',
             'args'        => [],
@@ -60,6 +60,17 @@ class SessionGCJob implements \Framework\Scheduler\Interfaces\JobInterface
             'scheduledAt' => time() + $interval,
             'dedupeKey'   => 'system:session_gc_monitor'
         ]);
+
+        if (!\Framework\Scheduler\TaskDispatchResult::isAccepted($dispatch)) {
+            return [
+                'status' => 'error',
+                'outcome' => \Framework\Scheduler\TaskDispatchResult::outcome($dispatch),
+                'code' => \Framework\Scheduler\TaskDispatchResult::code($dispatch)
+                    ?? 'TASK_DISPATCH_UNKNOWN',
+                'taskId' => \Framework\Scheduler\TaskDispatchResult::taskId($dispatch),
+                'cleaned' => $cleanedCount,
+            ];
+        }
 
         return [
             'status'  => 'success',

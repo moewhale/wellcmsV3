@@ -13,8 +13,16 @@ use Framework\Utils\UuidHelper;
 // 任务管理类（新增/取消/查询/重试/死信等）需要安装redis扩展
 class TaskManage
 {
-    /** @var \Framework\Scheduler\RedisTaskQueue */
+    private const TASK_LOCK_PREFIX = 'scheduler:lock:task:';
+    private const DEDUPE_PREFIX = 'scheduler:dedupe:';
+    private const DEDUPE_TTL = 2592000;
+    private const CLAIM_GRACE_SECONDS = 60;
+
+    /** @var \Framework\Scheduler\Interfaces\TaskQueueInterface */
     private $queue;
+
+    /** @var \Framework\Scheduler\RedisTaskQueue */
+    private $redisQueue;
 
     /** @var \Framework\Cache\Drivers\RedisCache */
     private $redis;
@@ -57,7 +65,8 @@ class TaskManage
 
     public function __construct(\Framework\Cache\Drivers\RedisCache $redis)
     {
-        $this->queue = new \Framework\Scheduler\RedisTaskQueue($redis);
+        $this->redisQueue = new \Framework\Scheduler\RedisTaskQueue($redis);
+        $this->queue = $this->redisQueue;
         $this->redis = $redis;
     }
 
@@ -122,7 +131,7 @@ class TaskManage
                     // executor 在 lock 成功后→zAdd(running_zset)→handle()。
                     // 锁存在 = 任务已弹出队列、正在或即将被执行，不应取消。
                     // 未锁 = 确认为 pending 队列中的待执行任务，安全取消。
-                    $lockKey = 'scheduler:lock:task:' . $taskId;
+                    $lockKey = self::TASK_LOCK_PREFIX . $taskId;
                     if ($this->redis->exists($lockKey)) {
                         continue;  // 任务正在 executor 中，跳过
                     }
@@ -189,7 +198,7 @@ class TaskManage
                 if (!empty($task) && ($task['className'] ?? '') === $className
                     && ($task['status'] ?? -1) === Task::STATUS_RUNNING) {
                     // 验证锁活性：锁存在才是真正活跃的任务，避免僵尸任务阻塞 CDJ 播种
-                    $lockKey = $this->lockPrefix . ($task['id'] ?? '');
+                    $lockKey = self::TASK_LOCK_PREFIX . ($task['id'] ?? '');
                     if (!empty($task['id']) && $this->redis->exists($lockKey)) {
                         return true;
                     }
@@ -253,44 +262,128 @@ class TaskManage
     }
 
     /**
-     * 创建任务（支持跳过 dedupeKey 检查）
+     * 创建任务。
      *
-     * @param array $payload   任务负载
-     * @param bool  $ignoreDedupe 为 true 时跳过 dedupeKey 幂等检查（修复：
-     *                            scheduler 崩溃后 dedupeKey 残留导致 bootstrap 无法恢复）
+     * $ignoreDedupe 仅保留签名兼容；所有路径都必须核验 claim 所有权，不能无条件覆盖。
+     *
+     * @param array $payload
+     * @param bool $ignoreDedupe
      * @return array
      */
     public function createTask(array $payload, bool $ignoreDedupe = false): array
     {
         try {
             $p = $this->normalizeAndValidate($payload);
-
-            if (!empty($p['dedupeKey']) && !$ignoreDedupe) {
-                $k = 'scheduler:dedupe:' . $p['dedupeKey'];
-                // 使用 SET NX EX 原子操作保证幂等
-                // TTL 30 天：避免插件升级/重装等低频但跨天的场景下 dedupeKey 过早过期导致重复入队
-                if (!$this->redis->setNx($k, 1, 2592000)) {
-                    return ['status' => 'duplicate', 'msg' => 'duplicate task'];
-                }
-            }
-
-            if ($ignoreDedupe && !empty($p['dedupeKey'])) {
-                // 强制模式：先删旧 dedupeKey 再重新设置
-                $k = 'scheduler:dedupe:' . $p['dedupeKey'];
-                $this->redis->del($k);
-                $this->redis->setNx($k, 1, 2592000);
-            }
-
             $task = $this->makeTask($p);
             if (!empty($p['dedupeKey'])) {
                 $task->dedupeKey = $p['dedupeKey'];
             }
-            $this->queue->push($task);
-
-            return ['status' => 'success', 'taskId' => $task->id];
         } catch (\Throwable $e) {
-            return ['status' => 'error', 'msg' => $e->getMessage()];
+            $this->logDispatchFailure('payload_validation', $e, null);
+            return $this->dispatchError(
+                TaskDispatchResult::OUTCOME_NOT_SUBMITTED,
+                'TASK_PAYLOAD_INVALID',
+                'Invalid task payload'
+            );
         }
+
+        $claimKey = null;
+        $claim = null;
+        if ($task->dedupeKey !== '') {
+            try {
+                $claimKey = self::DEDUPE_PREFIX . $task->dedupeKey;
+                $claim = TaskDedupeClaim::encode($task->id, $task->createdAt);
+                if (!$this->redis->setNx($claimKey, $claim, self::DEDUPE_TTL)) {
+                    $existing = $this->resolveExistingClaim($task, $claimKey, $claim, $ignoreDedupe);
+                    if ($existing !== null) {
+                        return $existing;
+                    }
+                }
+            } catch (\Throwable $e) {
+                $this->logDispatchFailure('dedupe_claim', $e, $task->id);
+                return $this->dispatchError(
+                    TaskDispatchResult::OUTCOME_UNKNOWN,
+                    'TASK_DISPATCH_UNKNOWN',
+                    'Task dispatch result is unknown',
+                    $task->id
+                );
+            }
+        }
+
+        try {
+            $this->queue->push($task);
+        } catch (\Framework\Scheduler\Exception\TaskDispatchException $e) {
+            $cause = $e->getPrevious() ?? $e;
+            $this->logDispatchFailure('queue_push', $cause, $task->id);
+            if ($e->getOutcome() === TaskDispatchResult::OUTCOME_NOT_SUBMITTED
+                && $claimKey !== null
+                && $claim !== null
+            ) {
+                $this->releaseClaim($claimKey, $claim, $task->id);
+            }
+            return $this->dispatchError(
+                $e->getOutcome(),
+                'TASK_DISPATCH_FAILED',
+                'Task dispatch failed',
+                $task->id
+            );
+        } catch (\Throwable $e) {
+            $this->logDispatchFailure('queue_push', $e, $task->id);
+            return $this->dispatchError(
+                TaskDispatchResult::OUTCOME_UNKNOWN,
+                'TASK_DISPATCH_UNKNOWN',
+                'Task dispatch result is unknown',
+                $task->id
+            );
+        }
+
+        return [
+            'status' => 'success',
+            'outcome' => TaskDispatchResult::OUTCOME_ACCEPTED,
+            'taskId' => $task->id,
+        ];
+    }
+
+    /** accepted 表示已加入当前业务事务，不表示外层提交或任务执行完成。 */
+    public function createTaskInTransaction(array $payload): array
+    {
+        if (!$this->queue || !method_exists($this->queue, 'pushInTransaction')) {
+            return $this->dispatchError(TaskDispatchResult::OUTCOME_NOT_SUBMITTED, 'TASK_PERSISTENCE_REQUIRED', 'Persistent transaction registration is unavailable');
+        }
+        try {
+            $normalized = $this->normalizeAndValidate($payload);
+            $task = $this->makeTask($normalized);
+            if (json_encode($task->args, JSON_UNESCAPED_UNICODE) === false) throw new \InvalidArgumentException('Storage task arguments must be JSON serializable');
+            if (!empty($normalized['dedupeKey'])) $task->dedupeKey = $normalized['dedupeKey'];
+            if ($task->dedupeKey === '') {
+                return $this->dispatchError(TaskDispatchResult::OUTCOME_NOT_SUBMITTED, 'TASK_DEDUPE_REQUIRED', 'Transactional storage tasks require a stable dedupe key');
+            }
+        } catch (\Throwable $error) {
+            return $this->dispatchError(TaskDispatchResult::OUTCOME_NOT_SUBMITTED, 'TASK_PAYLOAD_INVALID', 'Invalid task payload');
+        }
+        $claimKey = self::DEDUPE_PREFIX . $task->dedupeKey;
+        $claim = TaskDedupeClaim::encode($task->id, $task->createdAt);
+        $claimed = false;
+        try {
+            if ($task->dedupeKey !== '') {
+                $claimed = (bool)$this->redis->setNx($claimKey, $claim, self::DEDUPE_TTL);
+                if (!$claimed) {
+                    $existing = $this->resolveExistingClaim($task, $claimKey, $claim, false);
+                    if ($existing !== null) return $existing;
+                    $claimed = true;
+                }
+            }
+            $this->queue->pushInTransaction($task, function () use ($claimed, $claimKey, $claim, $task): void {
+                if ($claimed) $this->releaseClaim($claimKey, $claim, $task->id);
+            });
+        } catch (\LogicException $error) {
+            if ($claimed) $this->releaseClaim($claimKey, $claim, $task->id);
+            return $this->dispatchError(TaskDispatchResult::OUTCOME_NOT_SUBMITTED, 'TASK_TRANSACTION_REQUIRED', $error->getMessage(), $task->id);
+        } catch (\Throwable $error) {
+            $this->logDispatchFailure('transaction_registration', $error, $task->id);
+            return $this->unknownDispatchResult($task->id);
+        }
+        return ['status' => 'success', 'outcome' => TaskDispatchResult::OUTCOME_ACCEPTED, 'taskId' => $task->id];
     }
 
     /** 批量新增（后台批量按钮/导入用） */
@@ -298,27 +391,153 @@ class TaskManage
     {
         $out = ['ok' => 0, 'fail' => 0, 'items' => []];
         foreach ($items as $payload) {
-            try {
-                $p = $this->normalizeAndValidate($payload);
-                if (!empty($p['dedupeKey'])) {
-                    $k = 'scheduler:dedupe:' . $p['dedupeKey'];
-                    // TTL 30 天：避免插件升级/重装等低频但跨天的场景下 dedupeKey 过早过期导致重复入队
-                    if (!$this->redis->setNx($k, 1, 2592000)) {
-                        $out['fail']++;
-                        $out['items'][] = ['error' => 'duplicate'];
-                        continue;
-                    }
-                }
-                $task = $this->makeTask($p);
-                $this->queue->push($task);
+            $result = $this->createTask(is_array($payload) ? $payload : []);
+            if (TaskDispatchResult::isAccepted($result)) {
                 $out['ok']++;
-                $out['items'][] = ['taskId' => $task->id];
-            } catch (\Throwable $e) {
-                $out['fail']++;
-                $out['items'][] = ['error' => $e->getMessage()];
+                $out['items'][] = $result;
+                continue;
             }
+            $out['fail']++;
+            $result['error'] = $result['msg'] ?? 'Task dispatch failed';
+            $out['items'][] = $result;
         }
         return $out;
+    }
+
+    /**
+     * 核验既有 claim；返回 null 表示已安全取得新 claim，可继续入队。
+     */
+    private function resolveExistingClaim(
+        Task $task,
+        string $claimKey,
+        string $newClaim,
+        bool $ignoreDedupe
+    ): ?array {
+        $stored = $this->redis->get($claimKey, null);
+        if ($stored === null) {
+            return $this->redis->setNx($claimKey, $newClaim, self::DEDUPE_TTL)
+                ? null
+                : $this->unknownDispatchResult($task->id);
+        }
+
+        $decoded = TaskDedupeClaim::decode($stored);
+        if ($decoded === null || TaskDedupeClaim::isLegacy($stored)) {
+            return $this->unknownDispatchResult($task->id);
+        }
+
+        $existingTaskId = $decoded['taskId'];
+        if ($this->redisQueue->hasActiveTask($existingTaskId, $task->dedupeKey)
+            || $this->hasActiveStoredTask($existingTaskId, $task->dedupeKey)
+        ) {
+            return [
+                'status' => 'duplicate',
+                'outcome' => TaskDispatchResult::OUTCOME_ACCEPTED,
+                'taskId' => $existingTaskId,
+                'msg' => 'duplicate task',
+            ];
+        }
+
+        if ($this->taskStorage === null && $this->isV2DualWriteActive()) {
+            return $this->unknownDispatchResult($task->id);
+        }
+
+        if (time() - (int)$decoded['claimedAt'] <= self::CLAIM_GRACE_SECONDS) {
+            return $this->unknownDispatchResult($task->id);
+        }
+
+        // ignoreDedupe 不再跳过核验；参数仅保留旧调用签名兼容。
+        if ($ignoreDedupe && $existingTaskId === $task->id) {
+            return $this->unknownDispatchResult($task->id);
+        }
+
+        $expected = is_string($stored)
+            ? $stored
+            : TaskDedupeClaim::encode($existingTaskId, (int)$decoded['claimedAt']);
+        if (!$this->redis->compareDelete($claimKey, $expected)) {
+            return $this->unknownDispatchResult($task->id);
+        }
+
+        return $this->redis->setNx($claimKey, $newClaim, self::DEDUPE_TTL)
+            ? null
+            : $this->unknownDispatchResult($task->id);
+    }
+
+    private function hasActiveStoredTask(string $taskId, string $dedupeKey): bool
+    {
+        if ($this->taskStorage === null) {
+            return false;
+        }
+
+        $state = $this->taskStorage->readTaskState($taskId);
+        if ($state === null) {
+            return false;
+        }
+        if (($state['taskId'] ?? '') !== $taskId
+            || (string)($state['dedupeKey'] ?? '') !== $dedupeKey
+        ) {
+            throw new \UnexpectedValueException('Scheduler task state identity mismatch');
+        }
+
+        return in_array(
+            (int)($state['status'] ?? -1),
+            [Task::STATUS_PENDING, Task::STATUS_RETRYING, Task::STATUS_RUNNING],
+            true
+        );
+    }
+
+    private function releaseClaim(string $claimKey, string $claim, string $taskId): void
+    {
+        try {
+            $this->redis->compareDelete($claimKey, $claim);
+        } catch (\Throwable $e) {
+            $this->logDispatchFailure('dedupe_release', $e, $taskId);
+        }
+    }
+
+    private function unknownDispatchResult(string $taskId): array
+    {
+        return $this->dispatchError(
+            TaskDispatchResult::OUTCOME_UNKNOWN,
+            'TASK_DISPATCH_UNKNOWN',
+            'Task dispatch result is unknown',
+            $taskId
+        );
+    }
+
+    private function dispatchError(
+        string $outcome,
+        string $code,
+        string $message,
+        ?string $taskId = null
+    ): array {
+        $result = [
+            'status' => 'error',
+            'outcome' => $outcome,
+            'code' => $code,
+            'msg' => $message,
+        ];
+        if ($taskId !== null && $taskId !== '') {
+            $result['taskId'] = $taskId;
+        }
+        return $result;
+    }
+
+    private function logDispatchFailure(string $stage, \Throwable $e, ?string $taskId): void
+    {
+        $message = '[TaskManage] ' . $stage . ' failed: ' . $e->getMessage();
+        if ($taskId !== null && $taskId !== '') {
+            $message .= ' task_id=' . $taskId;
+        }
+        if ($this->logger !== null) {
+            try {
+                $this->logger->error($message, ['exception' => $e]);
+                return;
+            } catch (\Throwable $loggingFailure) {
+                error_log($message . ' logger_failure=' . $loggingFailure->getMessage());
+                return;
+            }
+        }
+        error_log($message);
     }
 
     /** 取消任务（从主队列删除） */
@@ -349,6 +568,17 @@ class TaskManage
     /** 强制重试一次（立即或根据 retryDelay 重排） */
     public function retryTask(string $taskId): array
     {
+        if ($this->taskStorage !== null && method_exists($this->taskStorage, 'readStoredTask')) {
+            $stored = $this->taskStorage->readStoredTask($taskId);
+            if ($stored !== null && $stored->status === Task::STATUS_FAILED && !empty($stored->args['storageLifecycle'])) {
+                $stored->retryCount = 0;
+                $stored->status = Task::STATUS_PENDING;
+                $stored->scheduledAt = time();
+                $stored->error = '';
+                $this->queue->push($stored);
+                return ['status' => 'success', 'taskId' => $taskId];
+            }
+        }
         // First try: task may be in active queue (pending/running/retrying)
         $raw = $this->redis->hGet('scheduler:queue:hash', $taskId);
         if ($raw) {
@@ -408,6 +638,12 @@ class TaskManage
                     $items[] = json_decode($raws[$id], true);
                 }
             }
+        }
+        if ($this->taskStorage !== null && method_exists($this->taskStorage, 'retainedFailedTasks')) {
+            $byId = [];
+            foreach ($items as $item) if (is_array($item) && isset($item['id'])) $byId[$item['id']] = $item;
+            foreach ($this->taskStorage->retainedFailedTasks() as $item) $byId[$item['id']] = $item;
+            $items = array_slice(array_values($byId), 0, 100);
         }
         return ['status' => 'success', 'items' => $items];
     }
@@ -784,52 +1020,48 @@ class TaskManage
      */
     public function updatePriority(string $taskId, int $newPriority): array
     {
-        try {
-            // 验证新优先级
-            $newPriority = Task::sanitizePriority($newPriority);
+        // 验证新优先级
+        $newPriority = Task::sanitizePriority($newPriority);
 
-            // 从 HASH 中获取任务
-            $raw = $this->redis->hGet('scheduler:queue:hash', $taskId);
-            if (!$raw) {
-                return ['status' => 'not_found', 'msg' => "Task not found: {$taskId}"];
-            }
-
-            $taskData = json_decode($raw, true);
-            if ($taskData === null) {
-                return ['status' => 'error', 'msg' => 'Invalid task data'];
-            }
-
-            // 确保任务是 pending 或 retrying 状态才能调整优先级
-            $adjustableStatuses = [Task::STATUS_PENDING, Task::STATUS_RETRYING];
-            if (!in_array($taskData['status'], $adjustableStatuses)) {
-                return [
-                    'status' => 'error',
-                    'msg' => "Only pending or retrying tasks can have priority adjusted. Current status: {$taskData['status']}"
-                ];
-            }
-
-            // 创建 Task 对象并更新优先级
-            $task = \Framework\Scheduler\Task::fromArray($taskData);
-            $task->priority = $newPriority;
-            $task->updatedAt = time();
-
-            // 重新推入队列（会从原位置移除并重新评分）
-            $this->queue->push($task);
-
-            $this->redis->hSet(
-                'scheduler:queue:hash',
-                $taskId,
-                json_encode($task->toArray(), JSON_UNESCAPED_UNICODE)
-            );
-
-            return [
-                'status' => 'success',
-                'taskId' => $taskId,
-                'newPriority' => $newPriority
-            ];
-        } catch (\Exception $e) {
-            return ['status' => 'error', 'msg' => $e->getMessage()];
+        // 从 HASH 中获取任务
+        $raw = $this->redis->hGet('scheduler:queue:hash', $taskId);
+        if (!$raw) {
+            return ['status' => 'not_found', 'msg' => "Task not found: {$taskId}"];
         }
+
+        $taskData = json_decode($raw, true);
+        if ($taskData === null) {
+            return ['status' => 'error', 'msg' => 'Invalid task data'];
+        }
+
+        // 确保任务是 pending 或 retrying 状态才能调整优先级
+        $adjustableStatuses = [Task::STATUS_PENDING, Task::STATUS_RETRYING];
+        if (!in_array($taskData['status'], $adjustableStatuses)) {
+            return [
+                'status' => 'error',
+                'msg' => "Only pending or retrying tasks can have priority adjusted. Current status: {$taskData['status']}"
+            ];
+        }
+
+        // 创建 Task 对象并更新优先级
+        $task = \Framework\Scheduler\Task::fromArray($taskData);
+        $task->priority = $newPriority;
+        $task->updatedAt = time();
+
+        // 重新推入队列（会从原位置移除并重新评分）
+        $this->queue->push($task);
+
+        $this->redis->hSet(
+            'scheduler:queue:hash',
+            $taskId,
+            json_encode($task->toArray(), JSON_UNESCAPED_UNICODE)
+        );
+
+        return [
+            'status' => 'success',
+            'taskId' => $taskId,
+            'newPriority' => $newPriority
+        ];
     }
 
     /**

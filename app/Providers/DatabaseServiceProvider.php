@@ -16,16 +16,38 @@ use Framework\Database\Pool\LoadBalancer\LoadBalancerInterface;
 
 class DatabaseServiceProvider implements \Framework\Providers\ServiceProviderInterface
 {
+    private static function isInsideCoroutine(): bool
+    {
+        return \extension_loaded('swoole')
+            && \class_exists('\\Swoole\\Coroutine')
+            && \Swoole\Coroutine::getCid() > 0;
+    }
+
+    private static function useCoroutineRuntime(): bool
+    {
+        return (\defined('SWOOLE_MODE') && (bool)\SWOOLE_MODE)
+            || self::isInsideCoroutine();
+    }
+
     public function register(Container $container): void
     {
         $dbConfig = $container->get('dbConfig');
         $poolCfg = $dbConfig['pool'] ?? [];
-        $isCoroutine = extension_loaded('swoole') && \Swoole\Coroutine::getCid() > 0;
+        $isCoroutine = self::useCoroutineRuntime();
         $poolEnabled = $isCoroutine
             ? ($poolCfg['coroutine']['enabled'] ?? true)
             : ($poolCfg['fpm']['enabled'] ?? true);
 
         if ($poolEnabled) {
+            // Pool 按配置键登记从库；驱动的默认 slaves 保持为默认库的从库。
+            $slavesConfig = $dbConfig['slaves'];
+            foreach ($dbConfig['shards'] ?? [] as $shard => $shardConfig) {
+                foreach ($shardConfig['slaves'] ?? [] as $slave) {
+                    $slave['shard'] = (string)$shard;
+                    $slavesConfig[] = $slave;
+                }
+            }
+
             // 从配置中读取负载均衡策略，而非强制写死
             $lbClass = $isCoroutine
                 ? ($poolCfg['coroutine']['load_balancer'] ?? \Framework\Database\Pool\LoadBalancer\WeightedRandomLoadBalancer::class)
@@ -39,7 +61,7 @@ class DatabaseServiceProvider implements \Framework\Providers\ServiceProviderInt
                     throw new \Framework\Exception\Infra\SiteNotInstalledException("Database configuration is missing.");
                 }
 
-                $isCoroutine = extension_loaded('swoole') && \Swoole\Coroutine::getCid() > 0;
+                $isCoroutine = self::useCoroutineRuntime();
                 $activePool = $isCoroutine
                     ? $container->get(CoroutineConnectionPool::class)
                     : $container->get(FpmConnectionPool::class);
@@ -49,15 +71,15 @@ class DatabaseServiceProvider implements \Framework\Providers\ServiceProviderInt
 
             $container->bind(\Framework\Database\Interfaces\DatabaseInterface::class, ProxyDriver::class);
 
-            // 注册协程连接池
-            $container->bind(CoroutineConnectionPool::class, function (Container $container) {
+            // 两种池保持可解析，仅当前运行态的池参与启动预解析。
+            $container->bind(CoroutineConnectionPool::class, function (Container $container) use ($slavesConfig) {
                 $dbConfig = $container->get('dbConfig');
                 $poolCfg = $dbConfig['pool'] ?? [];
                 $coroutineCfg = $poolCfg['coroutine'] ?? $poolCfg['fpm'] ?? [];
                 return new CoroutineConnectionPool(
                     $container->get(PdoDriver::class),
                     $dbConfig['master'],
-                    $dbConfig['slaves'],
+                    $slavesConfig,
                     $container->get(LoadBalancerInterface::class),
                     $coroutineCfg['min_connections'] ?? 2,
                     $coroutineCfg['max_connections'] ?? 8,
@@ -68,17 +90,17 @@ class DatabaseServiceProvider implements \Framework\Providers\ServiceProviderInt
                     null,
                     $coroutineCfg['health_check_interval'] ?? 60000
                 );
-            }, true, false);
+            }, true, !$isCoroutine);
 
             // 注册基础连接池
-            $container->bind(FpmConnectionPool::class, function (Container $container) {
+            $container->bind(FpmConnectionPool::class, function (Container $container) use ($slavesConfig) {
                 $dbConfig = $container->get('dbConfig');
                 $poolCfg = $dbConfig['pool'] ?? [];
                 $fpmCfg = $poolCfg['fpm'] ?? $poolCfg['coroutine'] ?? [];
                 return new FpmConnectionPool(
                     $container->get(PdoDriver::class),
                     $dbConfig['master'],
-                    $dbConfig['slaves'],
+                    $slavesConfig,
                     $container->get(LoadBalancerInterface::class),
                     $fpmCfg['min_connections'] ?? 2,
                     $fpmCfg['max_connections'] ?? 8,
@@ -86,7 +108,7 @@ class DatabaseServiceProvider implements \Framework\Providers\ServiceProviderInt
                     $fpmCfg['threshold'] ?? 20,
                     $fpmCfg['adjust_threshold'] ?? 0.75
                 );
-            }, true, false);
+            }, true, $isCoroutine);
         } else {
             // 连接池禁用时直接回退到原始 PdoDriver
             $container->bind(\Framework\Database\Interfaces\DatabaseInterface::class, PdoDriver::class);
@@ -104,9 +126,9 @@ class DatabaseServiceProvider implements \Framework\Providers\ServiceProviderInt
         if ($container->has(\Framework\Logger\LoggerInterface::class)) {
             $logger = $container->get(\Framework\Logger\LoggerInterface::class);
             $container->get(PdoDriver::class)->setLogger($logger);
-            $isCoroutine = extension_loaded('swoole') && \Swoole\Coroutine::getCid() > 0;
+            $isCoroutine = self::useCoroutineRuntime();
             $poolClass = $isCoroutine ? CoroutineConnectionPool::class : FpmConnectionPool::class;
-            if ($container->has($poolClass)) {
+            if ($poolEnabled) {
                 $container->get($poolClass)->setLogger($logger);
             }
         }
@@ -116,6 +138,9 @@ class DatabaseServiceProvider implements \Framework\Providers\ServiceProviderInt
     {
         $dbConfig = $container->get('dbConfig');
         if (empty($dbConfig) || empty($dbConfig['slaves'])) return;
+
+        // Swoole Server 在 Worker/请求协程建立前执行 Bootstrap；Channel 预热必须留在协程内。
+        if (self::useCoroutineRuntime() && !self::isInsideCoroutine()) return;
 
         // 预热连接池
         $db = $container->get(\Framework\Database\Interfaces\DatabaseInterface::class);

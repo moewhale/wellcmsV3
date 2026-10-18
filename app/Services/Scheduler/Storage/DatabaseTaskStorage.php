@@ -11,32 +11,32 @@ use Framework\Utils\UuidHelper;
 /**
  * MySQL 调度任务存储层
  *
- * v3.2 重构: 从 src/Scheduler/Queue/DatabaseQueue.php 迁入。
- *             命名空间 Framework\Scheduler\Queue → App\Services\Scheduler\Storage。
- *             实现 TaskStorageInterface，而非裸类。
- *
- * v3.3 重构: 注入 SchedulerTaskModel 替代 ProxyDriver。
- *             消除裸 PDO 手写 SQL，通过 BaseModel 标准方法 + Model 封装方法实现合规访问。
- *
- * PHP 7.2 兼容。
+ * 注入 SchedulerTaskModel 替代 ProxyDriver。
+ * 消除裸 PDO 手写 SQL，通过 BaseModel 标准方法 + Model 封装方法实现合规访问。
  */
 class DatabaseTaskStorage implements TaskStorageInterface
 {
     /** @var \App\Models\SchedulerTaskModel */
     private $model;
 
+    /** @var \Framework\Database\Interfaces\DatabaseInterface */
+    private $database;
+
     /** @var \Framework\Scheduler\Logger */
     private $logger;
 
     /**
      * @param \App\Models\SchedulerTaskModel  $model
+     * @param \Framework\Database\Interfaces\DatabaseInterface $database
      * @param \Framework\Scheduler\Logger|null $logger
      */
     public function __construct(
         \App\Models\SchedulerTaskModel $model,
+        \Framework\Database\Interfaces\DatabaseInterface $database,
         ?\Framework\Scheduler\Logger $logger = null
     ) {
         $this->model = $model;
+        $this->database = $database;
         $this->logger = $logger ?? new \Framework\Scheduler\Logger();
     }
 
@@ -49,40 +49,141 @@ class DatabaseTaskStorage implements TaskStorageInterface
     public function insertTask(Task $task): void
     {
         try {
-            // 清理上一轮同 dedupeKey 的旧行，避免 MySQL UNIQUE 约束冲突。
-            // 进入此方法前 Redis setNx 已做串行化防重，无并发竞争。
-            if ($task->dedupeKey !== '') {
-                $this->model->delete(['dedupe_key' => $task->dedupeKey]);
-            }
-
-            $this->model->insert([
-                'id'             => UuidHelper::toBinary($task->id),
-                'class_name'     => $task->className,
-                'method_name'    => $task->methodName,
-                'args'           => json_encode($task->args, JSON_UNESCAPED_UNICODE),
-                'priority'       => $task->priority,
-                'max_retries'    => $task->maxRetries,
-                'retry_delay'    => $task->retryDelay,
-                'timeout'        => $task->timeout,
-                'callback_url'   => $task->callbackUrl,
-                'callback_method'=> $task->callbackMethod,
-                'retry_count'    => $task->retryCount,
-                'status'         => $task->status,
-                'dedupe_key'     => ($task->dedupeKey === '' ? null : $task->dedupeKey),
-                'created_at'     => $task->createdAt,
-                'updated_at'     => $task->updatedAt,
-                'scheduled_at'   => $task->scheduledAt,
-                'error'          => $task->error,
-            ]);
+            $encodedArgs = json_encode($task->args, JSON_UNESCAPED_UNICODE);
+            if (!empty($task->args['storageLifecycle']) && $encodedArgs === false) throw new \InvalidArgumentException('Invalid storage task argument encoding');
+            $persist = function () use ($task, $encodedArgs) {
+                if ($task->dedupeKey !== '') {
+                    $old = $this->model->readFromMaster(['dedupe_key' => $task->dedupeKey]);
+                    if ($old) {
+                        $sameTask = hash_equals($old['id'], UuidHelper::toBinary($task->id));
+                        $oldArgs = json_decode((string)($old['args'] ?? '[]'), true);
+                        $protectedStorageTask = !empty($task->args['storageLifecycle']) || !empty($oldArgs['storageLifecycle']);
+                        if ($protectedStorageTask && !$sameTask && (int)$old['status'] <= Task::STATUS_RUNNING) {
+                            throw new \RuntimeException('Cannot replace an active scheduler task');
+                        }
+                        if (!$sameTask && (int)$old['status'] === Task::STATUS_FAILED && !empty($oldArgs['storageLifecycle'])) {
+                            throw new \RuntimeException('Retained storage failure requires explicit retry');
+                        }
+                        if ($protectedStorageTask && $sameTask && (int)$old['status'] <= Task::STATUS_RUNNING) {
+                            if (($old['class_name'] ?? '') !== $task->className || ($old['method_name'] ?? '') !== $task->methodName
+                                || json_decode((string)$old['args'], true) !== $task->args) {
+                                throw new \RuntimeException('Active task identity has a different payload');
+                            }
+                            return true;
+                        }
+                        $this->model->delete(['id' => $old['id'], 'status' => (int)$old['status']]);
+                    }
+                }
+                $inserted = $this->model->insert([
+                    'id'             => UuidHelper::toBinary($task->id),
+                    'class_name'     => $task->className,
+                    'method_name'    => $task->methodName,
+                    'args'           => $encodedArgs,
+                    'priority'       => $task->priority,
+                    'max_retries'    => $task->maxRetries,
+                    'retry_delay'    => $task->retryDelay,
+                    'timeout'        => $task->timeout,
+                    'callback_url'   => $task->callbackUrl,
+                    'callback_method'=> $task->callbackMethod,
+                    'retry_count'    => $task->retryCount,
+                    'status'         => $task->status,
+                    'dedupe_key'     => ($task->dedupeKey === '' ? null : $task->dedupeKey),
+                    'created_at'     => $task->createdAt,
+                    'updated_at'     => $task->updatedAt,
+                    'scheduled_at'   => $task->scheduledAt,
+                    'error'          => $task->error,
+                ]);
+                if ($inserted === false) {
+                    throw new \RuntimeException('Scheduler task insert returned false');
+                }
+                return true;
+            };
+            $this->database->inTransaction() ? $persist() : $this->database->transaction($persist, 1, '');
         } catch (\Throwable $e) {
             $this->logger->log('insertTask failed: ' . $e->getMessage()
                 . ' task_id=' . $task->id, 'ERROR');
             throw new \RuntimeException(
-                'Failed to persist task: ' . $e->getMessage(),
+                'Failed to persist scheduler task',
                 (int)$e->getCode(),
                 $e
             );
         }
+    }
+
+    /** 同一业务连接登记，最外层提交后才发布；构造和普通 HTTP 不自动调用。 */
+    public function insertTaskInTransaction(Task $task, callable $publish, callable $onRollback): void
+    {
+        $shard = $this->database->resolveShard('scheduler_tasks');
+        if ($shard !== '' || !$this->database->inTransaction($shard)
+            || !method_exists($this->database, 'afterCommit') || !method_exists($this->database, 'afterRollback')) {
+            throw new \LogicException('Reliable storage tasks require the active owning transaction');
+        }
+        $registered = false;
+        $this->database->afterRollback($onRollback);
+        $this->database->afterCommit(function () use (&$registered, $publish): void {
+            if ($registered) $publish();
+        });
+        $this->insertTask($task);
+        $registered = true;
+    }
+
+    /** 原有周期 Job 会在完成前登记同 dedupe 的下一轮；仅承接已证明的旧代替换。 */
+    public function isSupersededTask(Task $task): bool
+    {
+        if (!empty($task->args['storageLifecycle']) || $task->dedupeKey === '') return false;
+        if ($this->model->readOnMaster(UuidHelper::toBinary($task->id))) return false;
+        $next = $this->model->readFromMaster(['dedupe_key' => $task->dedupeKey]);
+        return $next && !hash_equals($next['id'], UuidHelper::toBinary($task->id))
+            && $next['class_name'] === $task->className && $next['method_name'] === $task->methodName
+            && (int)$next['status'] <= Task::STATUS_RUNNING && (int)$next['created_at'] >= $task->createdAt;
+    }
+
+    public function readStoredTask(string $taskId): ?Task
+    {
+        $row = $this->model->readOnMaster(UuidHelper::toBinary($taskId));
+        return $row ? $this->rowToTask($row) : null;
+    }
+
+    public function retainedFailedTasks(int $limit = 100): array
+    {
+        $rows = $this->model->retainedFailuresOnMaster(min(100, max(1, $limit)));
+        $tasks = [];
+        foreach ($rows as $row) {
+            $task = $this->rowToTask($row);
+            if (!empty($task->args['storageLifecycle'])) $tasks[] = $task->toArray();
+        }
+        return $tasks;
+    }
+
+    /**
+     * 按 PRIMARY KEY(id) 读取投递核验所需的最小权威状态。
+     *
+     * @param string $taskId
+     * @return array|null
+     */
+    public function readTaskState(string $taskId): ?array
+    {
+        try {
+            $row = $this->model->readOnMaster(UuidHelper::toBinary($taskId), ['id', 'status', 'dedupe_key']);
+        } catch (\Throwable $e) {
+            $this->logger->log('readTaskState failed: ' . $e->getMessage()
+                . ' task_id=' . $taskId, 'ERROR');
+            throw new \RuntimeException(
+                'Failed to read scheduler task state',
+                (int)$e->getCode(),
+                $e
+            );
+        }
+
+        if (empty($row)) {
+            return null;
+        }
+
+        return [
+            'taskId' => UuidHelper::fromBinary($row['id']),
+            'status' => (int)$row['status'],
+            'dedupeKey' => (string)($row['dedupe_key'] ?? ''),
+        ];
     }
 
     /**
@@ -98,10 +199,23 @@ class DatabaseTaskStorage implements TaskStorageInterface
         }
 
         try {
-            $this->model->update(['id' => UuidHelper::toBinary($taskId)], $data);
+            $condition = ['id' => UuidHelper::toBinary($taskId)];
+            $updated = $this->model->update($condition, $data);
+            if ($updated === 0) {
+                $row = $this->model->readOnMaster($condition['id']);
+                if (!$row) {
+                    throw new \RuntimeException('Scheduler task no longer exists');
+                }
+                foreach ($data as $field => $value) {
+                    if (!array_key_exists($field, $row) || (string)$row[$field] !== (string)$value) {
+                        throw new \RuntimeException('Scheduler task state update was not persisted');
+                    }
+                }
+            }
         } catch (\Throwable $e) {
             $this->logger->log('updateTaskStatus failed: ' . $e->getMessage()
                 . ' task_id=' . $taskId, 'ERROR');
+            throw new \RuntimeException('Failed to persist scheduler task state', (int)$e->getCode(), $e);
         }
     }
 

@@ -19,6 +19,7 @@ class MetaServiceProvider implements \Framework\Providers\ServiceProviderInterfa
                 $reg->addResolver(new \App\Meta\Resolver\UserPermResolver($container));
                 $reg->addResolver(new \App\Meta\Resolver\TokenResolver($container));
                 $reg->addResolver(new \App\Meta\Resolver\AdminSignInResolver($container));
+                $reg->addResolver(new \App\Meta\Resolver\DownloadSignatureResolver($container));
                 // 可扩展更多 Meta 路由中间件
                 // hook app_Providers_MetaServiceProvider_register.php
                 return $reg;

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+    演示文件：评论编辑模态框（对应 plugins/well_article/views/htm/article_comment_edit_modal.htm）
+    原文件为 AJAX 模态框碎片；演示稿以「遮罩 + 居中弹窗」静态呈现，便于浏览器直接预览
+-->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>编辑评论 - 模态框演示 - WellCMS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+    <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body class="min-h-screen bg-stone-100 dark:bg-slate-950 font-sans text-stone-800 dark:text-gray-200">
+
+    <!-- 模拟页面背景 -->
+    <div class="max-w-3xl mx-auto p-8 space-y-4 opacity-60 select-none">
+        <div class="h-8 w-2/3 rounded-lg bg-stone-200 dark:bg-slate-800"></div>
+        <div class="h-4 w-full rounded bg-stone-200 dark:bg-slate-800"></div>
+        <div class="h-4 w-5/6 rounded bg-stone-200 dark:bg-slate-800"></div>
+        <div class="h-4 w-4/6 rounded bg-stone-200 dark:bg-slate-800"></div>
+    </div>
+
+    <!-- 模态遮罩 + 弹窗 -->
+    <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+        <div class="w-full max-w-lg bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-stone-200 dark:border-slate-700 overflow-hidden">
+            <div class="ajax-body">
+                <form class="ajax-form space-y-4 p-6" action="#" method="post">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-lg font-black text-stone-900 dark:text-gray-100">编辑评论</h3>
+                        <button type="button" onclick="wellcms.closeModal && wellcms.closeModal('wellcms-global-dialog')" class="p-1.5 rounded-lg text-stone-400 hover:bg-stone-100 dark:hover:bg-slate-800 transition-colors" aria-label="关闭">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                        </button>
+                    </div>
+                    <label class="block">
+                        <span class="mb-2 block text-xs font-black text-stone-500 dark:text-gray-400 uppercase tracking-wider">评论内容</span>
+                        <textarea class="block w-full rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 placeholder-stone-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-100 transition-all" name="content" rows="6" maxlength="20480" required>把 filemtime 检查从热路径拿掉之后，我们的列表页 TTFB 直接降了 18%。这篇文章解释了我一直模糊的地方。</textarea>
+                    </label>
+                    <div class="flex gap-3">
+                        <button class="flex-1 inline-flex items-center justify-center rounded-xl bg-blue-600 px-4 py-3 text-sm font-black text-white transition hover:bg-blue-700 shadow-md shadow-blue-600/25" type="submit">保存</button>
+                        <button type="button" onclick="wellcms.closeModal && wellcms.closeModal('wellcms-global-dialog')" class="flex-1 inline-flex items-center justify-center rounded-xl bg-stone-100 dark:bg-slate-800 px-4 py-3 text-sm font-black text-stone-500 dark:text-gray-300 transition hover:bg-stone-200">取消</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="../assets/js/main.js"></script>
+</body>
+</html>

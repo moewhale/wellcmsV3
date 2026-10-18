@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>网址导航-DUX主题演示</title>
+	<link rel="stylesheet" href="assets/css/dux.css">
+	<script>
+		/* 防闪烁：与 WellCMS v3 主题初始化逻辑一致 */
+		if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+			document.documentElement.classList.add('dark');
+		} else {
+			document.documentElement.classList.remove('dark');
+		}
+	</script>
+</head>
+<body class="bg-slate-50 dark:bg-slate-900 text-gray-800 dark:text-gray-200 font-sans min-h-screen flex flex-col">
+
+<!-- Header（结构参考 WellCMS v3 header_nav.inc.htm，Soft UI 风格化） -->
+<header class="sticky top-0 w-full z-50 transition-all duration-300">
+	<div class="absolute inset-0 glass-header -z-10"></div>
+	<div class="max-w-6xl mx-auto px-4 md:px-6 lg:px-8">
+		<div class="flex items-center h-16 relative">
+			<!-- Navigation Backdrop (Mobile Only) -->
+			<div id="nav-backdrop" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm opacity-0 hidden transition-opacity duration-300 z-[60]"></div>
+
+			<!-- Mobile Hamburger -->
+			<div class="flex md:hidden items-center absolute left-0 z-[65]">
+				<button id="mobile-menu-toggle" aria-label="打开菜单" class="p-2 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors focus:outline-none">
+					<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+				</button>
+			</div>
+
+			<!-- Logo -->
+			<div class="flex items-center md:static absolute left-1/2 -translate-x-1/2 md:translate-x-0 h-16 z-10">
+				<a href="index.html" class="flex items-center gap-2 font-semibold text-xl md:text-2xl text-gray-800 dark:text-white whitespace-nowrap">
+					<span class="w-9 h-9 rounded-full bg-indigo-500/10 flex items-center justify-center">
+						<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+					</span>
+					DUX
+				</a>
+			</div>
+
+			<!-- Main Nav -->
+			<nav id="main-nav" class="fixed inset-y-0 left-0 w-72 h-full bg-white dark:bg-slate-900 shadow-2xl transform -translate-x-full transition-transform duration-300 ease-in-out z-[70] md:relative md:translate-x-0 md:inset-auto md:w-auto md:h-auto md:bg-transparent md:dark:bg-transparent md:flex md:items-center md:ml-8 md:shadow-none text-left overflow-y-auto md:overflow-visible">
+				<div class="p-6 md:hidden flex items-center justify-between mb-4 bg-white dark:bg-slate-900">
+					<span class="text-xl font-semibold text-gray-800 dark:text-white">DUX</span>
+					<button id="nav-close" aria-label="关闭菜单" class="p-2 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white">
+						<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+					</button>
+				</div>
+				<div class="flex flex-col md:flex-row p-6 md:p-0 space-y-2 md:space-y-0 md:items-center md:space-x-1 text-sm md:text-base">
+					<a href="index.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">首页</a>
+					<a href="category.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">分类</a>
+					<a href="zhuanti.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">专题</a>
+					<a href="notice.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">短文</a>
+					<a href="kuai.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">快讯</a>
+					<a href="news.html" class="px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors">筛选</a>
+					<!-- 产品（下拉） -->
+					<div class="relative group">
+						<button class="flex items-center justify-between w-full md:w-auto px-4 py-2.5 rounded-2xl font-medium text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-500/5 transition-colors focus:outline-none" onclick="if(window.innerWidth < 768) this.nextElementSibling.classList.toggle('hidden')">
+							<span>产品</span>
+							<svg class="w-4 h-4 ml-1 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+						</button>
+						<div class="hidden md:block md:absolute left-0 mt-2 w-52 md:transition-all md:duration-200 md:opacity-0 md:invisible md:translate-y-2 md:group-hover:opacity-100 md:group-hover:visible md:group-hover:translate-y-0 z-50">
+							<div class="mt-2 md:mt-0 md:bg-white md:dark:bg-slate-800 md:rounded-2xl md:shadow-xl md:shadow-gray-200/50 md:dark:shadow-slate-900/50 overflow-hidden p-2 space-y-1 md:space-y-0 ml-4 md:ml-0">
+								<a href="product.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">产品中心</a>
+								<a href="product.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">产品二级目录</a>
+								<a href="product.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors md:pl-8 pl-8">产品三级目录</a>
+							</div>
+						</div>
+					</div>
+					<!-- 页面（下拉） -->
+					<div class="relative group">
+						<button class="flex items-center justify-between w-full md:w-auto px-4 py-2.5 rounded-2xl font-medium text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 transition-colors focus:outline-none" onclick="if(window.innerWidth < 768) this.nextElementSibling.classList.toggle('hidden')">
+							<span>页面</span>
+							<svg class="w-4 h-4 ml-1 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+						</button>
+						<div class="hidden md:block md:absolute left-0 mt-2 w-52 md:transition-all md:duration-200 md:opacity-0 md:invisible md:translate-y-2 md:group-hover:opacity-100 md:group-hover:visible md:group-hover:translate-y-0 z-50">
+							<div class="mt-2 md:mt-0 md:bg-white md:dark:bg-slate-800 md:rounded-2xl md:shadow-xl md:shadow-gray-200/50 md:dark:shadow-slate-900/50 overflow-hidden p-2 space-y-1 md:space-y-0 ml-4 md:ml-0">
+								<a href="zcd.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">子菜单页面</a>
+								<a href="sample-page.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">友情链接</a>
+								<a href="archives.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">页面存档</a>
+								<a href="readers.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">读者墙</a>
+								<a href="navs.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">网址导航</a>
+								<a href="tags.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">标签云</a>
+								<a href="has-side.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">有边栏页面</a>
+								<a href="no-sidebar.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">无边栏页面</a>
+								<a href="blank.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">空白内容</a>
+								<a href="full.html" class="block px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-indigo-600 md:hover:bg-indigo-500/5 md:rounded-xl transition-colors">全宽屏幕空白页面</a>
+							</div>
+						</div>
+					</div>
+				</div>
+			</nav>
+
+			<!-- Actions -->
+			<div class="flex items-center space-x-2 ml-auto">
+				<!-- 暗色切换（与 WellCMS v3 一致） -->
+				<button onclick="wellcms.toggleDarkMode()" aria-label="切换夜间模式" class="p-2 rounded-full text-gray-500 hover:text-gray-900 hover:bg-indigo-500/10 dark:text-gray-400 dark:hover:text-white transition-colors">
+					<span class="dark:hidden">
+						<svg class="w-5 h-5 text-gray-600 dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+					</span>
+					<span class="hidden dark:inline">
+						<svg class="w-5 h-5 text-yellow-400 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+					</span>
+				</button>
+				<a href="#" rel="nofollow" class="hidden md:inline-flex px-5 py-2 rounded-2xl text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-slate-800 shadow-lg shadow-gray-200/50 dark:shadow-slate-900/40 hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200">注册</a>
+				<a href="#" rel="nofollow" class="inline-flex px-5 py-2 rounded-2xl text-sm font-medium text-white bg-indigo-600 shadow-lg shadow-indigo-600/30 hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200">登录</a>
+			</div>
+		</div>
+	</div>
+</header>
+
+<!-- Main -->
+<main class="flex-1 w-full max-w-6xl mx-auto px-4 md:px-6 lg:px-8 py-8 md:py-12">
+	<div class="space-y-6 md:space-y-8">
+
+		<!-- 页面标题 -->
+		<section class="soft-card p-6 md:p-8">
+			<div class="flex items-center gap-4">
+				<span class="w-12 h-12 rounded-full bg-indigo-500/10 flex items-center justify-center flex-shrink-0">
+					<svg class="w-6 h-6 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+				</span>
+				<div>
+					<h1 class="font-semibold text-3xl md:text-4xl text-gray-800 dark:text-gray-100">网址导航</h1>
+					<p class="mt-2 text-sm md:text-base text-gray-500 dark:text-gray-400">这里显示的是网址导航的一句话描述...</p>
+				</div>
+			</div>
+			<!-- 分组锚点 -->
+			<div class="mt-6 flex flex-wrap gap-3 text-xs">
+				<a href="#nav-plugin" class="px-4 py-1.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/20 transition-colors">插件推荐</a>
+				<a href="#nav-download" class="px-4 py-1.5 rounded-full bg-pink-500/10 text-pink-500 hover:bg-pink-500/20 transition-colors">热门下载</a>
+				<a href="#nav-faq" class="px-4 py-1.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 transition-colors">常见问题</a>
+				<a href="#nav-newbie" class="px-4 py-1.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 transition-colors">新手建站</a>
+				<a href="#nav-host" class="px-4 py-1.5 rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400 hover:bg-sky-500/20 transition-colors">主机推荐</a>
+				<a href="#nav-theme" class="px-4 py-1.5 rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400 hover:bg-violet-500/20 transition-colors">主题推荐</a>
+			</div>
+		</section>
+
+		<!-- 插件推荐 -->
+		<section id="nav-plugin" class="soft-card p-6 md:p-8">
+			<div class="flex items-center gap-3 mb-6">
+				<span class="w-10 h-10 rounded-full bg-indigo-500/10 flex items-center justify-center flex-shrink-0">
+					<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z"></path></svg>
+				</span>
+				<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100">插件推荐</h2>
+			</div>
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+				<a href="https://themebetter.com/plugin/tb-member" target="_blank" rel="external nofollow" class="flex gap-4 p-4 rounded-2xl hover:bg-indigo-500/5 dark:hover:bg-indigo-500/10 transition-all duration-200 group">
+					<span class="w-11 h-11 rounded-full bg-indigo-500/10 flex items-center justify-center flex-shrink-0 group-hover:scale-105 transition-transform duration-200">
+						<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+					</span>
+					<div class="min-w-0">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">TB-Member会员交易插件</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-2">邀请注册、VIP、返现、付费/评论/密码/登录阅读、付费/评论/登录下载、虚拟交易、登录（邮箱/手机/QQ/微信/支付宝/微博）、支付（微信/支付宝/代币/积分）、积分、签到</p>
+					</div>
+				</a>
+			</div>
+		</section>
+
+		<!-- 热门下载 -->
+		<section id="nav-download" class="soft-card p-6 md:p-8">
+			<div class="flex items-center gap-3 mb-6">
+				<span class="w-10 h-10 rounded-full bg-pink-500/10 flex items-center justify-center flex-shrink-0">
+					<svg class="w-5 h-5 text-pink-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+				</span>
+				<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100">热门下载</h2>
+			</div>
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+				<a href="https://themebetter.com/wordpress/" target="_blank" rel="external nofollow" class="flex gap-4 p-4 rounded-2xl hover:bg-indigo-500/5 dark:hover:bg-indigo-500/10 transition-all duration-200 group">
+					<span class="w-11 h-11 rounded-full bg-pink-500/10 flex items-center justify-center flex-shrink-0 group-hover:scale-105 transition-transform duration-200">
+						<svg class="w-5 h-5 text-pink-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+					</span>
+					<div class="min-w-0">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">WordPress下载</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-2">WordPress是全球最流行的网站程序，世界上超过30%的网站由WordPress搭建</p>
+					</div>
+				</a>
+			</div>
+		</section>
+
+		<!-- 常见问题 -->
+		<section id="nav-faq" class="soft-card p-6 md:p-8">
+			<div class="flex items-center gap-3 mb-6">
+				<span class="w-10 h-10 rounded-full bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
+					<svg class="w-5 h-5 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+				</span>
+				<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100">常见问题</h2>
+			</div>
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+				<a href="https://themebetter.com/wordpress-cn-tag-404.html" target="_blank" rel="external nofollow" class="flex gap-4 p-4 rounded-2xl hover:bg-indigo-500/5 dark:hover:bg-indigo-500/10 transition-all duration-200 group">
+					<span class="w-11 h-11 rounded-full bg-emerald-500/10 flex items-center justify-center flex-shrink-0 group-hover:scale-105 transition-transform duration-200">
+						<svg class="w-5 h-5 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+					</span>
+					<div class="min-w-0">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">中文标签出现404</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-2">很多主题用户提到安装完WordPress后中文标签出现404的情况，就给大家介绍几种方法供选择。</p>
+					</div>
+				</a>
+			</div>
+		</section>
+
+		<!-- 新手建站 -->
+		<section id="nav-newbie" class="soft-card p-6 md:p-8">
+			<div class="flex items-center gap-3 mb-6">
+				<span class="w-10 h-10 rounded-full bg-amber-500/10 flex items-center justify-center flex-shrink-0">
+					<svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path></svg>
+				</span>
+				<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100">新手建站</h2>
+			</div>
+			<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+				<a href="https://themebetter.com/site-start.html" target="_blank" rel="external nofollow" class="rounded-2xl overflow-hidden hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200 group">
+					<img src="https://themebetter.com/uploads/2020/07/zhinan.png" alt="新手建站指南" class="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-300">
+					<div class="p-4">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">新手建站指南</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-2">主要针对0基础的建站新手，建站，一定要有一个最中心的目的。</p>
+					</div>
+				</a>
+				<a href="https://themebetter.com/wordpress" target="_blank" rel="external nofollow" class="rounded-2xl overflow-hidden hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200 group">
+					<img src="https://themebetter.com/uploads/2017/09/wp.jpg" alt="WordPress最新版下载" class="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-300">
+					<div class="p-4">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">WordPress最新版下载</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-2">WordPress是全球最流行的网站程序，世界上超过30%的网站由WordPress搭建。</p>
+					</div>
+				</a>
+				<a href="https://themebetter.com/wordpress-install.html" target="_blank" rel="external nofollow" class="rounded-2xl overflow-hidden hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200 group">
+					<img src="https://themebetter.com/uploads/2017/09/wp.jpg" alt="WordPress程序安装" class="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-300">
+					<div class="p-4">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">WordPress程序安装</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-2">下载、上传、传说中的5分钟快速安装，WordPress虽为免费的开源软件，但其价值无法用金钱来衡量。</p>
+					</div>
+				</a>
+			</div>
+		</section>
+
+		<!-- 主机推荐 -->
+		<section id="nav-host" class="soft-card p-6 md:p-8">
+			<div class="flex items-center gap-3 mb-6">
+				<span class="w-10 h-10 rounded-full bg-sky-500/10 flex items-center justify-center flex-shrink-0">
+					<svg class="w-5 h-5 text-sky-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg>
+				</span>
+				<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100">主机推荐</h2>
+			</div>
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+				<a href="https://www.aliyun.com/minisite/goods?userCode=sd8taisa" target="_blank" rel="external nofollow" class="flex gap-4 p-4 rounded-2xl hover:bg-indigo-500/5 dark:hover:bg-indigo-500/10 transition-all duration-200 group">
+					<span class="w-11 h-11 rounded-full bg-sky-500/10 flex items-center justify-center flex-shrink-0 group-hover:scale-105 transition-transform duration-200">
+						<svg class="w-5 h-5 text-sky-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+					</span>
+					<div class="min-w-0">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">阿里云服务器</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-2">阿里云服务器稳定快速，国内第一</p>
+					</div>
+				</a>
+			</div>
+		</section>
+
+		<!-- 主题推荐 -->
+		<section id="nav-theme" class="soft-card p-6 md:p-8">
+			<div class="flex items-center gap-3 mb-6">
+				<span class="w-10 h-10 rounded-full bg-violet-500/10 flex items-center justify-center flex-shrink-0">
+					<svg class="w-5 h-5 text-violet-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"></path></svg>
+				</span>
+				<h2 class="font-semibold text-xl md:text-2xl text-gray-800 dark:text-gray-100">主题推荐</h2>
+			</div>
+			<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+				<a href="https://themebetter.com/theme/dux" target="_blank" rel="external nofollow" class="rounded-2xl overflow-hidden hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200 group">
+					<img src="https://themebetter.com/static/theme/thumb-dux.png" alt="DUX主题" class="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-300">
+					<div class="p-4">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">DUX主题</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-3">支持夜间模式、快讯、专题、百度收录、人机验证、多级分类筛选，适用于垂直站点、科技博客、个人站，扁平化设计、简洁白色、超多功能配置、会员中心、直达链接、自动缩略图</p>
+					</div>
+				</a>
+				<a href="https://themebetter.com/theme/mok" target="_blank" rel="external nofollow" class="rounded-2xl overflow-hidden hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200 group">
+					<img src="https://themebetter.com/static/theme/thumb-mok.png" alt="MOK主题" class="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-300">
+					<div class="p-4">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">MOK主题</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-3">首页自定义、咨询表单、多语言（中英日繁）、一键换色、全站SEO、多分类模版、百度收录，适用于各种企业网站、垂直站、行业站等等，扁平化设计、多设备支持、侧栏随动、列表无限加载</p>
+					</div>
+				</a>
+				<a href="https://themebetter.com/theme/yia" target="_blank" rel="external nofollow" class="rounded-2xl overflow-hidden hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200 group">
+					<img src="https://themebetter.com/static/theme/thumb-yia.png" alt="YIA主题" class="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-300">
+					<div class="p-4">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">YIA主题</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-3">支持多语言、一键换色、全站SEO设置、文章图片弹窗、百度收录，适用于各种个人展示网站、博客站、行业站等等，扁平化设计、多设备支持、侧栏随动、列表无限加载、灵活多变的小工具模块</p>
+					</div>
+				</a>
+				<a href="https://themebetter.com/theme/themebetter-ent" target="_blank" rel="external nofollow" class="rounded-2xl overflow-hidden hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200 group">
+					<img src="https://themebetter.com/static/theme/thumb-ent.png" alt="ENT主题" class="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-300">
+					<div class="p-4">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">ENT主题</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-3">支持中英文，支持百度快速收录，适用于企业官方网站、导购站、淘宝客、团队展示、商品展示，超全面SEO、模块化设计、强大且简单的主题</p>
+					</div>
+				</a>
+				<a href="https://themebetter.com/theme/xiu" target="_blank" rel="external nofollow" class="rounded-2xl overflow-hidden hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200 group">
+					<img src="https://themebetter.com/static/theme/thumb-xiu.png" alt="XIU主题" class="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-300">
+					<div class="p-4">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">XIU主题</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-3">支持百度收录推送，评论算术验证码，适用于图片展示、多元化图片新闻展示、个人博客、资源分享站，扁平化设计、简洁风、全面SEO优化、多重列表展示方式</p>
+					</div>
+				</a>
+				<a href="https://themebetter.com/theme/tob" target="_blank" rel="external nofollow" class="rounded-2xl overflow-hidden hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200 group">
+					<img src="https://themebetter.com/static/theme/thumb-tob.png" alt="TOB主题" class="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-300">
+					<div class="p-4">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">TOB主题</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-3">夜间模式、多语言（中文、英文、繁体中文），支持百度收录，适用于各种图片展示网站、新闻站、电影站、美图站、资源站等等，扁平化设计、公众号展示、打赏功能、列表无限加载、全屏相册展示</p>
+					</div>
+				</a>
+				<a href="https://themebetter.com/theme/d8" target="_blank" rel="external nofollow" class="rounded-2xl overflow-hidden hover:-translate-y-0.5 hover:shadow-xl transition-all duration-200 group">
+					<img src="https://themebetter.com/static/theme/thumb-d8.png" alt="D8主题" class="w-full h-32 object-cover group-hover:scale-105 transition-transform duration-300">
+					<div class="p-4">
+						<strong class="block text-sm md:text-base font-medium text-gray-800 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">D8主题</strong>
+						<p class="mt-1.5 text-xs md:text-sm text-gray-500 dark:text-gray-400 leading-6 line-clamp-3">支持前台中英文选择、适用于团队展示、行业垂直性网站、个人博客，简洁大气、优化SEO、多功能配置、用户投稿功能</p>
+					</div>
+				</a>
+			</div>
+		</section>
+
+		<!-- 品牌宣传 CTA -->
+		<section class="soft-card p-6 md:p-8 text-center">
+			<span class="inline-flex w-14 h-14 rounded-full bg-indigo-500/10 items-center justify-center">
+				<svg class="w-7 h-7 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+			</span>
+			<h2 class="mt-4 font-semibold text-2xl md:text-3xl text-gray-800 dark:text-gray-100">大前端WP主题 更专业 更方便</h2>
+			<p class="mt-3 max-w-2xl mx-auto text-sm md:text-base text-gray-500 dark:text-gray-400 leading-7">支持快讯、专题、百度收录推送、人机验证、多级分类筛选器，适用于垂直站点、科技博客、个人站，扁平化设计、简洁白色、超多功能配置、会员中心、直达链接、文章图片弹窗、自动缩略图等...</p>
+			<a href="http://wpa.qq.com/msgrd?v=3&amp;uin=937373201&amp;site=qq&amp;menu=yes" target="_blank" rel="external nofollow" class="soft-btn-primary mt-6 inline-flex items-center gap-2">
+				联系我们
+				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+			</a>
+		</section>
+
+	</div>
+</main>
+
+<!-- Footer -->
+<footer class="bg-white dark:bg-slate-800 text-gray-600 dark:text-gray-400 mt-auto">
+	<div class="max-w-6xl mx-auto px-4 md:px-6 lg:px-8 py-16">
+		<div class="grid grid-cols-1 md:grid-cols-3 gap-8 md:gap-12">
+			<div>
+				<a href="index.html" class="flex items-center gap-2 font-semibold text-xl md:text-2xl text-gray-800 dark:text-white">
+					<span class="w-9 h-9 rounded-full bg-indigo-500/10 flex items-center justify-center">
+						<svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+					</span>
+					DUX
+				</a>
+				<p class="mt-4 text-xs leading-6">DUX主题官方演示站（Soft UI 复刻版）。温和友好的界面设计，柔和的阴影、圆润的边角、低饱和度的配色。</p>
+			</div>
+			<div>
+				<h4 class="font-semibold text-base text-gray-800 dark:text-gray-100 mb-4">快捷导航</h4>
+				<ul class="space-y-2 text-xs">
+					<li><a href="tags.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">标签云</a></li>
+					<li><a href="readers.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">读者墙</a></li>
+					<li><a href="archives.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">页面存档</a></li>
+					<li><a href="sample-page.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">友情链接</a></li>
+					<li><a href="navs.html" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">网址导航</a></li>
+				</ul>
+			</div>
+			<div>
+				<h4 class="font-semibold text-base text-gray-800 dark:text-gray-100 mb-4">关注我们</h4>
+				<ul class="space-y-2 text-xs">
+					<li><a href="https://themebetter.com" target="_blank" rel="external nofollow" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">themebetter</a></li>
+					<li><a href="https://themebetter.com" target="_blank" rel="external nofollow" class="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">更好的主题</a></li>
+				</ul>
+			</div>
+		</div>
+		<div class="mt-12 pt-6 text-center text-xs text-gray-400">
+			© 2026 DUX主题官方演示站 · Soft UI 复刻版（Tailwind CSS + WellCMS v3 暗色模式）
+		</div>
+	</div>
+</footer>
+
+<!-- 回到顶部 -->
+<button id="back-to-top" aria-label="回到顶部" class="fixed bottom-6 right-6 z-40 w-11 h-11 rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-600/30 flex items-center justify-center opacity-0 pointer-events-none transition-all duration-300 hover:-translate-y-0.5 hover:shadow-xl">
+	<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg>
+</button>
+
+<script src="assets/js/dux.js"></script>
+</body>
+</html>

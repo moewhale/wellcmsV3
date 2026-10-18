@@ -26,6 +26,8 @@ use Framework\Utils\IpHelper;
  */
 class LinkService
 {
+    use \Framework\Core\Traits\StatefulTrait;
+
     /** @var \Framework\Core\Container */
     protected $container;
 
@@ -87,8 +89,9 @@ class LinkService
      */
     public function getSiteUrl(): string
     {
-        if ($this->siteUrl !== null) {
-            return $this->siteUrl;
+        $siteUrl = $this->getState('siteUrl');
+        if ($siteUrl !== null) {
+            return (string)$siteUrl;
         }
 
         $appConfig = $this->getAppConfig();
@@ -97,22 +100,23 @@ class LinkService
         if (!empty($configuredDomain)) {
             // 配置可能带协议也可能不带
             if (preg_match('#^https?://#i', $configuredDomain)) {
-                $this->siteUrl = rtrim($configuredDomain, '/');
+                $siteUrl = rtrim($configuredDomain, '/');
             } else {
                 // 根据当前请求判断协议
                 $scheme = $this->getScheme();
-                $this->siteUrl = $scheme . '://' . rtrim($configuredDomain, '/');
+                $siteUrl = $scheme . '://' . rtrim($configuredDomain, '/');
             }
         } else {
             // 无配置时从当前请求构建
             $scheme = $this->getScheme();
             $host = IpHelper::host();
-            $this->siteUrl = $scheme . '://' . ($host ?: 'localhost');
+            $siteUrl = $scheme . '://' . ($host ?: 'localhost');
         }
 
         // hook app_Services_LinkService_getSiteUrl_end.php
 
-        return $this->siteUrl;
+        $this->setState('siteUrl', $siteUrl);
+        return $siteUrl;
     }
 
     /**
@@ -122,8 +126,9 @@ class LinkService
      */
     public function getSiteHosts(): array
     {
-        if ($this->siteHosts !== null) {
-            return $this->siteHosts;
+        $siteHosts = $this->getState('siteHosts');
+        if ($siteHosts !== null) {
+            return (array)$siteHosts;
         }
 
         $appConfig = $this->getAppConfig();
@@ -133,23 +138,24 @@ class LinkService
             // 从配置域名解析 host（移除协议和路径）
             $host = parse_url($configuredDomain, PHP_URL_HOST);
             if (!empty($host)) {
-                $this->siteHosts = $this->expandWwwVariants(strtolower($host));
+                $siteHosts = $this->expandWwwVariants(strtolower($host));
             }
         }
 
         // 配置为空时使用当前请求 Host
-        if (empty($this->siteHosts)) {
+        if (empty($siteHosts)) {
             $httpHost = IpHelper::host();
             if (!empty($httpHost)) {
-                $this->siteHosts = $this->expandWwwVariants(strtolower($httpHost));
+                $siteHosts = $this->expandWwwVariants(strtolower($httpHost));
             }
         }
 
-        $this->siteHosts = array_values(array_unique(array_filter($this->siteHosts ?? [])));
+        $siteHosts = array_values(array_unique(array_filter($siteHosts ?? [])));
 
         // hook app_Services_LinkService_getSiteHosts_end.php
 
-        return $this->siteHosts;
+        $this->setState('siteHosts', $siteHosts);
+        return $siteHosts;
     }
 
     /**
@@ -181,10 +187,6 @@ class LinkService
         return $this->whitelistHosts;
     }
 
-    // ========================================================================
-    //  内部方法
-    // ========================================================================
-
     /**
      * 获取 appConfig（容器 lazy 加载）
      */
@@ -198,9 +200,7 @@ class LinkService
      */
     protected function getScheme(): string
     {
-        return (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (int)($_SERVER['SERVER_PORT'] ?? 80) === 443
-            ? 'https'
-            : 'http';
+        return IpHelper::scheme();
     }
 
     /**

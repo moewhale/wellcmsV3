@@ -160,6 +160,9 @@ class SwooleServer
         /** @noinspection PhpUndefinedMethodInspection */
         $ctx['rawContent'] = $swooleRequest->rawContent();
 
+        // Bootstrap 在 Worker 主协程执行；每个请求协程必须建立自己的计时起点。
+        \Framework\Database\Collector\QueryCollector::startTime();
+
         // 2. 构造 PSR-7 请求对象 (使用预解析的工厂)
         $psrRequest = $this->requestFactory->createFromGlobals();
 

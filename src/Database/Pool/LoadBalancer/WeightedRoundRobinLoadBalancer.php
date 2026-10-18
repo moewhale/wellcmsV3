@@ -35,7 +35,7 @@ class WeightedRoundRobinLoadBalancer implements \Framework\Database\Pool\LoadBal
         $key = $this->getContextKey('current_weights');
         $currentWeights = [];
         if ($ctx !== null) {
-            $currentWeights = $ctx->$key ?? [];
+            $currentWeights = $ctx[$key] ?? [];
         } else {
             $currentWeights = $this->currentWeights;
         }
@@ -62,7 +62,7 @@ class WeightedRoundRobinLoadBalancer implements \Framework\Database\Pool\LoadBal
         }
 
         if ($ctx !== null) {
-            $ctx->$key = $currentWeights;
+            $ctx[$key] = $currentWeights;
         } else {
             $this->currentWeights = $currentWeights;
         }
@@ -84,7 +84,7 @@ class WeightedRoundRobinLoadBalancer implements \Framework\Database\Pool\LoadBal
         $key = $this->getContextKey('node_weights');
         $nodeWeights = [];
         if ($ctx !== null) {
-            $nodeWeights = $ctx->$key ?? [];
+            $nodeWeights = $ctx[$key] ?? [];
         } else {
             $nodeWeights = $this->nodeWeights;
         }
@@ -103,7 +103,7 @@ class WeightedRoundRobinLoadBalancer implements \Framework\Database\Pool\LoadBal
         }
 
         if ($ctx !== null) {
-            $ctx->$key = $nodeWeights;
+            $ctx[$key] = $nodeWeights;
         } else {
             $this->nodeWeights = $nodeWeights;
         }

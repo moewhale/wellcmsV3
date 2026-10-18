@@ -116,7 +116,8 @@
 					<?php if (!empty($item['operation_links']['upgrade']['url'])) { ?>
 					<a href="<?php echo $item['operation_links']['upgrade']['url'];?>"
 						data-confirm="<?php echo $view->get('language.upgrade');?> to v<?php echo $item['cloud_version']; ?>?"
-						class="ajax-get px-3 py-1.5 text-xs font-bold text-white bg-green-600 rounded-lg hover:bg-green-700 shadow-lg shadow-green-500/20 transition-all transform active:scale-95">
+						data-arg='<?php echo json_encode($item['operation_links']['upgrade']['arg'] ?? []); ?>'
+						class="ajax-post px-3 py-1.5 text-xs font-bold text-white bg-green-600 rounded-lg hover:bg-green-700 shadow-lg shadow-green-500/20 transition-all transform active:scale-95">
 						<?php echo $view->get('language.upgrade');?>
 					</a>
 					<?php } ?>

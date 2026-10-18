@@ -28,19 +28,13 @@ class UserPermMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
     public function process(\Framework\Http\Interfaces\ServerRequestInterface $request, \Framework\Http\Interfaces\RequestHandlerInterface $handler): \Framework\Http\Interfaces\ResponseInterface
     {
         try {
-            $groupService = $this->container->get(\App\Services\Auth\GroupService::class);
-            $messageController = $this->container->get(\App\Controllers\Base\MessageController::class);
-            $urlGenerator = $this->container->get(\Framework\Http\Routing\UrlGeneratorInterface::class);
-
             $user = $request->getAttribute('user');
 
             $groupId = (int)($user['group_id'] ?? 0);
 
             if (!empty($this->params['role'])) {
+                $groupService = $this->container->get(\App\Services\Auth\GroupService::class);
                 if (is_array($this->params['role'])) {
-                    /* foreach ($this->params['role'] as $role) {
-                        if (!$groupService->access($groupId, $role)) return $messageController->errorMessage('Access Denied', 8);
-                    } */
                     $hasPerm = false;
                     foreach ($this->params['role'] as $role) {
                         if ($groupService->access($groupId, $role)) {
@@ -49,10 +43,10 @@ class UserPermMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfa
                         }
                     }
 
-                    if (!$hasPerm) return $messageController->errorMessage('Access Denied', 8);
+                    if (!$hasPerm) return $this->container->get(\App\Controllers\Base\MessageController::class)->errorMessage('Access Denied', 8);
 
                 } else {
-                    if (!$groupService->access($groupId, $this->params['role'])) return $messageController->errorMessage('Access Denied', 8);
+                    if (!$groupService->access($groupId, $this->params['role'])) return $this->container->get(\App\Controllers\Base\MessageController::class)->errorMessage('Access Denied', 8);
                 }
             }
 

@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+    演示文件：审核队列（对应 plugins/well_article/views/htm/manage_article_review.htm）
+    布局：用户中心深色侧栏骨架
+    功能：范围切换（待我审核/全部待审/我指派的） / 审核行（勾选、指派状态、审核按钮） /
+          审核弹窗（通过 / 驳回+备注+原因） / 批量指派（编辑 ID、审核员 ID） / 分页
+    纯静态演示稿：<dialog> 弹窗以静态卡片直接呈现
+-->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>审核队列 - 用户中心 - WellCMS 演示</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+    <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body class="min-h-screen bg-gray-100 dark:bg-slate-950 font-sans text-gray-800 dark:text-gray-200">
+<div class="flex min-h-screen">
+
+    <!-- 深色导航侧栏 -->
+    <aside class="fixed inset-y-0 left-0 z-40 w-64 bg-slate-900 text-slate-300 hidden lg:flex lg:flex-col border-r border-slate-800">
+        <div class="px-5 h-16 flex items-center gap-2.5 border-b border-slate-800">
+            <div class="w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center text-white font-black text-sm shadow-lg shadow-indigo-500/30">W</div>
+            <div><div class="text-white font-extrabold leading-none tracking-tight">WellCMS</div><div class="text-[10px] text-slate-500 mt-0.5">用户中心</div></div>
+        </div>
+        <div class="px-5 py-5 border-b border-slate-800 flex items-center gap-3">
+            <span class="relative w-11 h-11 rounded-xl bg-gradient-to-br from-rose-400 to-amber-500 flex items-center justify-center text-white font-black text-lg shrink-0">林<span class="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-emerald-400 rounded-full ring-2 ring-slate-900"></span></span>
+            <div class="min-w-0"><div class="text-sm font-bold text-white truncate">林晓雨</div><div class="text-[11px] text-slate-500">管理员 · UID 10001</div></div>
+        </div>
+        <nav class="flex-1 overflow-y-auto px-3 py-4 space-y-1 text-sm scrollbar-hide">
+            <div class="px-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-600">概览</div>
+            <a href="my_home.htm" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/5 hover:text-white transition-colors"><span>📊</span>个人首页</a>
+            <a href="manage_dashboard.htm" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/5 hover:text-white transition-colors"><span>🛡️</span>管理面板</a>
+            <div class="px-3 pt-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-600">管理</div>
+            <a href="manage_article_index.htm" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/5 hover:text-white transition-colors"><span>🗃️</span>文章管理</a>
+            <a href="manage_article_comment.htm" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/5 hover:text-white transition-colors"><span>💬</span>评论管理</a>
+            <a href="manage_article_audit.htm" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/5 hover:text-white transition-colors"><span>✅</span>文章审核</a>
+            <a href="manage_article_report.htm" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/5 hover:text-white transition-colors"><span>🚩</span>举报处理</a>
+            <a href="manage_article_ban.htm" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/5 hover:text-white transition-colors"><span>⛔</span>用户限制</a>
+            <a href="manage_article_health.htm" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/5 hover:text-white transition-colors"><span>🩺</span>健康巡检</a>
+        </nav>
+        <div class="px-3 py-4 border-t border-slate-800">
+            <button class="ajax-post w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-rose-400 hover:bg-rose-500/10 text-sm font-bold transition-colors" data-confirm="确认退出登录？"><span>⏻</span>退出登录</button>
+        </div>
+    </aside>
+
+    <!-- 内容画布 -->
+    <div class="flex-1 lg:ml-64 min-w-0 flex flex-col">
+        <header class="sticky top-0 z-30 h-16 bg-white/80 dark:bg-slate-900/80 backdrop-blur border-b border-gray-200 dark:border-slate-800 flex items-center justify-between px-4 sm:px-6 lg:px-8">
+            <div class="text-sm"><span class="text-gray-400">管理</span><span class="mx-1.5 text-gray-300 dark:text-slate-600">/</span><b class="text-gray-900 dark:text-white">审核队列</b></div>
+            <div class="flex items-center gap-2">
+                <button onclick="wellcms.toggleDarkMode()" class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-white/10 transition-colors" title="切换深浅色"><span class="dark:hidden">🌙</span><span class="hidden dark:inline">☀️</span></button>
+                <span class="lg:hidden w-8 h-8 rounded-lg bg-gradient-to-br from-rose-400 to-amber-500 flex items-center justify-center text-white text-sm font-bold">林</span>
+            </div>
+        </header>
+
+        <main class="flex-1 p-4 sm:p-6 lg:p-8" id="main-content">
+            <div class="bg-white dark:bg-slate-900 rounded-2xl border border-gray-200 dark:border-slate-800 shadow-sm overflow-hidden">
+                <header class="flex flex-wrap items-center justify-between gap-4 border-b border-gray-100 px-6 py-4 dark:border-slate-800">
+                    <div class="min-w-0 flex-1">
+                        <h1 class="text-lg font-extrabold text-gray-900 dark:text-white">审核队列</h1>
+                        <p class="mt-1 text-sm text-gray-400">当前范围内有 5 篇文章等待审核，最早一篇已等待 3 小时。</p>
+                    </div>
+                    <span class="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-black text-blue-700 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-400">待我审核</span>
+                </header>
+
+                <!-- 范围切换 -->
+                <section class="border-b border-gray-100 px-6 py-4 dark:border-slate-800">
+                    <nav class="flex flex-wrap gap-2" aria-label="审核范围">
+                        <a class="inline-flex items-center justify-center gap-1 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-md shadow-indigo-600/25" href="#" aria-current="page">待我审核</a>
+                        <a class="inline-flex items-center justify-center gap-1 rounded-xl border border-gray-200 bg-white px-4 py-2 text-xs font-bold text-gray-600 transition hover:bg-gray-50 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="#">全部待审</a>
+                        <a class="inline-flex items-center justify-center gap-1 rounded-xl border border-gray-200 bg-white px-4 py-2 text-xs font-bold text-gray-600 transition hover:bg-gray-50 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="#">我指派的</a>
+                    </nav>
+                </section>
+
+                <!-- 审核行 -->
+                <section class="divide-y divide-gray-100 dark:divide-slate-800" aria-label="审核队列">
+                    <article class="flex flex-wrap items-center justify-between gap-4 px-6 py-4 hover:bg-gray-50/60 dark:hover:bg-slate-800/40 transition-colors">
+                        <div class="flex min-w-0 flex-1 items-center gap-3">
+                            <label class="shrink-0">
+                                <input class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" type="checkbox">
+                                <span class="sr-only">选择文章</span>
+                            </label>
+                            <div class="min-w-0 flex-1">
+                                <div class="mt-1 text-xs text-gray-400">
+                                    <span class="text-sm font-bold text-amber-600">● 未指派</span>
+                                    <span class="font-mono text-xs ml-2">文章 #2049</span>
+                                </div>
+                                <h2 class="font-bold text-gray-900 dark:text-gray-100">钩子系统实战：20 个常用钩子的正确用法</h2>
+                            </div>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <button class="inline-flex items-center justify-center gap-1 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white transition hover:bg-indigo-700 shadow-md shadow-indigo-600/25" type="button">审核</button>
+                        </div>
+                    </article>
+
+                    <!-- 审核弹窗（原文件为 <dialog>，演示稿静态展开呈现） -->
+                    <div class="mx-6 mb-4 rounded-2xl border border-indigo-200 dark:border-indigo-500/30 bg-indigo-50/50 dark:bg-indigo-500/5 p-5">
+                        <div class="flex items-start justify-between gap-4">
+                            <div class="min-w-0">
+                                <p class="text-xs font-black uppercase tracking-wide text-gray-400">审核队列</p>
+                                <h3 class="text-base font-extrabold text-gray-900 dark:text-gray-100 mt-1">钩子系统实战：20 个常用钩子的正确用法</h3>
+                                <p class="mt-1 text-xs text-gray-400 font-mono">文章 #2049 · 工作版本 V3</p>
+                            </div>
+                            <span class="text-[10px] font-bold text-gray-400 uppercase shrink-0">dialog</span>
+                        </div>
+                        <section class="mt-4 space-y-3">
+                            <h4 class="text-sm font-bold text-gray-600 dark:text-gray-300">待审核</h4>
+                            <form class="ajax-form flex flex-wrap items-center gap-3 border-t border-gray-200 pt-4 dark:border-slate-700" action="#" method="post">
+                                <button class="inline-flex items-center justify-center gap-1 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white transition hover:bg-emerald-700" type="submit">通过</button>
+                            </form>
+                            <form class="ajax-form flex flex-wrap items-end gap-3 border-t border-gray-200 pt-4 dark:border-slate-700" action="#" method="post">
+                                <label class="block w-full">
+                                    <span class="mb-2 block text-xs font-black text-gray-500 dark:text-gray-400 uppercase tracking-wider">审核备注</span>
+                                    <textarea class="block w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 dark:border-slate-600 dark:bg-slate-900 transition-all" name="reviewNote" rows="3" maxlength="255" placeholder="写给作者的备注…"></textarea>
+                                </label>
+                                <label class="block min-w-0 flex-1">
+                                    <span class="mb-2 block text-xs font-black text-gray-500 dark:text-gray-400 uppercase tracking-wider">驳回原因</span>
+                                    <select class="block w-full rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm dark:border-slate-600 dark:bg-slate-900" name="reasonCode" required>
+                                        <option value="1">内容不完整</option>
+                                        <option value="2">事实错误</option>
+                                        <option value="3">格式不规范</option>
+                                        <option value="4">违反社区规范</option>
+                                    </select>
+                                </label>
+                                <button class="inline-flex items-center justify-center gap-1 rounded-xl bg-rose-500 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-rose-600" type="submit">驳回</button>
+                            </form>
+                        </section>
+                    </div>
+
+                    <article class="flex flex-wrap items-center justify-between gap-4 px-6 py-4 hover:bg-gray-50/60 dark:hover:bg-slate-800/40 transition-colors">
+                        <div class="flex min-w-0 flex-1 items-center gap-3">
+                            <label class="shrink-0">
+                                <input class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" type="checkbox">
+                                <span class="sr-only">选择文章</span>
+                            </label>
+                            <div class="min-w-0 flex-1">
+                                <div class="mt-1 text-xs text-gray-400">
+                                    <span class="text-sm font-bold text-emerald-600">● 已指派给我</span>
+                                    <span class="font-mono text-xs ml-2">文章 #2051</span>
+                                </div>
+                                <h2 class="font-bold text-gray-900 dark:text-gray-100">社区十月线下沙龙回顾（图文）</h2>
+                            </div>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <button class="inline-flex items-center justify-center gap-1 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white transition hover:bg-indigo-700 shadow-md shadow-indigo-600/25" type="button">审核</button>
+                        </div>
+                    </article>
+
+                    <article class="flex flex-wrap items-center justify-between gap-4 px-6 py-4 hover:bg-gray-50/60 dark:hover:bg-slate-800/40 transition-colors">
+                        <div class="flex min-w-0 flex-1 items-center gap-3">
+                            <label class="shrink-0">
+                                <input class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" type="checkbox">
+                                <span class="sr-only">选择文章</span>
+                            </label>
+                            <div class="min-w-0 flex-1">
+                                <div class="mt-1 text-xs text-gray-400">
+                                    <span class="text-sm font-bold text-gray-400">● 已指派给何静姝</span>
+                                    <span class="font-mono text-xs ml-2">文章 #2055</span>
+                                </div>
+                                <h2 class="font-bold text-gray-900 dark:text-gray-100">Swoole 环境下 Session 隔离的三种方案</h2>
+                            </div>
+                        </div>
+                    </article>
+                </section>
+
+                <!-- 批量指派 -->
+                <section class="flex flex-wrap items-center justify-between gap-3 border-t border-gray-100 p-4 dark:border-slate-800" aria-label="批量指派">
+                    <div class="flex items-center gap-2">
+                        <label class="flex cursor-pointer items-center gap-2 text-sm font-bold text-gray-600 dark:text-gray-300">
+                            <input class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" type="checkbox" id="selectAll">
+                            <span>全选</span>
+                            <span class="flex flex-wrap items-center gap-2 text-xs text-gray-400" aria-live="polite">已选 0 项</span>
+                        </label>
+                    </div>
+                    <button class="inline-flex items-center justify-center gap-1 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white transition hover:bg-indigo-700 disabled:opacity-50" type="button" disabled>批量指派</button>
+                </section>
+
+                <!-- 批量指派弹窗（原文件 <dialog>，演示稿静态卡片呈现） -->
+                <section class="border-t border-gray-100 p-6 dark:border-slate-800">
+                    <div class="max-w-md rounded-2xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/60 p-5">
+                        <div class="flex items-start justify-between gap-4 mb-4">
+                            <h3 class="text-sm font-extrabold text-gray-900 dark:text-gray-100">批量指派</h3>
+                            <span class="text-[10px] font-bold text-gray-400 uppercase">dialog</span>
+                        </div>
+                        <form class="ajax-form space-y-4" action="#" method="post">
+                            <label class="block">
+                                <span class="mb-2 block text-xs font-black text-gray-500 dark:text-gray-400 uppercase tracking-wider">编辑 UID</span>
+                                <input class="block w-full rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm dark:border-slate-600 dark:bg-slate-900" type="number" name="editorId" min="1" inputmode="numeric" placeholder="例如 10012" required>
+                            </label>
+                            <label class="block">
+                                <span class="mb-2 block text-xs font-black text-gray-500 dark:text-gray-400 uppercase tracking-wider">审核员 UID</span>
+                                <input class="block w-full rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm dark:border-slate-600 dark:bg-slate-900" type="number" name="reviewerId" min="1" inputmode="numeric" placeholder="例如 10001" required>
+                            </label>
+                            <button class="inline-flex items-center justify-center rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white transition hover:bg-indigo-700" type="submit">确认指派</button>
+                        </form>
+                    </div>
+                </section>
+
+                <!-- 分页 -->
+                <nav class="flex items-center justify-center gap-3 border-t border-gray-100 p-4 dark:border-slate-800" aria-label="分页">
+                    <span></span>
+                    <a class="inline-flex items-center justify-center gap-1 rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-bold text-gray-600 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" rel="next" href="#" aria-label="下一页">下一页 <span aria-hidden="true">→</span></a>
+                </nav>
+            </div>
+        </main>
+
+        <footer class="border-t border-gray-200 dark:border-slate-800 bg-white/60 dark:bg-slate-900/60 px-6 py-4 flex flex-col sm:flex-row justify-between items-center gap-2 text-xs text-gray-400">
+            <span>© 2026 <a target="_blank" href="http://www.wellcms.com/" class="font-bold hover:text-indigo-600">WellCMS</a> 演示站 · 页面为 UI 演示稿</span>
+            <span>Processed: <b>0.0198</b>, SQL: <b>12</b></span>
+        </footer>
+    </div>
+</div>
+<script src="../assets/js/main.js"></script>
+</body>
+</html>

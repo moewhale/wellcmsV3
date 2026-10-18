@@ -65,6 +65,16 @@ class PersistenceQueue implements TaskQueueInterface
     public function push(Task $task): void
     {
         $this->storage->insertTask($task);
+        $this->publishRegistered($task);
+    }
+
+    private function isSuperseded(Task $task): bool
+    {
+        return method_exists($this->storage, 'isSupersededTask') && $this->storage->isSupersededTask($task);
+    }
+
+    private function publishRegistered(Task $task): void
+    {
         $this->inner->push($task);
 
         if ($this->eventBus !== null) {
@@ -75,6 +85,16 @@ class PersistenceQueue implements TaskQueueInterface
                 'dedupe_key' => $task->dedupeKey,
             ]);
         }
+    }
+
+    public function pushInTransaction(Task $task, callable $onRollback): void
+    {
+        if (!method_exists($this->storage, 'insertTaskInTransaction')) {
+            throw new \LogicException('Task storage has no transactional registration capability');
+        }
+        $this->storage->insertTaskInTransaction($task, function () use ($task): void {
+            $this->publishRegistered($task);
+        }, $onRollback);
     }
 
     /**
@@ -102,6 +122,10 @@ class PersistenceQueue implements TaskQueueInterface
      */
     public function requeue(Task $task): void
     {
+        if ($this->isSuperseded($task)) {
+            $this->inner->remove($task->id);
+            return;
+        }
         $task->retryCount++;
         $task->updatedAt = time();
         $task->error = '';
@@ -133,6 +157,10 @@ class PersistenceQueue implements TaskQueueInterface
      */
     public function reschedule(Task $task): void
     {
+        if ($this->isSuperseded($task)) {
+            $this->inner->remove($task->id);
+            return;
+        }
         $task->updatedAt = time();
         $this->storage->updateTaskStatus($task->id, [
             'status' => $task->status,
@@ -174,12 +202,14 @@ class PersistenceQueue implements TaskQueueInterface
         $task->completedAt = time();
         $task->updatedAt = time();
 
-        $this->storage->updateTaskStatus($task->id, [
-            'status' => \Framework\Scheduler\Task::STATUS_FAILED,
-            'error' => $task->error,
-            'completed_at' => $task->completedAt,
-            'updated_at' => $task->updatedAt,
-        ]);
+        if (!$this->isSuperseded($task)) {
+            $this->storage->updateTaskStatus($task->id, [
+                'status' => \Framework\Scheduler\Task::STATUS_FAILED,
+                'error' => $task->error,
+                'completed_at' => $task->completedAt,
+                'updated_at' => $task->updatedAt,
+            ]);
+        }
 
         // 直接操作 Redis 索引（不调用 inner，防止 remove → hDel）
         $this->redis->zRem('scheduler:running:zset', $task->id);
@@ -202,7 +232,7 @@ class PersistenceQueue implements TaskQueueInterface
             ]);
         }
 
-        $this->storage->deleteTask($task->id);
+        if (empty($task->args['storageLifecycle'])) $this->storage->deleteTask($task->id);
     }
 
     /**
@@ -217,12 +247,14 @@ class PersistenceQueue implements TaskQueueInterface
         $task->completedAt = time();
         $task->updatedAt = time();
 
-        $this->storage->updateTaskStatus($task->id, [
-            'status' => \Framework\Scheduler\Task::STATUS_SUCCESS,
-            'error' => '',
-            'completed_at' => $task->completedAt,
-            'updated_at' => $task->updatedAt,
-        ]);
+        if (!$this->isSuperseded($task)) {
+            $this->storage->updateTaskStatus($task->id, [
+                'status' => \Framework\Scheduler\Task::STATUS_SUCCESS,
+                'error' => '',
+                'completed_at' => $task->completedAt,
+                'updated_at' => $task->updatedAt,
+            ]);
+        }
 
         $ttl = 3 * 24 * 3600; // 3 天 
 

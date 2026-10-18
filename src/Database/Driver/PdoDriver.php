@@ -39,6 +39,12 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
     /** @var bool 事务内部标记，Swoole 环境下由于 PoolManager 是单例，此属性仅供 FPM 使用 */
     protected $inTransaction = false;
 
+    /** @var callable[] FPM/CLI 事务提交后回调 */
+    protected $afterCommitCallbacks = [];
+
+    /** @var callable[] FPM/CLI 事务回滚后回调 */
+    protected $afterRollbackCallbacks = [];
+
     /** @var string|null 默认事务隔离级别 */
     protected $defaultIsolationLevel = 'READ COMMITTED';
 
@@ -128,17 +134,19 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
      * 根据表名和上下文数据解析目标分片
      *
      * 使用说明：
-     * 1. 当 config/Database.php 的 sharding.tables 中未配置该表的分片规则时，
-     *    返回空字符串 ''，表示使用 default shard（未分片单库环境）。
+     * 1. sharding.tables 配置按键分片；shards[$table] 配置整表独立部署。
+     *    未配置按键分片时，有独立表连接则返回表名，否则返回 '' 使用默认库。
      * 2. 当已配置分片规则时，依据 shard_key 和一致性哈希算法返回真实分片节点 ID，
      *    如 'shard_0'、'shard_1'。
      * 3. 事务方法（transaction / beginTransaction 等）的 $shard 参数应与此方法的
      *    返回值保持一致，确保事务绑定到正确的物理数据库节点。
      */
-    protected function resolveShard(string $table, array $context = []): string
+    public function resolveShard(string $table, array $context = []): string
     {
+        $partitionOffset = strpos($table, ' PARTITION ');
+        if ($partitionOffset !== false) $table = substr($table, 0, $partitionOffset);
         if (!isset($this->shardRouters[$table])) {
-            return '';
+            return isset($this->dbConfig['shards'][$table]) ? $table : '';
         }
         $shardKey = $this->dbConfig['shard_routers'][$table]['shard_key'] ?? '';
         if (!$shardKey) {
@@ -155,21 +163,23 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
      * 批量操作时解析分片，若数据跨分片则抛出异常
      *
      * 使用说明：
-     * 1. 与 resolveShard 行为一致，未配置分片时返回 ''。
+     * 1. 与 resolveShard 行为一致，独立表返回表名，未配置的表返回 ''。
      * 2. 已配置分片时，会逐行检查 shard_key 值是否全部落在同一节点；
      *    若跨分片则抛出异常，防止批量插入/更新在分布式环境下产生数据不一致。
      */
     protected function resolveBulkShard(string $table, array $rows, string $keyColumn = ''): string
     {
-        if (empty($rows) || !isset($this->shardRouters[$table])) {
+        if (empty($rows)) {
             return '';
+        }
+        if (!isset($this->shardRouters[$table])) {
+            return isset($this->dbConfig['shards'][$table]) ? $table : '';
         }
         $shardKey = $this->dbConfig['shard_routers'][$table]['shard_key'] ?? '';
         if (!$shardKey) {
             return '';
         }
         $shards = [];
-        $hasEmpty = false;
         foreach ($rows as $row) {
             $shardValue = $row[$shardKey] ?? ($keyColumn && isset($row[$keyColumn]) ? $row[$keyColumn] : '');
             if ($shardValue === '' || $shardValue === null) {
@@ -180,7 +190,7 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
         if (count($shards) > 1) {
             throw new \RuntimeException("Cross-shard bulk operation is not supported for table '{$table}'");
         }
-        return $shards ? key($shards) : $table;
+        return key($shards);
     }
 
     protected function createGrammar(string $driver): \Framework\Database\Query\Grammar\GrammarInterface
@@ -226,17 +236,17 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
 
             if ($isCoroutine) {
                 $cacheKey = "db_master_{$shard}";
-                if (!isset($ctx->$cacheKey)) {
-                    $ctx->$cacheKey = $this->createPdo($masterCfg);
-                    $map = $ctx->dbConnectionMap ?? [];
-                    $map[spl_object_id($ctx->$cacheKey)] = $cacheKey;
-                    $ctx->dbConnectionMap = $map;
+                if (!isset($ctx[$cacheKey])) {
+                    $ctx[$cacheKey] = $this->createConnectionForNode($masterCfg, 'master', $shard, $masterCfg['node_id'] ?? 'master');
+                    $map = (array)($ctx['dbConnectionMap'] ?? []);
+                    $map[spl_object_id($ctx[$cacheKey])] = $cacheKey;
+                    $ctx['dbConnectionMap'] = $map;
                 }
-                return $ctx->$cacheKey;
+                return $ctx[$cacheKey];
             }
 
             // FPM 模式下不再使用静态变量缓存连接，防止跨请求污染与连接泄漏
-            return $this->createPdo($masterCfg);
+            return $this->createConnectionForNode($masterCfg, 'master', $shard, $masterCfg['node_id'] ?? 'master');
         }
 
         // 从库逻辑：驱动层只负责“返回一个可用连接”，不维护复杂的池逻辑（由 PoolInterface 维护）
@@ -246,10 +256,11 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
             return $this->connect('master', $shard);
         }
 
-        $sconf = $slaves[array_rand($slaves)];
+        $slaveKey = array_rand($slaves);
+        $sconf = $slaves[$slaveKey];
         $sconf['driver'] = $cfg['driver'];
 
-        return $this->createPdo($sconf);
+        return $this->createConnectionForNode($sconf, 'slave', $shard, $sconf['node_id'] ?? ('auto-node-' . $slaveKey));
     }
 
     /**
@@ -266,7 +277,7 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
         if ($role === 'master') {
             $mcfg = $cfg['master'];
             $mcfg['driver'] = $cfg['driver'];
-            return $this->createPdo($mcfg);
+            return $this->createConnectionForNode($mcfg, 'master', $shard, $mcfg['node_id'] ?? 'master');
         }
 
         $slaves = $cfg['slaves'] ?? [];
@@ -275,9 +286,10 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
         }
 
         // 随机选择一个配置进行创建
-        $sconf = $slaves[array_rand($slaves)];
+        $slaveKey = array_rand($slaves);
+        $sconf = $slaves[$slaveKey];
         $sconf['driver'] = $cfg['driver'];
-        return $this->createPdo($sconf);
+        return $this->createConnectionForNode($sconf, 'slave', $shard, $sconf['node_id'] ?? ('auto-node-' . $slaveKey));
     }
 
     protected function buildDriver(): \Framework\Database\Query\Builder
@@ -316,6 +328,13 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
         return $this->createPdo($nodeConfig);
     }
 
+    /** 诊断随本次连接参数传递，不在驱动对象上保存请求或协程状态。 */
+    private function createConnectionForNode(array $config, string $role, string $shard, $nodeId): PDO
+    {
+        $config['_wellcms_connection'] = ['role' => $role, 'shard' => $shard, 'node_id' => $nodeId];
+        return $this->createPdo($config);
+    }
+
     /**
      * 建立单个 PDO 连接
      */
@@ -347,7 +366,16 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
         }
         // =====================================================
 
-        $pdo = new PDO($dsn, $cfg['username'] ?? null, $cfg['password'] ?? null, $opts);
+        try {
+            $pdo = new PDO($dsn, $cfg['username'] ?? null, $cfg['password'] ?? null, $opts);
+        } catch (\PDOException $e) {
+            $context = $cfg['_wellcms_connection'] ?? [];
+            $context = is_array($context) ? $context : [];
+            $context['driver'] = $driver;
+            $context['shard'] = $context['shard'] ?? ($cfg['shard'] ?? 'unknown');
+            $context['node_id'] = $context['node_id'] ?? ($cfg['node_id'] ?? 'unknown');
+            throw new \Framework\Exception\Infra\PdoConnectionException($e, $context);
+        }
 
         // Oracle 性能预取优化 (Stage 3 遗漏补充)
         if ($driver === 'oci' || $driver === 'oracle') {
@@ -696,7 +724,7 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
  */
     public function truncate($tables): int
     {
-        $allowedTables = $this->getAllTables();
+        $allowedTablesByShard = [];
         $tables = is_array($tables) ? $tables : [$tables];
         $totalAffected = 0;
 
@@ -705,12 +733,14 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
                 throw new \InvalidArgumentException("Invalid table name: {$table}");
             }
 
+            $shard = $this->resolveShard($table, []);
+            $allowedTablesByShard[$shard] = $allowedTablesByShard[$shard] ?? $this->getAllTables($shard);
             $fullTableName = $this->prefix . $table;
-            if (!in_array($fullTableName, $allowedTables)) {
+            if (!in_array($fullTableName, $allowedTablesByShard[$shard])) {
                 throw new \InvalidArgumentException("Table {$table} is not allowed to truncate");
             }
 
-            $pdo = $this->connect('master', $this->resolveShard($table, []));
+            $pdo = $this->connect('master', $shard);
             $sql = $this->grammar->compileTruncate($fullTableName);
 
             try {
@@ -745,11 +775,11 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
     /**
      * 获取所有数据库表（白名单验证）
      */
-    private function getAllTables(): array
+    private function getAllTables(string $shard): array
     {
         $pdo = null;
         try {
-            $pdo = $this->connect('master');
+            $pdo = $this->connect('master', $shard);
             $stmt = $this->logAndExec($pdo, $this->grammar->compileTableListing(), []);
             $tables = [];
             while ($row = $stmt->fetch(PDO::FETCH_NUM)) {
@@ -788,16 +818,19 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
 
     public function close(): void
     {
+        // 连接被强制清理时不能让旧事务回调泄漏到后续请求/事务。
+        $this->clearTransactionCallbacks();
+
         // 清理当前运行模式下的连接缓存
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $map = $ctx->dbConnectionMap ?? [];
+            $map = $ctx['dbConnectionMap'] ?? [];
             foreach ($map as $oid => $cacheKey) {
                 if (strpos((string)$cacheKey, 'db_master_') === 0) {
-                    unset($ctx->$cacheKey, $map[$oid]);
+                    unset($ctx[$cacheKey], $map[$oid]);
                 }
             }
-            $ctx->dbConnectionMap = $map;
+            $ctx['dbConnectionMap'] = $map;
         } else {
             // FPM 模式下已移除 static 连接缓存，无需额外清理。
             // 若使用持久连接（persistent=true），由 PDO 自身管理生命周期。
@@ -1088,18 +1121,18 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $map = $ctx->dbConnectionMap ?? [];
+            $map = $ctx['dbConnectionMap'] ?? [];
             $oid = spl_object_id($pdo);
             if (isset($map[$oid])) {
                 $key = $map[$oid];
-                unset($ctx->$key, $map[$oid]);
-                $ctx->dbConnectionMap = $map;
+                unset($ctx[$key], $map[$oid]);
+                $ctx['dbConnectionMap'] = $map;
                 return;
             }
             // Fallback for legacy or slave connections
             foreach ($ctx as $key => $val) {
                 if ($val === $pdo && strpos((string)$key, 'db_') === 0) {
-                    unset($ctx->$key);
+                    unset($ctx[$key]);
                     break;
                 }
             }
@@ -1111,21 +1144,23 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
      *
      * 重要约束：
      * 1. $shard 指定事务绑定的物理分片节点。在连接池模式下，事务状态会与该 shard 关联。
-     * 2. 未启用分片（sharding.tables 为空）时，必须传 ''（默认值），表示 default shard。
-     * 3. 已启用分片时，应显式传入与主操作表一致的真实 shard ID（如 'shard_0'），
-     *    可通过 resolveShard($table, $where) 获取。
+     * 2. 默认库传 ''；整表独立部署传 shards 中配置的表名。
+     * 3. 按键分片传与主操作表一致的真实节点 ID（如 'shard_0'）。
      * 4. 事务开启后，若后续数据库操作尝试连接不同的 shard，会触发跨分片检测异常：
      *    "Cross-shard query violation: Active transaction on 'X', attempted operation on 'Y'."
      * 5. 因此，涉及多表的原子操作必须在同一事务 shard 内完成。
      *
-     * @param string $shard 分片标识，未分片环境传 ''，分片环境传真实 shard ID
+     * @param string $shard 默认库传 ''，独立表传表名，按键分片传真实节点 ID
      * @throws \PDOException
      */
     public function beginTransaction(string $shard = ''): bool
     {
         $pdo = $this->connect('master', $shard);
         $ok = $pdo->beginTransaction();
-        $this->setTransactionState(true);
+        if ($ok) {
+            $this->resetTransactionCallbacks();
+            $this->setTransactionState(true);
+        }
 
         return $ok;
     }
@@ -1145,11 +1180,18 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
     public function commit(string $shard = ''): bool
     {
         $pdo = $this->connect('master', $shard);
+        $committed = false;
         try {
-            return $pdo->commit();
+            $committed = $pdo->commit();
+            return $committed;
         } finally {
             $this->setTransactionState(false);
             $this->release($pdo);
+            if ($committed) {
+                $this->finalizeTransactionCallbacks(true);
+            } else {
+                $this->clearTransactionCallbacks();
+            }
         }
     }
 
@@ -1167,12 +1209,123 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
     public function rollback(string $shard = ''): bool
     {
         $pdo = $this->connect('master', $shard);
+        $rolledBack = false;
         try {
-            return $pdo->rollBack();
+            $rolledBack = $pdo->rollBack();
+            return $rolledBack;
         } finally {
             $this->setTransactionState(false);
             $this->release($pdo);
+            if ($rolledBack) {
+                $this->finalizeTransactionCallbacks(false);
+            } else {
+                $this->clearTransactionCallbacks();
+            }
         }
+    }
+
+    /**
+     * 注册事务成功提交后的副作用。无活动事务时立即执行。
+     *
+     * 该方法故意不加入 DatabaseInterface，以保持第三方驱动与旧测试 fake 兼容。
+     */
+    public function afterCommit(callable $callback): void
+    {
+        if (!$this->inTransaction()) {
+            $callback();
+            return;
+        }
+        $this->appendTransactionCallback('commit', $callback);
+    }
+
+    /**
+     * 注册事务最终回滚后的补偿。无活动事务时不保留。
+     */
+    public function afterRollback(callable $callback): void
+    {
+        if (!$this->inTransaction()) return;
+        $this->appendTransactionCallback('rollback', $callback);
+    }
+
+    /** 初始化最外层事务的回调队列。 */
+    protected function resetTransactionCallbacks(): void
+    {
+        $ctx = self::coroContext();
+        if ($ctx !== null) {
+            $map = $ctx['dbTransactionCallbacks'] ?? [];
+            $map[(string)\spl_object_id($this)] = ['commit' => [], 'rollback' => []];
+            $ctx['dbTransactionCallbacks'] = $map;
+            return;
+        }
+        $this->afterCommitCallbacks = [];
+        $this->afterRollbackCallbacks = [];
+    }
+
+    /** @param string $type commit|rollback */
+    private function appendTransactionCallback(string $type, callable $callback): void
+    {
+        $ctx = self::coroContext();
+        if ($ctx !== null) {
+            $map = $ctx['dbTransactionCallbacks'] ?? [];
+            $key = (string)\spl_object_id($this);
+            if (!isset($map[$key])) $map[$key] = ['commit' => [], 'rollback' => []];
+            $map[$key][$type][] = $callback;
+            $ctx['dbTransactionCallbacks'] = $map;
+            return;
+        }
+        if ($type === 'commit') {
+            $this->afterCommitCallbacks[] = $callback;
+        } else {
+            $this->afterRollbackCallbacks[] = $callback;
+        }
+    }
+
+    /**
+     * 事务已确定提交/回滚后刷新对应队列。
+     * 回调异常不能把已提交事务伪装成可回滚失败。
+     */
+    protected function finalizeTransactionCallbacks(bool $committed): void
+    {
+        $callbacks = [];
+        $ctx = self::coroContext();
+        if ($ctx !== null) {
+            $map = $ctx['dbTransactionCallbacks'] ?? [];
+            $key = (string)\spl_object_id($this);
+            if (isset($map[$key])) {
+                $callbacks = $map[$key][$committed ? 'commit' : 'rollback'] ?? [];
+                unset($map[$key]);
+                $ctx['dbTransactionCallbacks'] = $map;
+            }
+        } else {
+            $callbacks = $committed ? $this->afterCommitCallbacks : $this->afterRollbackCallbacks;
+            $this->afterCommitCallbacks = [];
+            $this->afterRollbackCallbacks = [];
+        }
+
+        foreach ($callbacks as $callback) {
+            try {
+                $callback();
+            } catch (\Throwable $e) {
+                $this->logError('Database transaction callback failed', [
+                    'phase' => $committed ? 'after_commit' : 'after_rollback',
+                    'exception' => $e,
+                ]);
+            }
+        }
+    }
+
+    /** 丢弃当前驱动/协程的未完成事务回调。 */
+    protected function clearTransactionCallbacks(): void
+    {
+        $ctx = self::coroContext();
+        if ($ctx !== null) {
+            $map = $ctx['dbTransactionCallbacks'] ?? [];
+            unset($map[(string)\spl_object_id($this)]);
+            $ctx['dbTransactionCallbacks'] = $map;
+            return;
+        }
+        $this->afterCommitCallbacks = [];
+        $this->afterRollbackCallbacks = [];
     }
 
     /**
@@ -1188,7 +1341,7 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            return $ctx->inTransaction ?? false;
+            return $ctx['inTransaction'] ?? false;
         }
         return $this->inTransaction;
     }
@@ -1201,7 +1354,7 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $ctx->inTransaction = $state;
+            $ctx['inTransaction'] = $state;
         } else {
             $this->inTransaction = $state;
         }
@@ -1223,16 +1376,22 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
 
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $ctx->dbIsolationLevel = $level;
+            $ctx['dbIsolationLevel'] = $level;
         }
 
         $pdo = $this->connect('master', $shard);
         try {
-            $sql = "SET SESSION TRANSACTION ISOLATION LEVEL {$level}";
-            $this->logAndExec($pdo, $sql, []);
+            $this->applyIsolationLevel($pdo, $level, $shard);
         } finally {
             $this->release($pdo);
         }
+    }
+
+    /** 在归还连接前完成隔离级别设置及驱动自身的状态同步。 */
+    protected function applyIsolationLevel(PDO $pdo, string $level, string $shard): void
+    {
+        $sql = "SET SESSION TRANSACTION ISOLATION LEVEL {$level}";
+        $this->logAndExec($pdo, $sql, []);
     }
 
     /**
@@ -1240,20 +1399,17 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
      *
      * 使用说明与最佳实践：
      * 1. $shard 是事务绑定的物理分片标识。显式声明 shard 是防御跨分片异常的核心手段。
-     * 2. 未启用分片时，应传 ''（默认值）：
+     * 2. 默认库传 ''（默认值）：
      *    $db->transaction(function () { ... });
      *    或显式：$db->transaction(function () { ... }, 3, '');
-     * 3. 已启用分片时，必须传主操作表对应的真实 shard ID，通常通过 resolveShard 获取：
-     *    $shard = $db->resolveShard('user', ['user_id' => $userId]);
-     *    $db->transaction(function () { ... }, 3, $shard);
-     * 4. 事务回调内部涉及的所有表操作，必须落在同一 shard 内。若事务在 shard '' 上开启，
-     *    但内部某张表的 resolveShard 返回了 'forum_thread'（旧版本的误报行为），
-     *    ProxyDriver::connect 会抛出 "Cross-shard query violation"。
+     * 3. 整表独立部署传表名；按键分片传主操作表对应的真实节点 ID。
+     * 4. 事务内所有表操作必须落在同一配置键对应的物理库，否则 ProxyDriver
+     *    会抛出 "Cross-shard query violation"。
      * 5. 本方法已内置连接断开重试机制（maxAttempts 次），重试时会清理失效连接。
      *
      * @param callable $callback 事务回调，接收当前 DatabaseInterface 实例
      * @param int $maxAttempts 最大重试次数，默认 3
-     * @param string $shard 分片标识，未分片环境传 ''，分片环境传真实 shard ID
+     * @param string $shard 默认库传 ''，独立表传表名，按键分片传真实节点 ID
      * @return mixed 回调返回值
      * @throws \Throwable
      */
@@ -1264,22 +1420,58 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
             $attempt++;
             try {
                 $this->beginTransaction($shard);
-                try {
-                    $result = $callback($this);
-                    $this->commit($shard);
-                    return $result;
-                } catch (\Throwable $e) {
-                    $this->rollback($shard);
-                    throw $e;
-                }
             } catch (\Throwable $e) {
-                // 如果是连接断开导致的异常，且还有重试机会，则清理连接并重试
-                if ($this->isConnectionLost($e) && $attempt < $maxAttempts) {
+                if ($this->isConnectionLost($e)) {
                     $this->handleConnectionLoss($shard);
-                    continue;
+                    if ($attempt < $maxAttempts) {
+                        continue;
+                    }
                 }
                 throw $e;
             }
+
+            try {
+                $result = $callback($this);
+            } catch (\Throwable $e) {
+                $connectionCleaned = false;
+                try {
+                    $this->rollback($shard);
+                } catch (\Throwable $rollbackError) {
+                    $this->logError('Database rollback failed while preserving original transaction error', [
+                        'exception' => $rollbackError,
+                        'original_exception' => $e,
+                    ]);
+                    $this->handleConnectionLoss($shard);
+                    $connectionCleaned = true;
+                }
+
+                if ($this->isConnectionLost($e)) {
+                    if (!$connectionCleaned) {
+                        $this->handleConnectionLoss($shard);
+                    }
+                    if ($attempt < $maxAttempts) {
+                        continue;
+                    }
+                }
+                throw $e;
+            }
+
+            if ($result === false) {
+                $this->rollback($shard);
+                return false;
+            }
+
+            try {
+                $this->commit($shard);
+            } catch (\Throwable $e) {
+                // commit 一旦发出，其服务端结果可能已生效；禁止自动重放整个业务闭包。
+                if ($this->isConnectionLost($e)) {
+                    $this->handleConnectionLoss($shard);
+                }
+                throw $e;
+            }
+
+            return $result;
         }
         throw new \RuntimeException('Database transaction failed after max attempts.');
     }

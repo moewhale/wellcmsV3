@@ -85,7 +85,7 @@
 			</a>
 			<?php } else { ?>
 			<a href="<?php echo $extension['operation_links']['download']['url'];?>"
-				data-arg='<?php echo json_encode($extension['operation_links']['install']['arg']); ?>'
+				data-arg='<?php echo json_encode($extension['operation_links']['download']['arg'] ?? []); ?>'
 			class="ajax-post px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-lg shadow-indigo-500/30 transition-all font-black uppercase tracking-widest text-[10px]">
 				<?php echo $btnText;?>
 			</a>

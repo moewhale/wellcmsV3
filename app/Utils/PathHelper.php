@@ -72,7 +72,17 @@ class PathHelper
             $base . '/storage/tmp/views/'   => $base . '/',
         ];
         foreach ($replacements as $search => $replace) {
+            if (stripos($path, $search) === false) {
+                continue;
+            }
             $path = str_ireplace($search, $replace, $path);
+            // Compile 不可变生成物在扩展名前嵌入完整 SHA-256 代际；诊断输出
+            // 必须还原为原始源码/模板名，不能把内部发布身份暴露成业务路径。
+            $path = preg_replace(
+                '/\.[a-f0-9]{64}(?=\.(?:php|htm|html|tpl)\b)/i',
+                '',
+                $path
+            );
         }
         return $path;
     }

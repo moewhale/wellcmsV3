@@ -159,7 +159,7 @@ echo "权限检查通过"
 
 ### 3.1 DEBUG 常量说明
 
-`bin/well-server` 脚本第 15 行定义了 `DEBUG` 常量，**该值直接影响错误报告级别与异常显示**：
+`bin/well-server` 从进程环境变量 `WELLCMS_DEBUG` 解析 `DEBUG` 常量，**该值直接影响错误报告级别与异常显示**。为兼容旧部署，专用变量未定义时仍读取 `DEBUG`；非法或缺失值一律按 `0` 处理：
 
 | DEBUG 值 | 含义 | 适用场景 |
 |----------|------|----------|
@@ -167,13 +167,13 @@ echo "权限检查通过"
 | `1` | 显示除 Notice/Deprecated 外的错误 | 测试环境 |
 | `2` | 显示所有错误（`E_ALL`） | 开发调试 |
 
-修改方式：编辑 `bin/well-server` 第 15 行：
+启动前通过进程环境设置，禁止为切换调试模式修改入口源代码：
 
-```php
-define('DEBUG', 0); // 生产环境
+```bash
+WELLCMS_DEBUG=0 php bin/well-server start
 ```
 
-> 💡 **排查提示**：如果前台启动 `php bin/well-server start` 后 Banner 已打印但进程立即退出，且 `storage/logs/swoole.log` 为空，请临时将 `DEBUG` 设为 `2` 重新启动，即可看到隐藏的 PHP Fatal Error（常见于 Swoole 6.0 API 兼容性问题）。
+> 💡 **排查提示**：如果前台启动后立即退出且日志为空，可仅在受控终端临时执行 `WELLCMS_DEBUG=2 php bin/well-server start` 查看 Fatal；排查结束后恢复为 `0`。
 
 ### 3.2 基础运维命令
 
@@ -330,7 +330,7 @@ stopsig=TERM
 stopwaitsecs=30
 killasgroup=true
 stopasgroup=true
-environment=DEBUG="0",PHP_MEMORY_LIMIT="512M"
+environment=WELLCMS_DEBUG="0",PHP_MEMORY_LIMIT="512M"
 stderr_logfile=/var/log/wellcms-swoole.err.log
 stdout_logfile=/var/log/wellcms-swoole.out.log
 stderr_logfile_maxbytes=50MB
@@ -438,7 +438,7 @@ ExecStop=/usr/bin/php /www/wwwroot/wellcms/bin/well-server stop
 ExecReload=/usr/bin/php /www/wwwroot/wellcms/bin/well-server reload
 Restart=on-failure
 RestartSec=5
-Environment=DEBUG=0
+Environment=WELLCMS_DEBUG=0
 Environment=PHP_MEMORY_LIMIT=512M
 
 [Install]
@@ -737,7 +737,7 @@ php -r "require 'app/Core/Compile.php'; require 'app/Core/Autoload.php'; \Framew
 - 修改 `src/Http/SwooleServer.php` 或 `bin/well-server`
 - 修改 Swoole 配置项（`worker_num`、`max_request` 等）
 - 修改 `composer.json` 并重新加载自动加载器
-- 修改 `.env` 或核心启动常量（如 `DEBUG`）
+- 修改进程环境（如 `WELLCMS_DEBUG`）
 
 ### 7.5 文件变更自动热重载（开发环境）
 
@@ -781,7 +781,7 @@ rm -f storage/tmp/wellcms.pid
 
 # 4. 前台启动查看详细错误
 php bin/well-server start
-# 或临时将 DEBUG 设为 2 查看堆栈
+# 或仅在受控前台进程临时设置 WELLCMS_DEBUG=2 查看堆栈
 ```
 
 **Swoole 6.0 / PHP 8.4 专项排查：**
@@ -1049,7 +1049,7 @@ kill -USR1 $(cat storage/tmp/wellcms.pid)
 - [ ] Swoole 扩展已加载且 openssl 开启（6.0+ 需注意 API 差异）
 - [ ] Swoole 扩展**仅在 CLI 模式加载**，FPM 中未加载（防止 async-io 报错与事件循环冲突）
 - [ ] `storage/tmp` 与 `storage/logs` 对运行用户可写
-- [ ] `bin/well-server` 中 `DEBUG` 已设为 `0`
+- [ ] 进程环境 `WELLCMS_DEBUG` 已设为 `0`（缺失/非法值也会默认 0）
 - [ ] Supervisor 配置已加载且 `autostart=true`
 - [ ] Scheduler 也在 Supervisor 中正常运行
 - [ ] Nginx 已配置静态资源 location 与上传目录脚本禁止

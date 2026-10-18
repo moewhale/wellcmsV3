@@ -34,6 +34,15 @@ class ScriptRunner
             return;
         }
 
-        include \App\Core\Compile::include($scriptPath);
+        $result = include \App\Core\Compile::include($scriptPath);
+        if ($result === false) {
+            throw new \RuntimeException('Core upgrade script returned failure');
+        }
+        if (is_array($result) && array_key_exists('code', $result)
+            && !in_array($result['code'], [0, '0'], true)) {
+            $message = isset($result['message']) && is_scalar($result['message'])
+                ? (string)$result['message'] : 'Core upgrade script reported failure';
+            throw new \RuntimeException($message);
+        }
     }
 }

@@ -43,103 +43,139 @@ class MailService
             if (empty($smtplist)) {
                 return ['status' => 'error', 'message' => 'mailbox_not_configured', 'detail' => []];
             }
-
-            // 2. 随机选择一个 SMTP 服务器进行负载均衡
-            $n = array_rand($smtplist);
-            $smtp = $smtplist[$n];
-            if (empty($smtp['host']) || empty($smtp['port']) || empty($smtp['username']) || empty($smtp['password'])) {
+            if (!is_array($smtplist)) {
                 return ['status' => 'error', 'message' => 'configuration_error', 'detail' => []];
             }
-
-            // 3. 解析收件人
             $recipients = $this->parseRecipients($to);
             if (empty($recipients)) {
                 return ['status' => 'error', 'message' => 'empty_recipients', 'detail' => []];
             }
 
-            // 4. 初始化 PHPMailer 并设置基础抗垃圾邮件配置
-            $mail = $this->initMailer($smtp);
-            $mail->Subject = $subject;
-            $mail->Body = $body;
-            $mail->AltBody = $options['plain_text'] ?? strip_tags(str_replace(['<br>', '<br/>', '</p>'], ["\n", "\n", "\n\n"], $body));
-
-            // 设置回复地址
-            if (!empty($options['reply_to'])) {
-                $mail->addReplyTo($options['reply_to']);
+            // 随机起点保留负载分配；只在投递前切换服务器，避免 DATA 结果未知时重复投递。
+            $serverIds = array_keys($smtplist);
+            shuffle($serverIds);
+            $mail = null;
+            $smtp = [];
+            $serverId = null;
+            $failureMessage = 'configuration_error';
+            foreach ($serverIds as $candidateId) {
+                $candidate = $smtplist[$candidateId];
+                $candidateMail = null;
+                $stage = 'configuration';
+                try {
+                    if (!is_array($candidate) || empty($candidate['host']) || empty($candidate['port'])
+                        || empty($candidate['username']) || !isset($candidate['password']) || $candidate['password'] === '') {
+                        throw new \InvalidArgumentException('Incomplete SMTP configuration');
+                    }
+                    $fromEmail = trim((string)($candidate['email'] ?? $candidate['username']));
+                    if (!filter_var($fromEmail, FILTER_VALIDATE_EMAIL)
+                        || !in_array($candidate['encryption'] ?? 'auto', ['auto', 'ssl', 'tls'], true)
+                        || !preg_match('/\A[A-Za-z0-9_-]+\z/', (string)$candidate['password'])
+                        || preg_match('/[&<>"\']/', (string)$candidate['username'])
+                        || (!empty($candidate['dkim_passphrase']) && !preg_match('/\A[A-Za-z0-9_-]+\z/', (string)$candidate['dkim_passphrase']))
+                        || (int)$candidate['port'] < 1 || (int)$candidate['port'] > 65535) {
+                        throw new \InvalidArgumentException('Invalid SMTP configuration');
+                    }
+                    $candidateMail = $this->initMailer($candidate);
+                    $candidateMail->Subject = $subject;
+                    $candidateMail->Body = $body;
+                    $candidateMail->AltBody = $options['plain_text'] ?? strip_tags(str_replace(['<br>', '<br/>', '</p>'], ["\n", "\n", "\n\n"], $body));
+                    if (!empty($options['reply_to'])) {
+                        $candidateMail->addReplyTo($options['reply_to']);
+                    }
+                    // 发件身份必须先确定，DKIM identity 才能与真实 From 一致。
+                    $candidateMail->setFrom($fromEmail, $this->appConfig['sitename'] ?? 'WellCMS');
+                    $candidateMail->Sender = $fromEmail;
+                    $this->applyDKIM($candidateMail, $candidate);
+                    $candidateMail->SMTPKeepAlive = count($recipients) > 1;
+                    $stage = 'connect';
+                    if (!$candidateMail->smtpConnect()) {
+                        throw new \RuntimeException('SMTP connection failed');
+                    }
+                    $mail = $candidateMail;
+                    $smtp = $candidate;
+                    $serverId = $candidateId;
+                    break;
+                } catch (\Throwable $e) {
+                    $candidateMessage = $this->recordFailure($candidateMail, is_array($candidate) ? $candidate : [], $candidateId, $stage, $e);
+                    if ($stage !== 'configuration' || $failureMessage === 'configuration_error') {
+                        $failureMessage = $candidateMessage;
+                    }
+                    if ($candidateMail !== null) {
+                        $candidateMail->getSMTPInstance()->close();
+                    }
+                }
             }
-
-            // 5. 应用 DKIM 签名 (如果配置中存在)
-            $this->applyDKIM($mail, $smtp);
-
-            // 发件人
-            $mail->setFrom($smtp['username'], $this->appConfig['sitename'] ?? 'WellCMS');
+            if ($mail === null) {
+                return ['status' => 'error', 'message' => $failureMessage, 'detail' => []];
+            }
 
             $batchMode = $options['batch_mode'] ?? 'separate';
             $results = [];
-
-            if ($batchMode === 'bcc' && count($recipients) > 1) {
-                // 模式 A: 密送
-                foreach ($recipients as $email => $name) {
-                    $mail->addBCC($email, is_string($name) ? $name : '');
-                }
-                $mail->addAddress($smtp['username'], 'Undisclosed-recipients');
-                $status = $mail->send();
-                $results['all'] = $status;
-                if (!$status) {
-                    return ['status' => 'error', 'message' => $mail->ErrorInfo, 'detail' => $results];
-                }
-            } else {
-                // 模式 B: 独立发送
-                $successCount = 0;
-
-                // 如果超过 2 位收件人，启用保持连接模式，提高效率并减少被目标服务器拉黑的权重
-                if (count($recipients) > 1) {
-                    $mail->SMTPKeepAlive = true;
-                }
-
-                foreach ($recipients as $email => $name) {
-                    $mail->clearAddresses();
-                    $mail->addAddress($email, is_string($name) ? $name : '');
-
-                    if (!empty($options['cc'])) {
-                        $this->addAddressesToMailer($mail, 'cc', $options['cc']);
+            $successCount = 0;
+            try {
+                if ($batchMode === 'bcc' && count($recipients) > 1) {
+                    try {
+                        foreach ($recipients as $email => $name) {
+                            $mail->addBCC($email, $name);
+                        }
+                        $mail->addAddress($mail->From, 'Undisclosed-recipients');
+                        if (!$mail->send()) {
+                            throw new \RuntimeException('SMTP send failed');
+                        }
+                        $results['all'] = true;
+                        $successCount = 1;
+                    } catch (\Throwable $e) {
+                        $failureMessage = $this->recordFailure($mail, $smtp, $serverId, 'send', $e);
+                        $results['all'] = $failureMessage;
+                        $mail->getSMTPInstance()->close();
                     }
-
-                    // 发信抖动：防止突发大流量发信触发频率限制 (Anti-Spam Jitter)
-                    if ($successCount > 0 && !empty($options['jitter'])) {
-                        usleep(random_int(200000, 800000)); // 随机延迟 200-800ms
-                    }
-
-                    if ($mail->send()) {
-                        $successCount++;
-                        $results[$email] = true;
-                    } else {
-                        $results[$email] = $mail->ErrorInfo;
-                        // 如果中途连接断开，尝试恢复
-                        if (!$mail->getSMTPInstance()->connected()) {
-                            $mail->getSMTPInstance()->connect($smtp['host'], $smtp['port']);
+                } else {
+                    foreach ($recipients as $email => $name) {
+                        try {
+                            $mail->clearAddresses();
+                            $mail->clearCCs();
+                            $mail->addAddress($email, $name);
+                            if (!empty($options['cc'])) {
+                                $this->addAddressesToMailer($mail, 'cc', $options['cc']);
+                            }
+                            if ($successCount > 0 && !empty($options['jitter'])) {
+                                usleep(random_int(200000, 800000));
+                            }
+                            if (!$mail->send()) {
+                                throw new \RuntimeException('SMTP send failed');
+                            }
+                            $successCount++;
+                            $results[$email] = true;
+                        } catch (\Throwable $e) {
+                            $failureMessage = $this->recordFailure($mail, $smtp, $serverId, 'send', $e);
+                            $results[$email] = $failureMessage;
+                            // 下一位收件人由 PHPMailer 完整重连、协商和认证，不重投本次失败邮件。
+                            $mail->getSMTPInstance()->close();
                         }
                     }
                 }
-
-                // 关闭连接
-                if ($mail->SMTPKeepAlive) {
+            } finally {
+                try {
                     $mail->smtpClose();
-                }
-
-                if ($successCount === 0) {
-                    return ['status' => 'error', 'message' => 'all_failed', 'detail' => $results];
+                } catch (\Throwable $e) {
+                    $this->recordFailure($mail, $smtp, $serverId, 'close', $e);
+                    $mail->getSMTPInstance()->close();
                 }
             }
 
-            return ['status' => 'success', 'message' => 'send_success', 'detail' => $results];
+            return [
+                'status' => $successCount > 0 ? 'success' : 'error',
+                'message' => $successCount > 0 ? 'send_success' : $failureMessage,
+                'detail' => $results,
+            ];
         } catch (\Throwable $e) {
-            $this->logger->error("MailService Send Error: " . $e->getMessage());
-            return ['status' => 'error', 'message' => $e->getMessage(), 'detail' => []];
+            $this->recordFailure(null, [], null, 'load', $e);
+            return ['status' => 'error', 'message' => 'mail_send_failed', 'detail' => []];
         }
     }
 
-    private function initMailer(array $smtp): \App\PHPMailer\PHPMailer
+    protected function initMailer(array $smtp): \App\PHPMailer\PHPMailer
     {
         $mail = new \App\PHPMailer\PHPMailer(true);
         $mail->CharSet = 'utf-8';
@@ -152,13 +188,12 @@ class MailService
         $mail->SMTPAuth = true;
         $mail->Username = $smtp['username'];
         $mail->Password = $smtp['password'];
-        $mail->SMTPSecure = 'ssl';
+        $encryption = $smtp['encryption'] ?? 'auto';
+        $defaultEncryption = in_array((int)$smtp['port'], [25, 587, 2587], true) ? 'tls' : 'ssl';
+        $mail->SMTPSecure = $encryption === 'auto' ? $defaultEncryption : $encryption;
         $mail->Port = $smtp['port'];
         $mail->SMTPAutoTLS = false;
         $mail->Timeout = 15;
-
-        // 设置 Return-Path，确保退信处理链路完整
-        $mail->Sender = $smtp['username'];
 
         // 抗垃圾邮件 (Anti-Spam) Header 优化
         $mail->XMailer = 'WellCMS Mailer';
@@ -173,6 +208,49 @@ class MailService
         $mail->isHTML(true);
 
         return $mail;
+    }
+
+    private function recordFailure(?\App\PHPMailer\PHPMailer $mail, array $smtp, $serverId, string $stage, \Throwable $e): string
+    {
+        $transport = $mail !== null ? $mail->getSMTPInstance() : null;
+        $diagnostics = [
+            'exception' => get_class($e),
+            'message' => $e->getMessage(),
+            'mailer_error' => $mail !== null ? $mail->ErrorInfo : '',
+            'smtp_error' => $transport !== null ? $transport->getError() : [],
+            'last_reply' => $transport !== null ? $transport->getLastReply() : '',
+        ];
+        $message = 'mail_send_failed';
+        if ($stage === 'configuration') {
+            $message = 'configuration_error';
+        } elseif ($stage === 'connect') {
+            $authenticationFailed = preg_match('/authenticat|AUTH command|^53[458][ -]/im', $e->getMessage() . "\n" . $diagnostics['last_reply']);
+            $message = $authenticationFailed ? 'mail_authentication_failed' : 'mail_connection_failed';
+        }
+        // 仅记录错误快照；不记录正文，并遮蔽凭据及 AUTH 常用编码。
+        $secrets = [];
+        foreach (['username', 'password', 'dkim_passphrase'] as $key) {
+            if (isset($smtp[$key]) && $smtp[$key] !== '') {
+                $secrets[] = (string)$smtp[$key];
+                $secrets[] = base64_encode((string)$smtp[$key]);
+            }
+        }
+        if (isset($smtp['username'], $smtp['password'])) {
+            $secrets[] = base64_encode("\0" . $smtp['username'] . "\0" . $smtp['password']);
+        }
+        array_walk_recursive($diagnostics, static function (&$value) use ($secrets): void {
+            if (is_string($value)) {
+                $value = str_replace($secrets, '[redacted]', $value);
+            }
+        });
+        $this->logger->error('MailService SMTP failure', [
+            'stage' => $stage,
+            'smtp_index' => $serverId,
+            'host' => str_replace($secrets, '[redacted]', (string)($smtp['host'] ?? '')),
+            'port' => $smtp['port'] ?? null,
+            'diagnostics' => $diagnostics,
+        ]);
+        return $message;
     }
 
     /**

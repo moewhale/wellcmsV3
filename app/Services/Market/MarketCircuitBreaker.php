@@ -10,9 +10,8 @@ namespace App\Services\Market;
 use App\Services\System\KeyValueService;
 
 /**
- * 熔断器（降级机制）
- * 职责：服务端故障时自动熔断，使用本地缓存降级
- * 遵循 Skill #16: 非主键聚合统计冗余化
+ * 熔断器
+ * 职责：服务端故障时拒绝新请求，防止故障放大。
  */
 class MarketCircuitBreaker
 {
@@ -164,8 +163,6 @@ class MarketCircuitBreaker
 
     /**
      * 是否处于降级模式
-     *
-     * @return bool
      */
     public function isDegraded(): bool
     {

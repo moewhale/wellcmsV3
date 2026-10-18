@@ -62,9 +62,12 @@ class MetaDispatcherMiddleware implements \Framework\Http\Interfaces\MiddlewareI
         };
 
         \Framework\Http\Psr7\RequestStack::push($request);
-
-        // 执行路由级管道，返回最终 Response
-        $pipeline = new \Framework\Http\Middleware\Pipeline($stack, new \Framework\Http\Router\RequestHandler\CallableHandler($callable));
-        return $pipeline->handle($request);
+        try {
+            // 执行路由级管道，返回最终 Response
+            $pipeline = new \Framework\Http\Middleware\Pipeline($stack, new \Framework\Http\Router\RequestHandler\CallableHandler($callable));
+            return $pipeline->handle($request);
+        } finally {
+            \Framework\Http\Psr7\RequestStack::pop();
+        }
     }
 }

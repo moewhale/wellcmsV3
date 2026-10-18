@@ -138,10 +138,6 @@ class ExternalLinkService
         return $this->getUrlGenerator()->url('redirect/external', ['target' => $encoded]);
     }
 
-    // ========================================================================
-    //  内部方法
-    // ========================================================================
-
     /**
      * 标记需要前端弹窗确认的外链
      * 此时 SafeHelper 已注入 rel/target，本方法仅添加 data-external 标记

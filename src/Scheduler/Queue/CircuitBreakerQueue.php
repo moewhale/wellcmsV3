@@ -56,12 +56,25 @@ class CircuitBreakerQueue implements TaskQueueInterface
 
         if ($this->breaker->isOpen($task->className)) {
             $count = $this->breaker->getFailureCount($task->className);
-            throw new \RuntimeException(
+            $cause = new \RuntimeException(
                 'Circuit breaker is open for ' . $task->className
                 . ' (' . $count . ' failures in window)'
             );
+            throw new \Framework\Scheduler\Exception\TaskDispatchException(
+                \Framework\Scheduler\TaskDispatchResult::OUTCOME_NOT_SUBMITTED,
+                $cause
+            );
         }
         $this->inner->push($task);
+    }
+
+    public function pushInTransaction(Task $task, callable $onRollback): void
+    {
+        if (!method_exists($this->inner, 'pushInTransaction')) throw new \LogicException('Queue has no persistent transaction registration');
+        if (strpos($task->dedupeKey, 'system:') !== 0 && $this->breaker->isOpen($task->className)) {
+            throw new \LogicException('Circuit breaker is open for transactional task registration');
+        }
+        $this->inner->pushInTransaction($task, $onRollback);
     }
 
     /**

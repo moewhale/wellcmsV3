@@ -201,7 +201,7 @@ class RuntimeStats
 
     /**
      * 专门供 Crontab 或 CLI 模式下直接触发零点重置：
-     *   php /path/to/index.php runtime:resetDaily
+     * php /path/to/index.php runtime:resetDaily
      */
     public function cronResetDaily(): void
     {

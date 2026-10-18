@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+    演示文件：作者页（对应 plugins/well_article/views/htm/article_author.htm）
+    功能：居中作者头（身份徽章/机构/资历/专长） / 文章列表 / 游标分页
+    纯静态演示稿，Idea Box 玩乐编辑风
+-->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>顾云帆 - 作者 - WellCMS 演示</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+    <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body class="flex flex-col min-h-screen bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-gray-200 font-sans">
+
+    <header class="sticky top-0 z-50 bg-stone-50/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-stone-200 dark:border-slate-800">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <a href="index.htm" class="flex items-center gap-2 shrink-0">
+                    <div class="w-8 h-8 rounded-lg bg-rose-500 flex items-center justify-center text-white font-black text-sm shadow-md shadow-rose-500/30">W</div>
+                    <span class="text-xl font-black tracking-tight">WellCMS <span class="text-rose-500">3.0</span></span>
+                </a>
+                <nav class="hidden md:flex items-center gap-6 text-sm font-bold text-stone-500 dark:text-gray-400">
+                    <a href="index.htm" class="hover:text-rose-500 transition-colors">首页</a>
+                    <a href="article_index.htm" class="text-stone-900 dark:text-white border-b-2 border-rose-500 pb-0.5">文章</a>
+                    <a href="forum_index.htm" class="hover:text-rose-500 transition-colors">论坛</a>
+                    <a href="forum_collection_list.htm" class="hover:text-rose-500 transition-colors">合集</a>
+                </nav>
+                <div class="flex items-center gap-2">
+                    <button onclick="wellcms.toggleDarkMode()" class="p-2 rounded-lg hover:bg-stone-200 dark:hover:bg-white/10 transition-colors" title="切换深浅色"><span class="dark:hidden">🌙</span><span class="hidden dark:inline">☀️</span></button>
+                    <a href="my_home.htm" title="个人中心"><span class="w-9 h-9 rounded-xl bg-gradient-to-br from-rose-400 to-amber-500 flex items-center justify-center text-white text-sm font-black shadow">林</span></a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 mx-auto w-full max-w-7xl px-4 py-12 md:px-8" id="main-content">
+        <!-- 居中作者头 -->
+        <header class="mx-auto mb-12 max-w-3xl text-center">
+            <!-- 本人视角时显示编辑按钮（profile_edit_url） -->
+            <p class="mb-4">
+                <a class="inline-flex items-center justify-center gap-1 rounded-xl border border-stone-200 bg-white px-4 py-2 text-xs font-black text-stone-600 transition hover:border-stone-900 hover:text-stone-900 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-300" href="article_author_profile.htm">编辑作者资料</a>
+            </p>
+            <span class="inline-flex w-20 h-20 rounded-3xl bg-blue-600 items-center justify-center text-3xl font-black text-white shadow-xl shadow-blue-600/25">顾</span>
+            <p class="mt-4 text-sm font-black text-blue-600 uppercase tracking-[0.2em]">作者</p>
+            <h1 class="mt-2 text-3xl font-black tracking-tight md:text-4xl">顾云帆</h1>
+            <p class="mt-3 text-base leading-relaxed text-stone-500 dark:text-gray-400 font-medium">
+                专注于高性能 PHP 与分布式存储，负责 WellCMS 分区与调度模块。
+            </p>
+            <p class="mt-4 flex flex-wrap justify-center gap-2">
+                <span class="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-black text-stone-600 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-300">机构 · WellCMS 核心团队</span>
+            </p>
+            <p class="mt-2 flex flex-wrap justify-center gap-2">
+                <span class="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-xs font-black text-violet-600 dark:border-violet-500/40 dark:bg-violet-500/10 dark:text-violet-400">10 年 PHP 架构经验</span>
+                <span class="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-600 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-400">大数据存储 / 分布式</span>
+            </p>
+        </header>
+
+        <!-- 作者文章列表 -->
+        <section class="grid w-full gap-4" aria-label="文章列表">
+            <article class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm hover:shadow-md transition-shadow p-6" itemscope itemtype="https://schema.org/Article">
+                <div class="flex flex-wrap items-center gap-2 text-xs text-stone-400 font-bold">
+                    <span class="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-1 text-blue-700 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-400">
+                        <svg class="h-3 w-3" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l2.4 7.2H22l-6 4.8 2.4 7.2-6.4-4.8L5.6 21.2 8 14 2 9.2h7.6z"/></svg>
+                        推荐 · 等级 2
+                    </span>
+                    <a class="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-stone-50 px-2 py-1 text-stone-600 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="article_category.htm" itemprop="articleSection">开发笔记</a>
+                    <time itemprop="datePublished" datetime="2026-09-12T10:30:00+08:00">2026-09-12</time>
+                </div>
+                <h2 class="mt-3 text-xl font-black leading-relaxed" itemprop="headline">
+                    <a class="transition hover:text-blue-600" href="article_detail.htm" itemprop="url">模板编译与物理压平详解：插件碎片如何烧录进主模板</a>
+                </h2>
+                <p class="mt-2 text-sm leading-6 text-stone-500 dark:text-gray-400" itemprop="abstract">从 Compile 的工作机制讲起，解释 3.0 如何在编译期完成碎片聚合、语言包合并与资产清单生成。</p>
+                <div class="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-stone-100 pt-4 text-xs text-stone-400 font-bold dark:border-slate-800">
+                    <p class="flex flex-wrap items-center gap-2" itemprop="author" itemscope itemtype="https://schema.org/Person">
+                        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                        <a class="transition hover:text-blue-600" href="article_author.htm" itemprop="url"><span itemprop="name">顾云帆</span></a>
+                        <span itemprop="affiliation">核心团队</span>
+                    </p>
+                    <p class="inline-flex items-center gap-3">
+                        <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>1.2k</span>
+                        <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>46</span>
+                        <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>238</span>
+                    </p>
+                </div>
+            </article>
+
+            <article class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm hover:shadow-md transition-shadow p-6" itemscope itemtype="https://schema.org/Article">
+                <div class="flex flex-wrap items-center gap-2 text-xs text-stone-400 font-bold">
+                    <a class="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-stone-50 px-2 py-1 text-stone-600 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="article_category.htm" itemprop="articleSection">运维实战</a>
+                    <time itemprop="datePublished" datetime="2026-08-15T09:00:00+08:00">2026-08-15</time>
+                </div>
+                <h2 class="mt-3 text-xl font-black leading-relaxed" itemprop="headline">
+                    <a class="transition hover:text-blue-600" href="article_detail.htm" itemprop="url">游标分页的正确姿势：为什么千万级表不能用 OFFSET</a>
+                </h2>
+                <p class="mt-2 text-sm leading-6 text-stone-500 dark:text-gray-400" itemprop="abstract">OFFSET 越深越慢的本质、锚点保护的实现，以及双向游标探测的完整代码。</p>
+                <div class="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-stone-100 pt-4 text-xs text-stone-400 font-bold dark:border-slate-800">
+                    <p class="flex flex-wrap items-center gap-2">
+                        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                        <a class="transition hover:text-blue-600" href="article_author.htm">顾云帆</a>
+                        <span>核心团队</span>
+                    </p>
+                    <p class="inline-flex items-center gap-3">
+                        <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>1.8k</span>
+                        <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>52</span>
+                        <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>401</span>
+                    </p>
+                </div>
+            </article>
+        </section>
+
+        <!-- 游标分页 -->
+        <nav class="mt-6 flex items-center justify-between gap-3" aria-label="分页">
+            <span></span>
+            <span>
+                <a class="inline-flex items-center justify-center gap-1 rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-bold text-stone-600 transition hover:border-stone-900 hover:text-stone-900 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-300" rel="next" href="#">下一页 <span aria-hidden="true">→</span></a>
+            </span>
+        </nav>
+    </main>
+
+    <footer class="border-t border-stone-200 dark:border-slate-800 bg-white/60 dark:bg-slate-950">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row justify-between items-center gap-2 text-xs text-stone-400">
+            <span>© 2026 <a href="http://www.wellcms.com/" target="_blank" class="font-bold hover:text-rose-500">WellCMS</a> 演示站 · 页面为 UI 演示稿，数据均为演示数据</span>
+            <span>Processed: <b>0.0231</b>, SQL: <b>18</b></span>
+        </div>
+    </footer>
+    <script src="../assets/js/main.js"></script>
+</body>
+</html>

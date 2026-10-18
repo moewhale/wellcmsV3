@@ -8,7 +8,7 @@ declare(strict_types=1);
 namespace App\Services\Auth;
 
 use Framework\Utils\Validator;
-use Framework\Exception\BusinessException;
+use Framework\Exception\Infra\DatabaseException;
 
 class SessionService
 {
@@ -35,7 +35,6 @@ class SessionService
 
         $this->container = $container;
 
-        $this->dbModel       = $container->get(\App\Models\SessionModel::class);
         $this->cache         = $container->get(\Framework\Cache\Interfaces\CacheInterface::class);
         $this->i18nDateFmt   = $container->get(\App\Utils\I18nDateFormatter::class);
         $this->cacheConfig   = $container->get('cacheConfig');
@@ -44,6 +43,16 @@ class SessionService
         $this->sessionsExpire = $this->sessionConfig['online_hold_time'] ?? 3600;
 
         // hook app_Services_SessionService_construct_end.php
+    }
+
+    private function getModel()
+    {
+        if ($this->dbModel !== null) {
+            return $this->dbModel;
+        }
+        $resolved = $this->container->get(\App\Models\SessionModel::class);
+        // 首次获取可能让出协程；保留已经建立的模型引用。
+        return $this->dbModel = $this->dbModel ?? $resolved;
     }
 
     /**
@@ -76,23 +85,27 @@ class SessionService
 
         try {
             $binId = hex2bin($sessionId);
-            $exists = $this->dbModel->read(['id' => $binId]);
-            if (!empty($exists)) return 1; // 已存在
-
             if (isset($data['ip'])) {
                 list($ip, $ip2bin) = \Framework\Utils\IpHelper::normalizeIp($data['ip'] ?? '');
                 $data['ip'] = $ip2bin;
             }
 
             $data['id'] = $binId;
-            $result = $this->dbModel->insert($data);
-            if (!$result) throw new BusinessException('SessionService -> insert(): Result:' . $result . ' / Data writing failed');
+            // 上传会话保护：由现有主键拒绝重复 SID，不覆盖已保存的载荷；保留锁及成功后的失效键。
+            try {
+                $result = $this->getModel()->insert($data);
+            } catch (\PDOException $e) {
+                if ((int)($e->errorInfo[1] ?? 0) !== 1062) throw $e;
+                return 1;
+            }
+            if (!$result) throw new DatabaseException('SessionService -> insert(): data writing failed');
 
             if (!empty($this->cacheConfig['stores'])) {
-                $this->cache->delete('SessionHandler:' . $sessionId);
+                $keys = ['SessionHandler:' . $sessionId];
                 if (!empty($data['user_id'])) {
-                    $this->cache->delete('session_readByUserId:' . $data['user_id']);
+                    $keys[] = 'session_readByUserId:' . $data['user_id'];
                 }
+                $this->cache->deleteMulti($keys);
             }
 
             return 1;
@@ -108,8 +121,8 @@ class SessionService
 
         // hook app_Services_SessionService_bulkInsert_start.php
 
-        $result = $this->dbModel->bulkInsert($data);
-        if (!$result) throw new BusinessException('SessionService -> bulkInsert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $result = $this->getModel()->bulkInsert($data);
+        if (!$result) throw new DatabaseException('SessionService -> bulkInsert(): data writing failed');
 
         // hook app_Services_SessionService_bulkInsert_end.php
 
@@ -126,7 +139,7 @@ class SessionService
 
         try {
             $binId = hex2bin($sessionId);
-            $oldData = $this->dbModel->read(['id' => $binId]);
+            $oldData = $this->getModel()->read(['id' => $binId], [], ['user_id']);
             if (empty($oldData)) return 0;
 
             if (isset($update['ip'])) {
@@ -136,22 +149,22 @@ class SessionService
 
             if (isset($update['id'])) $update['id'] = hex2bin($update['id']);
 
-            $result = $this->dbModel->update(['id' => $binId], $update);
+            $result = $this->getModel()->update(['id' => $binId], $update);
 
             // 强一致性要求：清除缓存 (无论是否影响行数，只要没抛异常就执行)
             if (!empty($this->cacheConfig['stores'])) {
-                $this->cache->delete('SessionHandler:' . $sessionId);
-                $this->cache->delete('session_read_' . $sessionId);
+                $keys = ['SessionHandler:' . $sessionId, 'session_read_' . $sessionId];
 
                 $uId = $update['user_id'] ?? $oldData['user_id'] ?? 0;
                 if ($uId) {
-                    $this->cache->delete('session_readByUserId:' . $uId);
+                    $keys[] = 'session_readByUserId:' . $uId;
                 }
 
                 // 如果用户ID发生了变动
                 if (isset($update['user_id']) && $update['user_id'] != $oldData['user_id']) {
-                    $oldData['user_id'] && $this->cache->delete('session_readByUserId:' . $oldData['user_id']);
+                    if ($oldData['user_id']) $keys[] = 'session_readByUserId:' . $oldData['user_id'];
                 }
+                $this->cache->deleteMulti($keys);
             }
 
             return (int)$result;
@@ -170,7 +183,7 @@ class SessionService
         // hook app_Services_SessionService_read_start.php
 
         $binId = hex2bin($sessionId);
-        $data = $this->dbModel->read(['id' => $binId], $orderby, $fields);
+        $data = $this->getModel()->read(['id' => $binId], $orderby, $fields);
         if (empty($data)) return [];
 
         // hook app_Services_SessionService_read_middle.php
@@ -222,7 +235,7 @@ class SessionService
     {
         $staticUserId = $this->getState('staticUserId', []);
         if (isset($staticUserId[$userId])) return $staticUserId[$userId];
-        $data = $this->dbModel->read(['user_id' => $userId], $orderby, $fields);
+        $data = $this->getModel()->read(['user_id' => $userId], $orderby, $fields);
         if (empty($data)) return [];
         $staticUserId[$userId] = $data;
         $this->setState('staticUserId', $staticUserId);
@@ -252,7 +265,7 @@ class SessionService
             $key,
             'lock:session_read_by_UserID:' . $userId,
             function () use ($userId, $orderby, $fields) {
-                return $this->dbModel->read(['user_id' => $userId], $orderby, $fields);
+                return $this->getModel()->read(['user_id' => $userId], $orderby, $fields);
             },
             3,
             $this->sessionsExpire
@@ -275,7 +288,7 @@ class SessionService
         $staticIp = $this->getState('staticIp', []);
         if (isset($staticIp[$ip])) return $staticIp[$ip];
 
-        $data = $this->dbModel->read(['ip' => $ip2bin], $orderby, $fields);
+        $data = $this->getModel()->read(['ip' => $ip2bin], $orderby, $fields);
         if (empty($data)) return [];
 
         $staticIp[$ip] = $data;
@@ -302,7 +315,7 @@ class SessionService
 
         // hook app_Services_SessionService_find_start.php
 
-        $datalist = $this->dbModel->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         foreach ($datalist as &$data) $this->format($data);
@@ -330,25 +343,25 @@ class SessionService
         if (empty($sessionId)) return 0;
         // hook app_Services_SessionService_delete_start.php
         $ids = is_array($sessionId) ? array_map('hex2bin', $sessionId) : hex2bin($sessionId);
-        $result = $this->dbModel->delete(['id' => $ids]);
+        $result = $this->getModel()->delete(['id' => $ids]);
         if ($result === 0) return $result;
-        // clear the cache
-        if (is_array($sessionId)) {
-            foreach ($sessionId as $sid) {
-                $this->cache->delete('session_read_' . $sid);
-                $this->cache->delete('SessionHandler:' . $sid);
-            }
-        } else {
-            $this->cache->delete('session_read_' . $sessionId);
-            $this->cache->delete('SessionHandler:' . $sessionId);
+        $keys = [];
+        $static = $this->getState('static', []);
+        foreach ((array)$sessionId as $sid) {
+            $keys[] = 'session_read_' . $sid;
+            $keys[] = 'SessionHandler:' . $sid;
+            $keys[] = $sid;
+            unset($static[$sid]);
         }
+        $this->setState('static', $static);
+        $this->cache->deleteMulti($keys);
         // hook app_Services_SessionService_delete_end.php
         return $result;
     }
 
     public function count( array $condition= []): int
     {
-        return $this->dbModel->count($condition);
+        return $this->getModel()->count($condition);
     }
 
     /**
@@ -484,7 +497,7 @@ class SessionService
             return $this->cache->zCount('online:active_zset', (string)(time() - $this->sessionsExpire), '+inf');
         }
 
-        return $this->dbModel->count(['updated_at' => ['>' => time() - $this->sessionsExpire]]);
+        return $this->getModel()->count(['updated_at' => ['>' => time() - $this->sessionsExpire]]);
     }
 
     /**

@@ -187,63 +187,44 @@ class RuntimeMiddleware implements \Framework\Http\Interfaces\MiddlewareInterfac
 
     public function process(\Framework\Http\Interfaces\ServerRequestInterface $request, \Framework\Http\Interfaces\RequestHandlerInterface $handler): ResponseInterface
     {
-        try {
-            $user = $request->getAttribute('user', null);
-            if (empty($user)) {
-                $userService = $this->container->get(\App\Services\Auth\UserService::class);
-                $userService->captureContext($request);
+        $user = $request->getAttribute('user', null);
+        if (empty($user)) {
+            $userService = $this->container->get(\App\Services\Auth\UserService::class);
+            $userService->captureContext($request);
 
-                // Phase 1: Capture context for Token and Session services
-                $this->container->get(\App\Services\Auth\TokenService::class)->captureContext($request);
-                $this->container->get(\App\Services\Auth\SessionService::class)->captureContext($request);
+            // Phase 1: Capture context for Token and Session services
+            $this->container->get(\App\Services\Auth\TokenService::class)->captureContext($request);
+            $this->container->get(\App\Services\Auth\SessionService::class)->captureContext($request);
 
-                // Phase 2: Capture context for Business Support services
-                if ($this->container->has(\App\Services\Storage\UploadService::class)) {
-                    $this->container->get(\App\Services\Storage\UploadService::class)->captureContext($request);
-                }
-                if ($this->container->has(\App\Services\System\IpListService::class)) {
-                    $this->container->get(\App\Services\System\IpListService::class)->captureContext($request);
-                }
-
-                $user = $userService->getCurrentUser(0);
-
-                // 主程序封禁用户组(group_id=6)快速拦截
-                $groupId = (int)($user['group_id'] ?? 0);
-                if ($groupId === 6) {
-                    throw new \Framework\Exception\BusinessException('well_forum_user_banned', 403);
-                }
-
-                // hook app_Middleware_Runtime_process_capture_context.php
-            }
-            $request = $request->withAttribute('user', $user); // 用户信息挂载
-
-            $appConfig = $this->container->get('appConfig');
-            $groupId = isset($user['group_id']) ? (int)$user['group_id'] : 0;
-            // 处理 runLevel 返回的响应
-            $runLevelResult = $this->runLevel($request, $appConfig, $groupId);
-            if ($runLevelResult instanceof ResponseInterface) {
-                return $runLevelResult;
+            // UploadService 在实际解析时捕获上下文，普通浏览请求无需创建上传对象。
+            if ($this->container->has(\App\Services\System\IpListService::class)) {
+                $this->container->get(\App\Services\System\IpListService::class)->captureContext($request);
             }
 
-            return $handler->handle($request);
-        } catch (\Throwable $e) {
-            // 路由未命中属于正常 HTTP 语义，不应由 Runtime 层接管
-            if ($e instanceof \Framework\Exception\Http\NotFoundException) {
-                throw $e;
+            $user = $userService->getCurrentUser(0);
+
+            // 扩展可在宿主拒绝前复核到期状态；只允许显式声明的封禁提示请求例外。
+            $allowBannedRequest = false;
+            // hook app_Middleware_Runtime_process_before_ban_check.php
+
+            // 主程序封禁用户组(group_id=6)快速拦截
+            $groupId = (int)($user['group_id'] ?? 0);
+            if ($groupId === 6 && !$allowBannedRequest) {
+                throw new \Framework\Exception\BusinessException('well_forum_user_banned', 403);
             }
 
-            // 404 异常不作为系统级 Error 记录，减少噪音
-            if (!($e instanceof \Framework\Exception\Http\NotFoundException)) {
-                $logger = $this->container->get(\Framework\Logger\LoggerInterface::class);
-                $logger->error("Error in " . get_class($this) . ": " . $e->getMessage());
-            }
-
-            // 如果是 DEBUG 模式，就把异常抛出来，方便前端看到
-            if (\defined('DEBUG') && \DEBUG >= 2) throw $e;
-
-            // 这里你可以写日志，也可以直接返回错误提示
-            $messageController = $this->container->get(\App\Controllers\Base\MessageController::class);
-            return $messageController->errorMessage('Runtime verification error: ' . $e->getMessage(), 500);
+            // hook app_Middleware_Runtime_process_capture_context.php
         }
+        $request = $request->withAttribute('user', $user); // 用户信息挂载
+
+        $appConfig = $this->container->get('appConfig');
+        $groupId = isset($user['group_id']) ? (int)$user['group_id'] : 0;
+        // 处理 runLevel 返回的响应
+        $runLevelResult = $this->runLevel($request, $appConfig, $groupId);
+        if ($runLevelResult instanceof ResponseInterface) {
+            return $runLevelResult;
+        }
+
+        return $handler->handle($request);
     }
 }

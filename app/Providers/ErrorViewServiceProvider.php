@@ -24,8 +24,10 @@ class ErrorViewServiceProvider implements ServiceProviderInterface
 {
     public function register(Container $container): void
     {
-        // 统一错误视图渲染器：零依赖，可直接实例化
-        $container->set(ErrorViewRenderer::class, new ErrorViewRenderer());
+        $defer = !defined('SWOOLE_MODE') || !\SWOOLE_MODE;
+        $container->bind(ErrorViewRenderer::class, static function () {
+            return new ErrorViewRenderer();
+        }, true, $defer);
 
         // 错误视图模型：容器就绪时从 appConfig 构造配置默认值
         $container->bind(ErrorViewModelInterface::class, function (Container $c) {
@@ -53,7 +55,7 @@ class ErrorViewServiceProvider implements ServiceProviderInterface
             ];
 
             return new ConfiguredErrorViewModel($defaultData);
-        }, true, false);
+        }, true, $defer);
     }
 
     public function boot(Container $container): void

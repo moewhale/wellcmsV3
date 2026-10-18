@@ -118,7 +118,20 @@ class CacheService implements \Framework\Cache\Interfaces\CacheInterface
     public function delete(string $key): bool
     {
         $key = $this->getCacheKey($key);
+        unset($this->static[$key]);
         return $this->dbModel->delete(['key' => $key]) > 0;
+    }
+
+    public function deleteMulti(array $keys): int
+    {
+        if (empty($keys)) return 0;
+        $fullKeys = [];
+        foreach ($keys as $key) {
+            $fullKey = $this->getCacheKey($key);
+            $fullKeys[] = $fullKey;
+            unset($this->static[$fullKey]);
+        }
+        return $this->dbModel->delete(['key' => $fullKeys]);
     }
 
     public function increment(string $key, int $step = 1, int $ttl = 0)

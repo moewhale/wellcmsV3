@@ -190,9 +190,17 @@ class PartitionManager
                 $this->registry->discoverExisting($this->prefix);
                 $configs = $this->registry->getAll();
             }
+            $connections = ['' => $pdo];
             foreach ($configs as $table => $config) {
+                $shard = $this->db->resolveShard($table);
+                if (!isset($connections[$shard])) {
+                    $connections[$shard] = $this->db->createFreshConnection('master', $shard);
+                    foreach ($this->dialect->compileSessionSetup() as $sql) {
+                        $connections[$shard]->exec($sql);
+                    }
+                }
                 $result->tablesScanned++;
-                $this->maintainOneTable($pdo, $config, $dryRun, $result);
+                $this->maintainOneTable($connections[$shard], $config, $dryRun, $result);
             }
 
             // 更新最后维护时间
@@ -255,7 +263,7 @@ class PartitionManager
 
         $pdo = null;
         try {
-            $pdo = $this->db->createFreshConnection('master');
+            $pdo = $this->db->createFreshConnection('master', $this->db->resolveShard($table));
             // §11.2 DDL 超时保护：防止 DDL 无限阻塞业务查询
             foreach ($this->dialect->compileSessionSetup() as $sql) {
                 $pdo->exec($sql);
@@ -322,7 +330,7 @@ class PartitionManager
         try {
             if (self::isSwoole() && $this->taskManage !== null) {
                 // Swoole 模式：投递任务到 Scheduler
-                $this->taskManage->createTask(array(
+                $dispatch = $this->taskManage->createTask(array(
                     'className'   => \App\Jobs\PartitionMaintainJob::class,
                     'methodName'  => 'handle',
                     'args'        => array(),
@@ -332,6 +340,15 @@ class PartitionManager
                     'maxRetries'  => 2,
                     'retryDelay'  => 60,
                 ));
+                if (!\Framework\Scheduler\TaskDispatchResult::isAccepted($dispatch)) {
+                    $this->logger->warning('PartitionMaintainIfNeeded: Scheduler dispatch failed', array(
+                        'outcome' => \Framework\Scheduler\TaskDispatchResult::outcome($dispatch),
+                        'code' => \Framework\Scheduler\TaskDispatchResult::code($dispatch)
+                            ?? 'TASK_DISPATCH_UNKNOWN',
+                        'task_id' => \Framework\Scheduler\TaskDispatchResult::taskId($dispatch),
+                    ));
+                    return false;
+                }
                 $this->logger->info('PartitionMaintainIfNeeded: dispatched to Scheduler');
                 return true;
             }
@@ -695,6 +712,8 @@ class PartitionManager
                     'error'     => $e->getMessage(),
                 ));
                 break;
+            } finally {
+                if (!$dryRun) $this->registry->invalidatePhysicalPartitions($fullTableName);
             }
 
             $result->partitionsCreated++;
@@ -805,6 +824,8 @@ class PartitionManager
                 'table' => $fullTableName,
                 'error' => $e->getMessage(),
             ));
+        } finally {
+            if (!$dryRun) $this->registry->invalidatePhysicalPartitions($fullTableName);
         }
     }
 

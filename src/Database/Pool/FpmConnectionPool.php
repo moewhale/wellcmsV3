@@ -19,6 +19,47 @@ class FpmConnectionPool extends AbstractPool
     /** @var array [spl_object_id => ['shard' => string]] 全局连接快速索引 */
     protected $globalConnectionRegistry = [];
 
+    /** @var bool[] [spl_object_id => true] 不得重新回池的物理连接 */
+    protected $taintedConnections = [];
+
+    /** @var bool[] [spl_object_id => true] 当前 query 以异常结束 */
+    protected $failedQueries = [];
+
+    protected function getMaster(string $shard = ''): \PDO
+    {
+        $pdo = parent::getMaster($shard);
+        $pool = $this->getShardPool($shard);
+        $oid = spl_object_id($pdo);
+        if (!isset($pool->connectionRegistry[$oid])) {
+            $pool->connectionRegistry[$oid] = ['node_id' => 'master', 'created_at' => time()];
+        }
+        return $pdo;
+    }
+
+    /** 隔离级别随池中物理连接存活；淘汰连接时注册信息一并删除。 */
+    public function configureIsolationLevel(\PDO $pdo, string $shard, string $level, string $sql): void
+    {
+        $oid = spl_object_id($pdo);
+        $pool = $this->getShardPool($shard);
+        if (($pool->connectionRegistry[$oid]['isolation_level'] ?? null) === $level) return;
+        $pdo->exec($sql);
+        $this->recordIsolationLevel($pdo, $shard, $level);
+    }
+
+    /** 记录已成功设置的物理连接状态，不再执行 SQL。 */
+    public function recordIsolationLevel(\PDO $pdo, string $shard, string $level): void
+    {
+        $this->getShardPool($shard)->connectionRegistry[spl_object_id($pdo)]['isolation_level'] = $level;
+    }
+
+    /** 事务结束归还健康连接，物理断开只由淘汰/closeAll 负责。 */
+    protected function clearMaster(string $shard = ''): void
+    {
+        $pool = $this->getShardPool($shard);
+        if ($pool->master) $this->releaseConnection($pool->master);
+        if ($pool->transactionLevel === 0) $pool->shouldRollback = false;
+    }
+
     /** 获取连接 **/
     public function getConnection(string $role = 'slave', string $shard = ''): \PDO
     {
@@ -120,8 +161,10 @@ class FpmConnectionPool extends AbstractPool
                         $oid = spl_object_id($slot['connection']);
                         $slot['connection'] = null;
                         unset($shardPool->connections[$i]);
-                        $node->activeConnections = max(0, $node->activeConnections - 1);
-                        $node->totalConnections = max(0, $node->totalConnections - 1);
+                        if ($node) {
+                            $node->activeConnections = max(0, $node->activeConnections - 1);
+                            $node->totalConnections = max(0, $node->totalConnections - 1);
+                        }
                         unset($shardPool->connectionRegistry[$oid]);
                         unset($this->globalConnectionRegistry[$oid]);
                         if (count($shardPool->connections) < $this->maxConnections) {
@@ -173,6 +216,8 @@ class FpmConnectionPool extends AbstractPool
     public function releaseConnection(\PDO $conn): void
     {
         $oid = spl_object_id($conn);
+        $tainted = isset($this->taintedConnections[$oid]);
+        unset($this->taintedConnections[$oid], $this->failedQueries[$oid]);
 
         // O(1) 快速路径：通过全局索引定位 shard
         if (isset($this->globalConnectionRegistry[$oid])) {
@@ -181,12 +226,14 @@ class FpmConnectionPool extends AbstractPool
             foreach ($pool->connections as $i => &$slot) {
                 if ($slot['connection'] === $conn) {
                     $node = $this->findNode($shard, $slot['node_id'] ?? '');
-                    if ($node && $node->fusedUntil > time()) {
+                    if ($tainted || ($node && $node->fusedUntil > time())) {
                         $slot['connection'] = null;
                         unset($pool->connections[$i]);
                         $pool->connections = array_values($pool->connections);
-                        $node->activeConnections = max(0, $node->activeConnections - 1);
-                        $node->totalConnections = max(0, $node->totalConnections - 1);
+                        if ($node) {
+                            $node->activeConnections = max(0, $node->activeConnections - 1);
+                            $node->totalConnections = max(0, $node->totalConnections - 1);
+                        }
                         unset($pool->connectionRegistry[$oid]);
                         unset($this->globalConnectionRegistry[$oid]);
                         return;
@@ -207,18 +254,29 @@ class FpmConnectionPool extends AbstractPool
         foreach ($this->shardPools as $shard => $pool) {
             // 主库连接（FPM 模式）
             if ($pool->master === $conn) {
+                if ($tainted) {
+                    $pool->master = null;
+                    $pool->transactionLevel = 0;
+                    $pool->shouldRollback = false;
+                    unset($pool->connectionRegistry[$oid]);
+                    return;
+                }
                 if ($this->inTransaction($shard)) {
                     return;
                 }
-                if ($conn->inTransaction()) {
-                    try {
+                try {
+                    if ($conn->inTransaction()) {
                         $conn->rollBack();
-                    } catch (\Throwable $e) {
-                        $this->logError("DB rollback failed on release", ['exception' => $e]);
                     }
+                } catch (\Throwable $e) {
+                    $pool->master = null;
+                    $pool->transactionLevel = 0;
+                    $pool->shouldRollback = false;
+                    unset($pool->connectionRegistry[$oid]);
+                    $this->logError("DB transaction cleanup failed on release", ['exception' => $e]);
+                    return;
                 }
-                $pool->master = null;
-                unset($pool->connectionRegistry[spl_object_id($conn)]);
+                // FPM 池随请求销毁；正常归还保留连接供后续查询复用。
                 return;
             }
         }
@@ -228,31 +286,22 @@ class FpmConnectionPool extends AbstractPool
     public function preWarm(int $num, string $shard = ''): void
     {
         $pool = $this->getShardPool($shard);
-        if (empty($pool->nodes)) {
+        $target = min(max(0, $num), $this->maxConnections);
+        if ($target === 0 || empty($pool->nodes)) {
             return;
         }
 
-        $totalWeight = 0;
+        // FPM 请求串行执行；每个从库节点只预热一个物理连接。
+        $now = time();
         foreach ($pool->nodes as $node) {
-            $totalWeight += $node->weight;
+            if (count($pool->connections) >= $target) break;
+            if ($node->fusedUntil > $now || $node->totalConnections > 0) continue;
+            $pdo = $this->createSlaveForNode($pool, $node, $shard);
+            $this->releaseConnection($pdo);
         }
 
-        foreach ($pool->nodes as $node) {
-            $alloc = max(1, (int) round($num * $node->weight / $totalWeight));
-            for ($i = 0; $i < $alloc; ++$i) {
-                if (count($pool->connections) >= $this->maxConnections) {
-                    break 2;
-                }
-                $pdo = $this->createSlave($shard);
-                $this->releaseConnection($pdo);
-            }
-        }
-
-        // 预热 master 连接，防止高并发写场景下连接风暴
-        for ($i = 0; $i < $num; ++$i) {
-            if (count($pool->connections) >= $this->maxConnections) {
-                break;
-            }
+        // FPM 结构只保留一个 master；重复预热不得创建并遗弃额外物理连接。
+        if (!$pool->master) {
             $this->createSlave($shard, 'master');
         }
     }
@@ -262,6 +311,8 @@ class FpmConnectionPool extends AbstractPool
     {
         foreach ($this->shardPools as $shard => $pool) {
             $pool->master = null;
+            $pool->transactionLevel = 0;
+            $pool->shouldRollback = false;
             foreach ($pool->connections as &$slot) {
                 $slot['connection'] = null;
             }
@@ -277,6 +328,8 @@ class FpmConnectionPool extends AbstractPool
             }
         }
         $this->globalConnectionRegistry = [];
+        $this->taintedConnections = [];
+        $this->failedQueries = [];
     }
 
     /** 调整连接池大小 **/
@@ -415,6 +468,33 @@ class FpmConnectionPool extends AbstractPool
         $node->errorCount = 0;
     }
 
+    private function createSlaveForNode(ShardPool $shardPool, Node $targetNode, string $shard): \PDO
+    {
+        $pdo = $this->factory->createConnectionFromConfig($targetNode->config);
+        $oid = spl_object_id($pdo);
+
+        $shardPool->connectionRegistry[$oid] = [
+            'node_id'     => $targetNode->nodeId,
+            'role'        => 'slave',
+            'created_at'  => time(),
+        ];
+
+        $targetNode->activeConnections++;
+        $targetNode->totalConnections++;
+
+        $shardPool->connections[] = [
+            'node_id'        => $targetNode->nodeId,
+            'connection'     => $pdo,
+            'last_used'      => time(),
+            'in_use'         => true,
+            'weight'         => $targetNode->weight,
+            'active_queries' => 0,
+        ];
+
+        $this->globalConnectionRegistry[$oid] = ['shard' => $shard];
+        return $pdo;
+    }
+
     protected function createSlave(string $shard = '', string $role = 'slave'): \PDO
     {
         $this->establishingConnections++;
@@ -445,29 +525,7 @@ class FpmConnectionPool extends AbstractPool
                 return $pdo;
             }
 
-            $pdo = $this->factory->createConnectionFromConfig($targetNode->config);
-
-            $shardPool->connectionRegistry[spl_object_id($pdo)] = [
-                'node_id'     => $targetNode->nodeId,
-                'role'        => $role,
-                'created_at'  => time(),
-            ];
-
-            $targetNode->activeConnections++;
-            $targetNode->totalConnections++;
-
-            $shardPool->connections[] = [
-                'node_id'        => $targetNode->nodeId,
-                'connection'     => $pdo,
-                'last_used'      => time(),
-                'in_use'         => true,
-                'weight'         => $targetNode->weight,
-                'active_queries' => 0,
-            ];
-
-            $this->globalConnectionRegistry[spl_object_id($pdo)] = ['shard' => $shard];
-
-            return $pdo;
+            return $this->createSlaveForNode($shardPool, $targetNode, $shard);
         } finally {
             $this->establishingConnections--;
         }
@@ -476,6 +534,11 @@ class FpmConnectionPool extends AbstractPool
     public function reportError(\PDO $connection, \Throwable $e): void
     {
         $oid = spl_object_id($connection);
+        $this->failedQueries[$oid] = true;
+        if (!$this->isConnectionFailure($e)) {
+            return;
+        }
+        $this->taintedConnections[$oid] = true;
         if (isset($this->globalConnectionRegistry[$oid])) {
             $shard = $this->globalConnectionRegistry[$oid]['shard'];
             $pool = $this->getShardPool($shard);
@@ -545,6 +608,8 @@ class FpmConnectionPool extends AbstractPool
     public function trackQueryEnd(\PDO $connection): void
     {
         $oid = spl_object_id($connection);
+        $failed = isset($this->failedQueries[$oid]);
+        unset($this->failedQueries[$oid]);
         if (isset($this->globalConnectionRegistry[$oid])) {
             $shard = $this->globalConnectionRegistry[$oid]['shard'];
             $pool = $this->getShardPool($shard);
@@ -553,7 +618,7 @@ class FpmConnectionPool extends AbstractPool
                     $slot['active_queries'] = max(0, ($slot['active_queries'] ?? 0) - 1);
                     if ($slot['node_id']) {
                         $node = $this->findNode($shard, $slot['node_id']);
-                        if ($node && $node->fusedUntil <= time()) {
+                        if ($node && !$failed && $node->fusedUntil <= time()) {
                             $node->errorCount = 0;
                         }
                     }
@@ -570,7 +635,7 @@ class FpmConnectionPool extends AbstractPool
                     $slot['active_queries'] = max(0, ($slot['active_queries'] ?? 0) - 1);
                     if ($slot['node_id']) {
                         $node = $this->findNode($shard, $slot['node_id']);
-                        if ($node && $node->fusedUntil <= time()) {
+                        if ($node && !$failed && $node->fusedUntil <= time()) {
                             $node->errorCount = 0;
                         }
                     }
@@ -596,7 +661,7 @@ class FpmConnectionPool extends AbstractPool
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $masters = $ctx->dbMasters ?? [];
+            $masters = $ctx['dbMasters'] ?? [];
             if ($shard !== '') {
                 if (isset($masters[$shard])) {
                     $pdo = $masters[$shard];
@@ -604,7 +669,7 @@ class FpmConnectionPool extends AbstractPool
                     if ($pool->master === $pdo) $pool->master = null;
                     unset($pool->connectionRegistry[spl_object_id($pdo)]);
                     unset($masters[$shard]);
-                    $ctx->dbMasters = $masters;
+                    $ctx['dbMasters'] = $masters;
                 }
             } else {
                 foreach ($masters as $s => $pdo) {
@@ -612,7 +677,7 @@ class FpmConnectionPool extends AbstractPool
                     if ($pool->master === $pdo) $pool->master = null;
                     unset($pool->connectionRegistry[spl_object_id($pdo)]);
                 }
-                $ctx->dbMasters = [];
+                $ctx['dbMasters'] = [];
             }
             return;
         }
@@ -623,12 +688,16 @@ class FpmConnectionPool extends AbstractPool
                 unset($pool->connectionRegistry[spl_object_id($pool->master)]);
                 $pool->master = null;
             }
+            $pool->transactionLevel = 0;
+            $pool->shouldRollback = false;
         } else {
             foreach ($this->shardPools as $s => $pool) {
                 if ($pool->master) {
                     unset($pool->connectionRegistry[spl_object_id($pool->master)]);
                     $pool->master = null;
                 }
+                $pool->transactionLevel = 0;
+                $pool->shouldRollback = false;
             }
         }
     }

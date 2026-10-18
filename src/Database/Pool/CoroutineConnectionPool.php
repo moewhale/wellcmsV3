@@ -23,6 +23,9 @@ class CoroutineConnectionPool extends AbstractPool
     /** @var \WeakMap|\SplObjectStorage 标记中毒连接 */
     protected $taintedConnections;
 
+    /** @var \WeakMap|\SplObjectStorage 标记当前 query 以异常结束 */
+    protected $failedQueries;
+
     /** @var array ["role:shard" => int] 协程安全总连接计数器 */
     protected $channelTotals = [];
 
@@ -40,6 +43,9 @@ class CoroutineConnectionPool extends AbstractPool
 
     /** @var \Swoole\Atomic|null */
     protected $establishingAtomic;
+
+    /** @var int[] [role:shard => 正在建立的连接数] */
+    protected $establishingByChannel = [];
 
     public function __construct(
         \Framework\Database\Interfaces\DatabaseInterface $driver,
@@ -74,6 +80,7 @@ class CoroutineConnectionPool extends AbstractPool
         $class = class_exists('WeakMap') ? 'WeakMap' : 'SplObjectStorage';
         $this->connectionToNode = new $class();
         $this->taintedConnections = new $class();
+        $this->failedQueries = new $class();
 
         if (\extension_loaded('swoole')) {
             $this->creationLock = new \Swoole\Lock(SWOOLE_MUTEX);
@@ -136,31 +143,24 @@ class CoroutineConnectionPool extends AbstractPool
     public function preWarm(int $num, string $shard = ''): void
     {
         $pool = $this->getShardPool($shard);
-        if (empty($pool->nodes)) {
+        $target = min(max(0, $num), $this->maxConnections);
+        if ($target === 0 || empty($pool->nodes)) {
             return;
         }
 
-        $totalWeight = 0;
-        foreach ($pool->nodes as $node) {
-            $totalWeight += $node->weight;
-        }
-
-        foreach ($pool->nodes as $node) {
-            $alloc = max(1, (int) round($num * $node->weight / $totalWeight));
-            for ($i = 0; $i < $alloc; ++$i) {
-                if ($this->getChannelTotal('slave', $shard) >= $this->maxConnections) {
-                    break 2;
-                }
-                $this->createSlave($shard, 'slave');
-            }
-        }
-
-        // 预热 master channel，防止高并发写场景下现场创建连接风暴
-        for ($i = 0; $i < $num; ++$i) {
-            if ($this->getChannelTotal('master', $shard) >= $this->maxConnections) {
+        $nodes = array_values(array_filter($pool->nodes, function (Node $node) {
+            return $node->fusedUntil <= time();
+        }));
+        while ($this->getChannelTotal('slave', $shard) < $target && !empty($nodes)) {
+            $node = $this->selectPreWarmNode($nodes);
+            if (!$node) {
                 break;
             }
-            $this->createSlave($shard, 'master');
+            $this->createPooledConnection($node, $shard, 'slave');
+        }
+
+        while ($this->getChannelTotal('master', $shard) < $target) {
+            $this->createPooledConnection(null, $shard, 'master');
         }
     }
 
@@ -176,7 +176,7 @@ class CoroutineConnectionPool extends AbstractPool
         if ($actualRole === 'master') {
             $ctx = self::coroContext();
             if ($ctx !== null) {
-                $masters = $ctx->dbMasters ?? [];
+                $masters = $ctx['dbMasters'] ?? [];
                 if (isset($masters[$shard])) {
                     return $masters[$shard];
                 }
@@ -208,30 +208,31 @@ class CoroutineConnectionPool extends AbstractPool
                     }
                 }
                 if ($pdo instanceof \PDO) {
+                    $this->markConnectionActive($pdo);
                     if ($actualRole === 'master') {
                         $this->bindMasterToContext($pdo, $shard);
                     }
                     $ctx = self::coroContext();
                     if ($ctx !== null) {
-                        $actives = $ctx->dbActiveConnections ?? [];
-                        if (empty($actives) && \is_callable(['\Swoole\Coroutine', 'defer']) && empty($ctx->dbDeferRegistered)) {
-                            $ctx->dbDeferRegistered = true;
+                        $actives = $ctx['dbActiveConnections'] ?? [];
+                        if (empty($actives) && \is_callable(['\Swoole\Coroutine', 'defer']) && empty($ctx['dbDeferRegistered'])) {
+                            $ctx['dbDeferRegistered'] = true;
                             \Swoole\Coroutine::defer(function () {
                                 $context = self::coroContext();
                                 if ($context !== null) {
-                                    $remaining = $context->dbActiveConnections ?? [];
+                                    $remaining = $context['dbActiveConnections'] ?? [];
                                     foreach ($remaining as $unreleasedPdo) {
                                         $this->taintedConnections[$unreleasedPdo] = true;
                                         $this->releaseConnection($unreleasedPdo);
                                     }
-                                    $context->dbActiveConnections = [];
-                                    unset($context->dbDeferRegistered);
+                                    $context['dbActiveConnections'] = [];
+                                    unset($context['dbDeferRegistered']);
                                     $this->evictCurrentConnection();
                                 }
                             });
                         }
                         $actives[\spl_object_id($pdo)] = $pdo;
-                        $ctx->dbActiveConnections = $actives;
+                        $ctx['dbActiveConnections'] = $actives;
                     }
                     return $pdo;
                 }
@@ -242,19 +243,16 @@ class CoroutineConnectionPool extends AbstractPool
         // 原子控制连接数上限，防止 Race Condition
         $createdHere = false;
         $locked = false;
+        $establishingKey = "{$actualRole}:{$shard}";
         if ($this->creationLock) {
             $this->creationLock->lock();
             $locked = true;
         }
         try {
-            $establishing = $this->establishingAtomic ? $this->establishingAtomic->get() : $this->establishingConnections;
+            $establishing = $this->establishingByChannel[$establishingKey] ?? 0;
             $currentTotal = $this->getChannelTotal($actualRole, $shard) + $establishing;
             if ($currentTotal < $this->maxConnections) {
-                if ($this->establishingAtomic) {
-                    $this->establishingAtomic->add(1);
-                } else {
-                    $this->establishingConnections++;
-                }
+                $this->establishingByChannel[$establishingKey] = $establishing + 1;
                 $createdHere = true;
                 if ($locked) {
                     $this->creationLock->unlock();
@@ -263,47 +261,40 @@ class CoroutineConnectionPool extends AbstractPool
                 try {
                     $this->createSlave($shard, $actualRole);
                 } catch (\Throwable $e) {
-                    if ($this->establishingAtomic) {
-                        $this->establishingAtomic->sub(1);
-                    } else {
-                        $this->establishingConnections--;
-                    }
+                    $this->decrEstablishing($establishingKey);
                     throw $e;
                 }
                 $pdo = $channel->pop($this->timeout);
-                if ($this->establishingAtomic) {
-                    $this->establishingAtomic->sub(1);
-                } else {
-                    $this->establishingConnections--;
-                }
+                $this->decrEstablishing($establishingKey);
                 if (!$pdo instanceof \PDO) {
                     $this->failed++;
                     throw \Framework\Exception\Infra\PoolException::poolError("Coroutine wait timeout for DB: role={$actualRole} shard={$shard}");
                 }
+                $this->markConnectionActive($pdo);
                 if ($actualRole === 'master') {
                     $this->bindMasterToContext($pdo, $shard);
                 }
                 $ctx = self::coroContext();
                 if ($ctx !== null) {
-                    $actives = $ctx->dbActiveConnections ?? [];
-                    if (empty($actives) && \is_callable(['\Swoole\Coroutine', 'defer']) && empty($ctx->dbDeferRegistered)) {
-                        $ctx->dbDeferRegistered = true;
+                    $actives = $ctx['dbActiveConnections'] ?? [];
+                    if (empty($actives) && \is_callable(['\Swoole\Coroutine', 'defer']) && empty($ctx['dbDeferRegistered'])) {
+                        $ctx['dbDeferRegistered'] = true;
                         \Swoole\Coroutine::defer(function () {
                             $context = self::coroContext();
                             if ($context !== null) {
-                                $remaining = $context->dbActiveConnections ?? [];
+                                $remaining = $context['dbActiveConnections'] ?? [];
                                 foreach ($remaining as $unreleasedPdo) {
                                     $this->taintedConnections[$unreleasedPdo] = true;
                                     $this->releaseConnection($unreleasedPdo);
                                 }
-                                $context->dbActiveConnections = [];
-                                unset($context->dbDeferRegistered);
+                                $context['dbActiveConnections'] = [];
+                                unset($context['dbDeferRegistered']);
                                 $this->evictCurrentConnection();
                             }
                         });
                     }
                     $actives[\spl_object_id($pdo)] = $pdo;
-                    $ctx->dbActiveConnections = $actives;
+                    $ctx['dbActiveConnections'] = $actives;
                 }
                 return $pdo;
             }
@@ -319,31 +310,32 @@ class CoroutineConnectionPool extends AbstractPool
             throw \Framework\Exception\Infra\PoolException::poolError("Coroutine wait timeout for DB: role={$actualRole} shard={$shard}");
         }
 
+        $this->markConnectionActive($pdo);
         if ($actualRole === 'master') {
             $this->bindMasterToContext($pdo, $shard);
         }
 
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $actives = $ctx->dbActiveConnections ?? [];
-            if (empty($actives) && \is_callable(['\Swoole\Coroutine', 'defer']) && empty($ctx->dbDeferRegistered)) {
-                $ctx->dbDeferRegistered = true;
+            $actives = $ctx['dbActiveConnections'] ?? [];
+            if (empty($actives) && \is_callable(['\Swoole\Coroutine', 'defer']) && empty($ctx['dbDeferRegistered'])) {
+                $ctx['dbDeferRegistered'] = true;
                 \Swoole\Coroutine::defer(function () {
                     $context = self::coroContext();
                     if ($context !== null) {
-                        $remaining = $context->dbActiveConnections ?? [];
+                        $remaining = $context['dbActiveConnections'] ?? [];
                         foreach ($remaining as $unreleasedPdo) {
                             $this->taintedConnections[$unreleasedPdo] = true;
                             $this->releaseConnection($unreleasedPdo);
                         }
-                        $context->dbActiveConnections = [];
-                        unset($context->dbDeferRegistered);
+                        $context['dbActiveConnections'] = [];
+                        unset($context['dbDeferRegistered']);
                         $this->evictCurrentConnection();
                     }
                 });
             }
             $actives[\spl_object_id($pdo)] = $pdo;
-            $ctx->dbActiveConnections = $actives;
+            $ctx['dbActiveConnections'] = $actives;
         }
 
         return $pdo;
@@ -364,9 +356,9 @@ class CoroutineConnectionPool extends AbstractPool
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $masters = $ctx->dbMasters ?? [];
+            $masters = $ctx['dbMasters'] ?? [];
             $masters[$shard] = $pdo;
-            $ctx->dbMasters = $masters;
+            $ctx['dbMasters'] = $masters;
         }
     }
 
@@ -390,6 +382,53 @@ class CoroutineConnectionPool extends AbstractPool
     /**
      * 重载创建逻辑
      */
+    /**
+     * @param Node[] $nodes
+     */
+    private function selectPreWarmNode(array $nodes)
+    {
+        $selected = null;
+        $selectedRatio = null;
+        foreach ($nodes as $node) {
+            $ratio = $node->totalConnections / max(1, $node->weight);
+            if ($selected === null || $ratio < $selectedRatio) {
+                $selected = $node;
+                $selectedRatio = $ratio;
+            }
+        }
+        return $selected;
+    }
+
+    private function createPooledConnection(?Node $targetNode, string $shard, string $role): \PDO
+    {
+        if ($targetNode) {
+            $pdo = $this->factory->createConnectionFromConfig($targetNode->config);
+        } else {
+            $pdo = $this->driver->createFreshConnection('master', $shard);
+        }
+
+        $channel = $this->getPoolChannel($role, $shard);
+        if (!$channel->push($pdo, $this->timeout)) {
+            $pdo = null;
+            throw \Framework\Exception\Infra\PoolException::poolError("Failed to push new connection into pool: role={$role} shard={$shard}");
+        }
+
+        if ($targetNode) {
+            $targetNode->totalConnections++;
+            $this->connectionToNode[$pdo] = $targetNode;
+        }
+        $this->incrChannelTotal($role, $shard);
+        return $pdo;
+    }
+
+    private function markConnectionActive(\PDO $pdo): void
+    {
+        $node = isset($this->connectionToNode[$pdo]) ? $this->connectionToNode[$pdo] : null;
+        if ($node) {
+            $node->activeConnections++;
+        }
+    }
+
     protected function createSlave(string $shard = '', string $role = 'slave'): \PDO
     {
         $shardPool = $this->getShardPool($shard);
@@ -405,25 +444,7 @@ class CoroutineConnectionPool extends AbstractPool
             $targetNode = $role === 'master' ? null : ($nodes[0] ?? null);
         }
 
-        if ($role === 'master' || !$targetNode) {
-            $pdo = $this->driver->createFreshConnection('master', $shard);
-        } else {
-            $pdo = $this->factory->createConnectionFromConfig($targetNode->config);
-        }
-
-        if ($targetNode) {
-            $targetNode->activeConnections++;
-            $targetNode->totalConnections++;
-            $this->connectionToNode[$pdo] = $targetNode;
-        }
-
-        $channel = $this->getPoolChannel($role, $shard);
-        if (!$channel->push($pdo, $this->timeout)) {
-            $pdo = null;
-            throw \Framework\Exception\Infra\PoolException::poolError("Failed to push new connection into pool: role={$role} shard={$shard}");
-        }
-        $this->incrChannelTotal($role, $shard);
-        return $pdo;
+        return $this->createPooledConnection($targetNode, $shard, $role);
     }
 
     protected function incrChannelTotal(string $role, string $shard): void
@@ -443,6 +464,16 @@ class CoroutineConnectionPool extends AbstractPool
         return $this->channelTotals["{$role}:{$shard}"] ?? 0;
     }
 
+    private function decrEstablishing(string $key): void
+    {
+        $remaining = max(0, ($this->establishingByChannel[$key] ?? 0) - 1);
+        if ($remaining === 0) {
+            unset($this->establishingByChannel[$key]);
+            return;
+        }
+        $this->establishingByChannel[$key] = $remaining;
+    }
+
     protected function detachConnection(\PDO $pdo): void
     {
         $node = isset($this->connectionToNode[$pdo]) ? $this->connectionToNode[$pdo] : null;
@@ -459,12 +490,22 @@ class CoroutineConnectionPool extends AbstractPool
     public function releaseConnection(\PDO $connection): void
     {
         $ctx = self::coroContext();
+        $oid = \spl_object_id($connection);
+        $wasActive = false;
+        $ownedMasterShard = null;
         if ($ctx !== null) {
-            $actives = $ctx->dbActiveConnections ?? [];
-            $oid = \spl_object_id($connection);
+            $actives = $ctx['dbActiveConnections'] ?? [];
             if (isset($actives[$oid])) {
+                $wasActive = true;
                 unset($actives[$oid]);
-                $ctx->dbActiveConnections = $actives;
+                $ctx['dbActiveConnections'] = $actives;
+            }
+            $masters = $ctx['dbMasters'] ?? [];
+            foreach ($masters as $masterShard => $masterPdo) {
+                if ($masterPdo === $connection) {
+                    $ownedMasterShard = $masterShard;
+                    break;
+                }
             }
         }
 
@@ -472,8 +513,30 @@ class CoroutineConnectionPool extends AbstractPool
             $node = isset($this->connectionToNode[$connection]) ? $this->connectionToNode[$connection] : null;
             $shard = $node ? $node->shard : '';
             $role = $node ? 'slave' : 'master';
+            if ($role === 'master' && $ctx !== null) {
+                $masters = $ctx['dbMasters'] ?? [];
+                foreach ($masters as $s => $pdo) {
+                    if ($pdo === $connection) {
+                        $shard = $s;
+                        unset($masters[$s]);
+                        break;
+                    }
+                }
+                $ctx['dbMasters'] = $masters;
+
+                $levels = $ctx['dbTransactionLevels'] ?? [];
+                unset($levels[$shard]);
+                $ctx['dbTransactionLevels'] = $levels;
+
+                $flags = $ctx['dbShouldRollback'] ?? [];
+                unset($flags[$shard]);
+                $ctx['dbShouldRollback'] = $flags;
+            }
             $this->detachConnection($connection);
             unset($this->taintedConnections[$connection]);
+            if (isset($this->failedQueries[$connection])) {
+                unset($this->failedQueries[$connection]);
+            }
             $this->decrChannelTotal($role, $shard);
             return;
         }
@@ -481,25 +544,21 @@ class CoroutineConnectionPool extends AbstractPool
         $node = isset($this->connectionToNode[$connection]) ? $this->connectionToNode[$connection] : null;
 
         if ($node) {
+            if ($ctx !== null && !$wasActive) {
+                return;
+            }
             $node->activeConnections = max(0, $node->activeConnections - 1);
             $shard = $node->shard;
             $role = 'slave';
         } else {
-            $shard = '';
+            $shard = $ownedMasterShard !== null ? $ownedMasterShard : '';
             $role = 'master';
-            $ctx = self::coroContext();
-            if ($ctx !== null) {
-                $masters = $ctx->dbMasters ?? [];
-                foreach ($masters as $s => $pdo) {
-                    if ($pdo === $connection) {
-                        $shard = $s;
-                        break;
-                    }
-                }
-            }
         }
 
         if ($role === 'master' && $this->inTransaction($shard)) {
+            return;
+        }
+        if ($role === 'master' && $ctx !== null && !$wasActive && $ownedMasterShard === null) {
             return;
         }
 
@@ -512,11 +571,11 @@ class CoroutineConnectionPool extends AbstractPool
         if ($role === 'master') {
             $ctx = self::coroContext();
             if ($ctx !== null) {
-                $masters = $ctx->dbMasters ?? [];
+                $masters = $ctx['dbMasters'] ?? [];
                 foreach ($masters as $s => $pdo) {
                     if ($pdo === $connection) {
                         unset($masters[$s]);
-                        $ctx->dbMasters = $masters;
+                        $ctx['dbMasters'] = $masters;
                         break;
                     }
                 }
@@ -528,6 +587,10 @@ class CoroutineConnectionPool extends AbstractPool
 
     public function reportError(\PDO $connection, \Throwable $e): void
     {
+        $this->failedQueries[$connection] = true;
+        if (!$this->isConnectionFailure($e)) {
+            return;
+        }
         $node = isset($this->connectionToNode[$connection]) ? $this->connectionToNode[$connection] : null;
         if ($node) {
             $node->errorCount++;
@@ -537,7 +600,6 @@ class CoroutineConnectionPool extends AbstractPool
                 $this->logError("DB node '{$node->nodeId}' fused.", ['node_id' => $node->nodeId]);
             }
         }
-        // unconditionally taint so both master and slaves drop on release
         $this->taintedConnections[$connection] = true;
     }
 
@@ -551,10 +613,14 @@ class CoroutineConnectionPool extends AbstractPool
 
     public function trackQueryEnd(\PDO $connection): void
     {
+        $failed = isset($this->failedQueries[$connection]);
+        if ($failed) {
+            unset($this->failedQueries[$connection]);
+        }
         $node = isset($this->connectionToNode[$connection]) ? $this->connectionToNode[$connection] : null;
         if ($node) {
             $node->activeQueries = max(0, ($node->activeQueries ?? 0) - 1);
-            if ($node->fusedUntil <= time()) {
+            if (!$failed && $node->fusedUntil <= time()) {
                 $node->errorCount = 0;
             }
         }
@@ -626,18 +692,17 @@ class CoroutineConnectionPool extends AbstractPool
         $oid = spl_object_id($this);
         unset(self::$timerRefs[$oid]);
         foreach ($this->poolChannels as $channel) {
-            while (!$channel->isEmpty()) {
-                $pdo = $channel->pop(0.001);
-                if ($pdo instanceof \PDO) {
-                    $pdo = null;
-                }
-            }
+            // Worker 停机与析构可发生在非协程上下文；Channel::pop() 此时会 fatal。
+            // close() 可在该生命周期安全调用，并在释放 Channel 引用时一并释放空闲 PDO。
+            $channel->close();
         }
         $this->poolChannels = [];
         $class = class_exists('WeakMap') ? 'WeakMap' : 'SplObjectStorage';
         $this->connectionToNode = new $class();
         $this->taintedConnections = new $class();
+        $this->failedQueries = new $class();
         $this->channelTotals = [];
+        $this->establishingByChannel = [];
 
         foreach ($this->shardPools as $shard => $pool) {
             $pool->master = null;
@@ -660,31 +725,31 @@ class CoroutineConnectionPool extends AbstractPool
     {
         $ctx = self::coroContext();
         if ($ctx !== null) {
-            $masters = $ctx->dbMasters ?? [];
+            $masters = $ctx['dbMasters'] ?? [];
             if ($shard !== '') {
                 if (isset($masters[$shard])) {
                     $pdo = $masters[$shard];
                     $this->detachConnection($pdo);
 
-                    $levels = $ctx->dbTransactionLevels ?? [];
+                    $levels = $ctx['dbTransactionLevels'] ?? [];
                     if (isset($levels[$shard])) {
                         unset($levels[$shard]);
-                        $ctx->dbTransactionLevels = $levels;
+                        $ctx['dbTransactionLevels'] = $levels;
                     }
 
                     $this->taintedConnections[$pdo] = true;
                     $this->releaseConnection($pdo);
                     unset($masters[$shard]);
-                    $ctx->dbMasters = $masters;
+                    $ctx['dbMasters'] = $masters;
                 }
             } else {
-                $ctx->dbTransactionLevels = [];
+                $ctx['dbTransactionLevels'] = [];
                 foreach ($masters as $s => $pdo) {
                     $this->detachConnection($pdo);
                     $this->taintedConnections[$pdo] = true;
                     $this->releaseConnection($pdo);
                 }
-                $ctx->dbMasters = [];
+                $ctx['dbMasters'] = [];
             }
         }
     }

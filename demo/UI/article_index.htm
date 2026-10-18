@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+    演示文件：文章频道首页（对应 plugins/well_article/views/htm/article_index.htm）
+    布局：Idea Box 玩乐编辑风 —— 暖白底、墨色排版、彩色徽章、平色封面块（不使用图库图片）
+    涵盖原文件功能：分类导航 / 推荐专题 / 观点位 / 文章卡片列表(宽图/单图/无图) / 游标分页 / 右侧栏
+-->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>文章 - WellCMS 演示</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+    <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body class="flex flex-col min-h-screen bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-gray-200 font-sans">
+
+    <!-- 页头 -->
+    <header class="sticky top-0 z-50 bg-stone-50/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-stone-200 dark:border-slate-800">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <a href="index.htm" class="flex items-center gap-2 shrink-0">
+                    <div class="w-8 h-8 rounded-lg bg-rose-500 flex items-center justify-center text-white font-black text-sm shadow-md shadow-rose-500/30">W</div>
+                    <span class="text-xl font-black tracking-tight">WellCMS <span class="text-rose-500">3.0</span></span>
+                </a>
+                <nav class="hidden md:flex items-center gap-6 text-sm font-bold text-stone-500 dark:text-gray-400">
+                    <a href="index.htm" class="hover:text-rose-500 transition-colors">首页</a>
+                    <a href="article_index.htm" class="text-stone-900 dark:text-white border-b-2 border-rose-500 pb-0.5">文章</a>
+                    <a href="forum_index.htm" class="hover:text-rose-500 transition-colors">论坛</a>
+                    <a href="forum_collection_list.htm" class="hover:text-rose-500 transition-colors">合集</a>
+                </nav>
+                <div class="flex items-center gap-2">
+                    <button onclick="wellcms.toggleDarkMode()" class="p-2 rounded-lg hover:bg-stone-200 dark:hover:bg-white/10 transition-colors" title="切换深浅色"><span class="dark:hidden">🌙</span><span class="hidden dark:inline">☀️</span></button>
+                    <a href="my_home.htm" title="个人中心"><span class="w-9 h-9 rounded-xl bg-gradient-to-br from-rose-400 to-amber-500 flex items-center justify-center text-white text-sm font-black shadow">林</span></a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 mx-auto w-full max-w-7xl px-4 py-6 md:px-8" id="main-content">
+
+        <!-- 分类导航（对应 article_category_navigation.inc.htm） -->
+        <nav class="mb-8 flex flex-wrap gap-2" aria-label="文章分类">
+            <a class="inline-flex items-center justify-center rounded-full border px-4 py-2 text-sm font-black transition border-stone-900 bg-stone-900 text-white dark:border-white dark:bg-white dark:text-stone-900" href="article_index.htm" aria-current="page">全部</a>
+            <a class="inline-flex items-center justify-center rounded-full border px-4 py-2 text-sm font-bold transition border-stone-200 bg-white text-stone-600 hover:border-blue-500 hover:text-blue-600 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-300" href="article_category.htm">开发笔记</a>
+            <a class="inline-flex items-center justify-center rounded-full border px-4 py-2 text-sm font-bold transition border-stone-200 bg-white text-stone-600 hover:border-violet-500 hover:text-violet-600 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-300" href="article_category.htm">产品设计</a>
+            <a class="inline-flex items-center justify-center rounded-full border px-4 py-2 text-sm font-bold transition border-stone-200 bg-white text-stone-600 hover:border-emerald-500 hover:text-emerald-600 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-300" href="article_category.htm">运维实战</a>
+            <a class="inline-flex items-center justify-center rounded-full border px-4 py-2 text-sm font-bold transition border-stone-200 bg-white text-stone-600 hover:border-amber-500 hover:text-amber-600 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-300" href="article_category.htm">官方公告</a>
+            <a class="inline-flex items-center justify-center rounded-full border px-4 py-2 text-sm font-bold transition border-stone-200 bg-white text-stone-600 hover:border-rose-500 hover:text-rose-500 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-300" href="article_archive.htm">归档</a>
+        </nav>
+
+        <!-- 推荐专题（featuredSpecials） -->
+        <section class="mb-10" aria-labelledby="home-specials">
+            <h2 class="mb-4 text-xl font-black tracking-tight" id="home-specials">推荐专题</h2>
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <section class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+                    <a class="group block overflow-hidden" href="article_collections.htm">
+                        <div class="h-32 w-full bg-blue-600 flex items-center justify-center transition-transform duration-200 group-hover:scale-105">
+                            <span class="text-5xl font-black text-white/90 tracking-tight">3.0</span>
+                        </div>
+                    </a>
+                    <div class="p-4">
+                        <h3 class="text-base font-black"><a class="transition hover:text-blue-600" href="article_collections.htm">3.0 升级指南</a></h3>
+                        <p class="mt-1 text-xs text-stone-400 font-bold">12 篇文章</p>
+                        <ul class="mt-3 space-y-1">
+                            <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-blue-600" href="article_detail.htm">从 2.x 升级到 3.0 的完整清单</a></li>
+                            <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-blue-600" href="article_detail.htm">新容器与自动装配详解</a></li>
+                        </ul>
+                        <a class="mt-3 inline-flex items-center gap-1 text-sm font-black text-blue-600 transition hover:text-blue-700" href="article_collections.htm">进入专题 <span aria-hidden="true">→</span></a>
+                    </div>
+                </section>
+                <section class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+                    <a class="group block overflow-hidden" href="article_collections.htm">
+                        <div class="h-32 w-full bg-violet-500 flex items-center justify-center transition-transform duration-200 group-hover:scale-105">
+                            <span class="text-5xl font-black text-white/90 tracking-tight">插件</span>
+                        </div>
+                    </a>
+                    <div class="p-4">
+                        <h3 class="text-base font-black"><a class="transition hover:text-violet-600" href="article_collections.htm">插件开发实战</a></h3>
+                        <p class="mt-1 text-xs text-stone-400 font-bold">18 篇文章</p>
+                        <ul class="mt-3 space-y-1">
+                            <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-violet-600" href="article_detail.htm">钩子系统：从入门到精通</a></li>
+                            <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-violet-600" href="article_detail.htm">原子服务一表一导实战</a></li>
+                        </ul>
+                        <a class="mt-3 inline-flex items-center gap-1 text-sm font-black text-violet-600 transition hover:text-violet-700" href="article_collections.htm">进入专题 <span aria-hidden="true">→</span></a>
+                    </div>
+                </section>
+                <section class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+                    <a class="group block overflow-hidden" href="article_collections.htm">
+                        <div class="h-32 w-full bg-emerald-500 flex items-center justify-center transition-transform duration-200 group-hover:scale-105">
+                            <span class="text-5xl font-black text-white/90 tracking-tight">分区</span>
+                        </div>
+                    </a>
+                    <div class="p-4">
+                        <h3 class="text-base font-black"><a class="transition hover:text-emerald-600" href="article_collections.htm">大数据量实践</a></h3>
+                        <p class="mt-1 text-xs text-stone-400 font-bold">9 篇文章</p>
+                        <ul class="mt-3 space-y-1">
+                            <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-emerald-600" href="article_detail.htm">分区表在千万级数据下的实践</a></li>
+                            <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-emerald-600" href="article_detail.htm">游标分页的正确姿势</a></li>
+                        </ul>
+                        <a class="mt-3 inline-flex items-center gap-1 text-sm font-black text-emerald-600 transition hover:text-emerald-700" href="article_collections.htm">进入专题 <span aria-hidden="true">→</span></a>
+                    </div>
+                </section>
+            </div>
+        </section>
+
+        <!-- 观点位（viewpoint） -->
+        <section class="mb-10 rounded-2xl bg-stone-900 dark:bg-slate-900 p-6 md:p-8 text-white relative overflow-hidden" aria-labelledby="home-viewpoint">
+            <div class="absolute -right-8 -top-8 w-32 h-32 rounded-full bg-amber-400"></div>
+            <div class="absolute -right-4 top-16 w-12 h-12 rounded-lg rotate-12 bg-rose-500"></div>
+            <h2 class="text-xs font-black uppercase tracking-[0.25em] text-amber-400" id="home-viewpoint">本期观点</h2>
+            <h3 class="mt-3 text-xl md:text-2xl font-black max-w-2xl relative z-10">
+                <a class="transition hover:text-amber-400" href="article_detail.htm">为什么 3.0 坚持「编译期压平」而不是「运行时探测」</a>
+            </h3>
+            <p class="mt-2 text-sm text-stone-300 max-w-2xl relative z-10">运行时磁盘探测是隐形税。3.0 把插件碎片在编译阶段烧录进模板，让每次请求都是 O(1) 加载…</p>
+            <a class="mt-4 inline-flex items-center gap-1 text-sm font-black text-amber-400 hover:text-amber-300 relative z-10" href="article_detail.htm">阅读全文 →</a>
+        </section>
+
+        <div class="grid grid-cols-1 gap-8 lg:grid-cols-3">
+            <!-- 文章列表 -->
+            <div class="lg:col-span-2">
+                <section aria-label="文章列表">
+
+                    <!-- 宽图卡片（presentation = wide） -->
+                    <article class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm hover:shadow-md transition-shadow mb-6 overflow-hidden" itemscope itemtype="https://schema.org/Article">
+                        <a class="group block overflow-hidden" href="article_detail.htm" itemprop="url">
+                            <div class="h-48 w-full bg-blue-600 flex items-end p-6 transition-transform duration-200 group-hover:scale-[1.02]">
+                                <span class="text-3xl font-black text-white/90 leading-tight">模板编译与物理压平详解</span>
+                            </div>
+                        </a>
+                        <div class="p-6">
+                            <div class="flex flex-wrap items-center gap-2 text-xs text-stone-400 font-bold">
+                                <a class="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-stone-50 px-2 py-1 text-stone-600 transition hover:border-blue-400 hover:text-blue-600 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="article_category.htm" itemprop="articleSection">开发笔记</a>
+                                <span class="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-1 text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-400">置顶</span>
+                                <span class="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-1 text-blue-700 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-400">推荐</span>
+                                <time datetime="2026-09-12T10:30:00+08:00" itemprop="datePublished">2026-09-12</time>
+                            </div>
+                            <h2 class="mt-2 text-lg font-black leading-6" itemprop="headline">
+                                <a class="transition hover:text-blue-600" href="article_detail.htm">模板编译与物理压平详解：插件碎片如何烧录进主模板</a>
+                            </h2>
+                            <p class="mt-2 text-sm leading-6 text-stone-500 dark:text-gray-400" itemprop="abstract">从 Compile 的工作机制讲起，解释 3.0 如何在编译期完成碎片聚合、语言包合并与资产清单生成，彻底消除运行时磁盘探测。</p>
+                            <ul class="mt-2 flex flex-wrap gap-2">
+                                <li><a class="text-xs font-bold text-blue-600 transition hover:text-blue-700" href="article_tag_detail.htm">#模板引擎</a></li>
+                                <li><a class="text-xs font-bold text-blue-600 transition hover:text-blue-700" href="article_tag_detail.htm">#性能优化</a></li>
+                            </ul>
+                            <div class="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-stone-400 font-bold">
+                                <p class="flex items-center gap-2" itemprop="author" itemscope itemtype="https://schema.org/Person">
+                                    <span class="h-6 w-6 rounded-lg bg-blue-600 flex items-center justify-center text-white text-[10px] font-black">顾</span>
+                                    <a class="transition hover:text-blue-600" href="article_author.htm" itemprop="url"><span itemprop="name">顾云帆</span></a>
+                                </p>
+                                <p class="inline-flex items-center gap-3">
+                                    <span class="inline-flex items-center gap-1" title="阅读"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>1.2k</span>
+                                    <a class="inline-flex items-center gap-1 transition hover:text-blue-600" href="article_detail.htm#comments" title="评论"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>46</a>
+                                    <span class="inline-flex items-center gap-1" title="点赞"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>238</span>
+                                </p>
+                            </div>
+                        </div>
+                    </article>
+
+                    <!-- 单图卡片（presentation = single） -->
+                    <article class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm hover:shadow-md transition-shadow mb-6 overflow-hidden p-6" itemscope itemtype="https://schema.org/Article">
+                        <div class="flex gap-4">
+                            <a class="group hidden w-40 shrink-0 overflow-hidden rounded-xl sm:block" href="article_detail.htm" itemprop="url">
+                                <div class="h-24 w-40 bg-violet-500 flex items-center justify-center text-white font-black transition-transform duration-200 group-hover:scale-105">分区</div>
+                            </a>
+                            <div class="min-w-0 flex-1">
+                                <div class="flex flex-wrap items-center gap-2 text-xs text-stone-400 font-bold">
+                                    <a class="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-stone-50 px-2 py-1 text-stone-600 transition hover:border-emerald-400 hover:text-emerald-600 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="article_category.htm" itemprop="articleSection">运维实战</a>
+                                    <time datetime="2026-09-15T21:32:00+08:00" itemprop="datePublished">2026-09-15</time>
+                                </div>
+                                <h2 class="mt-2 text-lg font-black leading-6" itemprop="headline">
+                                    <a class="transition hover:text-blue-600" href="article_detail.htm">分区表在千万级数据下的实践：从设计到落地</a>
+                                </h2>
+                                <p class="mt-2 text-sm leading-6 text-stone-500 dark:text-gray-400" itemprop="abstract">帖子主表按月份分区 + 冗余统计字段，彻底告别 COUNT(*) 慢查询，完整迁移过程记录。</p>
+                                <div class="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-stone-400 font-bold">
+                                    <p class="flex items-center gap-2"><span class="h-6 w-6 rounded-lg bg-violet-500 flex items-center justify-center text-white text-[10px] font-black">苏</span><a class="transition hover:text-blue-600" href="article_author.htm">苏晚晴</a></p>
+                                    <p class="inline-flex items-center gap-3">
+                                        <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>860</span>
+                                        <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>32</span>
+                                        <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>154</span>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </article>
+
+                    <!-- 无图卡片（presentation = none） -->
+                    <article class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm hover:shadow-md transition-shadow mb-6 p-6" itemscope itemtype="https://schema.org/Article">
+                        <div class="flex flex-wrap items-center gap-2 text-xs text-stone-400 font-bold">
+                            <a class="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-stone-50 px-2 py-1 text-stone-600 transition hover:border-amber-400 hover:text-amber-600 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="article_category.htm" itemprop="articleSection">官方公告</a>
+                            <time datetime="2026-09-16T09:00:00+08:00" itemprop="datePublished">2026-09-16</time>
+                        </div>
+                        <h2 class="mt-2 text-lg font-black leading-6" itemprop="headline">
+                            <a class="transition hover:text-blue-600" href="article_detail.htm">WellCMS 3.0.2 发布：修复分区迁移工具的三个边界问题</a>
+                        </h2>
+                        <p class="mt-2 text-sm leading-6 text-stone-500 dark:text-gray-400" itemprop="abstract">本次补丁版本修复了跨月分区合并、归档任务重试、以及超大附件表迁移中断续传的问题，建议所有 3.0.x 站点升级。</p>
+                        <div class="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-stone-400 font-bold">
+                            <p class="flex items-center gap-2"><span class="h-6 w-6 rounded-lg bg-amber-500 flex items-center justify-center text-white text-[10px] font-black">官</span><a class="transition hover:text-blue-600" href="article_author.htm">官方团队</a></p>
+                            <p class="inline-flex items-center gap-3">
+                                <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>2.4k</span>
+                                <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>18</span>
+                                <span class="inline-flex items-center gap-1"><svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>312</span>
+                            </p>
+                        </div>
+                    </article>
+                </section>
+
+                <!-- 游标分页（对应 article_pager.inc.htm） -->
+                <nav class="mt-6 flex items-center justify-between gap-3" aria-label="分页">
+                    <span>
+                        <a class="inline-flex items-center justify-center gap-1 rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-bold text-stone-600 transition hover:border-stone-900 hover:text-stone-900 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-300" rel="prev" href="#"><span aria-hidden="true">←</span> 上一页</a>
+                    </span>
+                    <span>
+                        <a class="inline-flex items-center justify-center gap-1 rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-bold text-stone-600 transition hover:border-stone-900 hover:text-stone-900 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-300" rel="next" href="#">下一页 <span aria-hidden="true">→</span></a>
+                    </span>
+                </nav>
+            </div>
+
+            <!-- 右侧栏（对应 article_sidebar.inc.htm） -->
+            <aside class="space-y-6">
+                <!-- 公告 -->
+                <section class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-5" aria-labelledby="sidebar-announcements">
+                    <h2 class="text-sm font-black uppercase tracking-wide flex items-center gap-2" id="sidebar-announcements"><span class="w-2 h-2 rounded-full bg-rose-500"></span>公告</h2>
+                    <ul class="mt-3 space-y-3">
+                        <li>
+                            <a class="block text-sm font-bold text-stone-700 dark:text-gray-200 transition hover:text-rose-500" href="article_detail.htm">国庆节期间审核时效调整通知</a>
+                            <p class="mt-1 text-xs text-stone-400">2026-09-15</p>
+                        </li>
+                        <li>
+                            <a class="block text-sm font-bold text-stone-700 dark:text-gray-200 transition hover:text-rose-500" href="article_detail.htm">社区内容规范 v3 更新说明</a>
+                            <p class="mt-1 text-xs text-stone-400">2026-09-01</p>
+                        </li>
+                    </ul>
+                </section>
+
+                <!-- 快讯 -->
+                <section class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-5" aria-labelledby="sidebar-flash">
+                    <h2 class="text-sm font-black uppercase tracking-wide flex items-center gap-2" id="sidebar-flash">
+                        <span class="w-2 h-2 rounded-full bg-blue-600"></span>
+                        <a class="transition hover:text-blue-600" href="article_flash.htm">快讯</a>
+                    </h2>
+                    <ul class="mt-3 space-y-2">
+                        <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-blue-600" href="article_detail.htm">Swoole 协程调度器进入公测</a></li>
+                        <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-blue-600" href="article_detail.htm">插件市场新增 12 款官方插件</a></li>
+                        <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-blue-600" href="article_detail.htm">文档站完成全文本地化</a></li>
+                    </ul>
+                </section>
+
+                <!-- 热门合集 -->
+                <section class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-5" aria-labelledby="sidebar-specials">
+                    <h2 class="text-sm font-black uppercase tracking-wide flex items-center gap-2" id="sidebar-specials">
+                        <span class="w-2 h-2 rounded-full bg-violet-500"></span>
+                        <a class="transition hover:text-violet-600" href="article_collections.htm">热门合集</a>
+                    </h2>
+                    <ul class="mt-3 space-y-3">
+                        <li>
+                            <a class="block text-sm font-bold text-stone-700 dark:text-gray-200 transition hover:text-violet-600" href="article_collections.htm">插件开发实战</a>
+                            <p class="mt-1 text-xs text-stone-400">18 篇文章</p>
+                        </li>
+                        <li>
+                            <a class="block text-sm font-bold text-stone-700 dark:text-gray-200 transition hover:text-violet-600" href="article_collections.htm">3.0 升级指南</a>
+                            <p class="mt-1 text-xs text-stone-400">12 篇文章</p>
+                        </li>
+                    </ul>
+                </section>
+
+                <!-- 随机推荐 -->
+                <section class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-5" aria-labelledby="sidebar-random">
+                    <h2 class="text-sm font-black uppercase tracking-wide flex items-center gap-2" id="sidebar-random"><span class="w-2 h-2 rounded-full bg-emerald-500"></span>随机推荐</h2>
+                    <ul class="mt-3 space-y-2">
+                        <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-emerald-600" href="article_detail.htm">写给新手的第一份钩子清单</a></li>
+                        <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-emerald-600" href="article_detail.htm">主题继承与扁平化寻址实践</a></li>
+                        <li><a class="block truncate text-sm text-stone-600 dark:text-gray-300 transition hover:text-emerald-600" href="article_detail.htm">如何用 20 行代码写一个评论插件</a></li>
+                    </ul>
+                </section>
+
+                <!-- 热门标签 -->
+                <section class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-5" aria-labelledby="sidebar-tags">
+                    <h2 class="text-sm font-black uppercase tracking-wide flex items-center gap-2" id="sidebar-tags">
+                        <span class="w-2 h-2 rounded-full bg-amber-500"></span>
+                        <a class="transition hover:text-amber-600" href="article_tags.htm">热门标签</a>
+                    </h2>
+                    <ul class="mt-3 flex flex-wrap gap-2">
+                        <li><a class="inline-flex items-center rounded-full border border-stone-200 bg-stone-50 px-3 py-1 text-xs font-bold text-stone-600 transition hover:border-amber-400 hover:text-amber-600 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="article_tag_detail.htm">性能优化</a></li>
+                        <li><a class="inline-flex items-center rounded-full border border-stone-200 bg-stone-50 px-3 py-1 text-xs font-bold text-stone-600 transition hover:border-amber-400 hover:text-amber-600 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="article_tag_detail.htm">插件</a></li>
+                        <li><a class="inline-flex items-center rounded-full border border-stone-200 bg-stone-50 px-3 py-1 text-xs font-bold text-stone-600 transition hover:border-amber-400 hover:text-amber-600 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="article_tag_detail.htm">模板</a></li>
+                        <li><a class="inline-flex items-center rounded-full border border-stone-200 bg-stone-50 px-3 py-1 text-xs font-bold text-stone-600 transition hover:border-amber-400 hover:text-amber-600 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="article_tag_detail.htm">分区</a></li>
+                        <li><a class="inline-flex items-center rounded-full border border-stone-200 bg-stone-50 px-3 py-1 text-xs font-bold text-stone-600 transition hover:border-amber-400 hover:text-amber-600 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" href="article_tag_detail.htm">Swoole</a></li>
+                    </ul>
+                </section>
+
+                <!-- 最新评论 -->
+                <section class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-5" aria-labelledby="sidebar-comments">
+                    <h2 class="text-sm font-black uppercase tracking-wide flex items-center gap-2" id="sidebar-comments"><span class="w-2 h-2 rounded-full bg-stone-400"></span>最新评论</h2>
+                    <ul class="mt-3 space-y-3">
+                        <li>
+                            <p class="text-sm leading-6 text-stone-600 dark:text-gray-300">「分区那篇太及时了，正好在迁 800 万行的表。」</p>
+                            <a class="mt-1 block truncate text-xs font-bold text-blue-600 transition hover:text-blue-700" href="article_detail.htm">分区表在千万级数据下的实践</a>
+                            <p class="mt-1 text-xs text-stone-400">10 分钟前</p>
+                        </li>
+                        <li>
+                            <p class="text-sm leading-6 text-stone-600 dark:text-gray-300">「跟着教程把 2.x 站点升上来了，很顺滑。」</p>
+                            <a class="mt-1 block truncate text-xs font-bold text-blue-600 transition hover:text-blue-700" href="article_detail.htm">从 2.x 升级到 3.0 的完整清单</a>
+                            <p class="mt-1 text-xs text-stone-400">1 小时前</p>
+                        </li>
+                    </ul>
+                </section>
+
+                <!-- 置顶文章 -->
+                <section class="rounded-2xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 shadow-sm p-5" aria-labelledby="sidebar-pinned">
+                    <h2 class="text-sm font-black uppercase tracking-wide flex items-center gap-2 text-amber-700 dark:text-amber-400" id="sidebar-pinned"><span class="w-2 h-2 rounded-full bg-amber-500"></span>置顶</h2>
+                    <ul class="mt-3 space-y-2">
+                        <li><a class="block truncate text-sm font-bold text-stone-700 dark:text-gray-200 transition hover:text-amber-600" href="article_detail.htm">新人必读：社区发帖规范</a></li>
+                        <li><a class="block truncate text-sm font-bold text-stone-700 dark:text-gray-200 transition hover:text-amber-600" href="article_detail.htm">3.0 常见问题汇总</a></li>
+                    </ul>
+                </section>
+            </aside>
+        </div>
+    </main>
+
+    <!-- 页脚 -->
+    <footer class="border-t border-stone-200 dark:border-slate-800 bg-white/60 dark:bg-slate-950">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row justify-between items-center gap-2 text-xs text-stone-400">
+            <span>© 2026 <a href="http://www.wellcms.com/" target="_blank" class="font-bold hover:text-rose-500">WellCMS</a> 演示站 · 页面为 UI 演示稿，数据均为演示数据</span>
+            <span>Processed: <b>0.0231</b>, SQL: <b>18</b></span>
+        </div>
+    </footer>
+    <script src="../assets/js/main.js"></script>
+</body>
+</html>

@@ -88,9 +88,9 @@ try {
     }
     // ————————————————————————————————————————————————————————————————————
 
-    // ———————————— 启动监控任务（感知 Fix 1 已恢复的任务）————————————
-    // 优先信任 Fix 1 恢复的旧任务。hasActiveTaskOfClass 只查 Redis，
-    // 但 Fix 1 已确保 Redis = MySQL 快照，结果准确。
+    // ———————————— 启动监控任务（感知 已恢复的任务）————————————
+    // 优先信任 恢复的旧任务。hasActiveTaskOfClass 只查 Redis，
+    // 已确保 Redis = MySQL 快照，结果准确。
     $bootTasks = [
         [
             'className'  => \Framework\Scheduler\Jobs\GenerateClassmapJob::class,
@@ -110,11 +110,17 @@ try {
             'priority'   => 10,
             'dedupeKey'  => 'system:temp_upload_cleanup_monitor',
         ],
+        [
+            'className'  => \App\Jobs\CompileCacheRecycleJob::class,
+            'methodName' => 'handle',
+            'priority'   => 10,
+            'dedupeKey'  => 'system:compile_cache_recycle_monitor',
+        ],
     ];
 
     foreach ($bootTasks as $taskDef) {
         if ($taskManage->hasActiveTaskOfClass($taskDef['className'])) {
-            // Fix 1 已恢复或原有任务链仍在运行，无需重复创建
+            // 已恢复或原有任务链仍在运行，无需重复创建
             continue;
         }
 

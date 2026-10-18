@@ -503,17 +503,40 @@ final class RequestProcessorMiddleware implements \Framework\Http\Interfaces\Mid
     /* ------------------------------- RouteParams ---------------------------------*/
     private function processRouteParams(ServerRequestInterface $request): ServerRequestInterface
     {
+        $parts = self::routeParts($request->getUri()->getPath(), $request->getUri()->getQuery(), $this->urlRewriteMode);
+
+        if (!empty($parts)) {
+            foreach ($parts as $key => &$val) {
+                $val = is_numeric($val) ? (int)$val : (string)$val;
+                $request = $request->withAttribute((string)$key, $val);
+            }
+            unset($val);
+
+            $request = $request->withAttribute('route_params', $parts);
+            $request = $request->withQueryParams($parts + $request->getQueryParams());
+        }
+
+        return $request;
+    }
+
+    /** HTTP 路由与附件引用共用原路径解析；不生成 URL，不处理上传或请求状态。 */
+    public static function routeParts(string $path, string $query, int $urlRewriteMode): array
+    {
         // 获取原始路径（不含 QueryString）
-        $path = $request->getUri()->getPath();
         if ('/' === $path) {
-            $path = $request->getUri()->getQuery();
-            // 只解析路径，其他GET参数由 processQueryParams 解析(?api=true&groupId=107)
-            if (empty($path) || strpos($path, '=') !== false || strpos($path, '&') === false) return $request;
+            $path = $query;
+            if (0 === $urlRewriteMode) {
+                // 模式 0 的首段是路由；后续参数仍由 processQueryParams 解析。
+                $path = explode('&', $path, 2)[0];
+                if ('' === $path || false !== strpos($path, '=')) return [];
+            } elseif (empty($path) || strpos($path, '=') !== false || strpos($path, '&') === false) {
+                return [];
+            }
         }
 
         $parts = [];
         // 根据模式分割
-        switch ($this->urlRewriteMode) {
+        switch ($urlRewriteMode) {
             case 0: // ?user-home-1.html
             case 1: // user-home-1.html
                 $path = pathinfo($path, PATHINFO_FILENAME);
@@ -542,18 +565,7 @@ final class RequestProcessorMiddleware implements \Framework\Http\Interfaces\Mid
                 $parts = [];
         }
 
-        if (!empty($parts)) {
-            foreach ($parts as $key => &$val) {
-                $val = is_numeric($val) ? (int)$val : (string)$val;
-                $request = $request->withAttribute((string)$key, $val);
-            }
-            unset($val);
-
-            $request = $request->withAttribute('route_params', $parts);
-            $request = $request->withQueryParams($parts + $request->getQueryParams());
-        }
-
-        return $request;
+        return $parts;
     }
 
     private function isSwooleCoroutine(): bool

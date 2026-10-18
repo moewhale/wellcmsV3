@@ -9,11 +9,14 @@ namespace App\Services\Content;
 
 use Framework\Utils\Validator;
 use Framework\Exception\BusinessException;
+use Framework\Exception\Infra\DatabaseException;
 
 class NavigationService
 {
     use \Framework\Core\Traits\StatefulTrait;
 
+    /** @var \Framework\Core\Container */
+    protected $container;
     /** @var \App\Models\NavigationModel */
     protected $dbModel;
     /** @var \Framework\Cache\Interfaces\CacheInterface */
@@ -26,15 +29,25 @@ class NavigationService
     protected $navCount = [];
 
     public function __construct(
-        \App\Models\NavigationModel $dbModel,
+        \Framework\Core\Container $container,
         \Framework\Cache\Interfaces\CacheInterface $cache,
         array $cacheConfig
     ) {
         // hook app_Services_NavigationService_construct_start.php
-        $this->dbModel = $dbModel;
+        $this->container = $container;
         $this->cache = $cache;
         $this->cacheConfig = $cacheConfig;
         // hook app_Services_NavigationService_construct_end.php
+    }
+
+    private function getModel()
+    {
+        if ($this->dbModel !== null) {
+            return $this->dbModel;
+        }
+        $resolved = $this->container->get(\App\Models\NavigationModel::class);
+        // 首次获取可能让出协程；保留已经建立的模型引用。
+        return $this->dbModel = $this->dbModel ?? $resolved;
     }
 
     public function insert(array $data): int
@@ -43,8 +56,8 @@ class NavigationService
 
         // hook app_Services_NavigationService_insert_start.php
 
-        $result = $this->dbModel->insert($data);
-        if (!$result) throw new BusinessException('NavigationService -> insert(): Data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $result = $this->getModel()->insert($data);
+        if (!$result) throw new DatabaseException('NavigationService -> insert(): data writing failed');
 
         // hook app_Services_NavigationService_insert_end.php
 
@@ -57,8 +70,8 @@ class NavigationService
 
         // hook app_Services_NavigationService_bulkInsert_start.php
 
-        $result = $this->dbModel->bulkInsert($data);
-        if (!$result) throw new BusinessException('NavigationService -> bulkInsert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $result = $this->getModel()->bulkInsert($data);
+        if (!$result) throw new DatabaseException('NavigationService -> bulkInsert(): data writing failed');
 
         // hook app_Services_NavigationService_bulkInsert_end.php
 
@@ -71,8 +84,8 @@ class NavigationService
 
         // hook app_Services_NavigationService_update_start.php
 
-        $result = $this->dbModel->update(['id' => $id], $update);
-        if ($result === 0) throw new BusinessException('NavigationService -> update() Update failed : ' . json_encode(['id' => $id, 'update' => $update], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $result = $this->getModel()->update(['id' => $id], $update);
+        if ($result === 0) throw new BusinessException('NavigationService -> update(): update failed');
 
         // hook app_Services_NavigationService_update_end.php
 
@@ -86,7 +99,7 @@ class NavigationService
 
         // hook app_Services_NavigationService_read_start.php
 
-        $data = $this->dbModel->read(['id' => $id], $orderby, $fields);
+        $data = $this->getModel()->read(['id' => $id], $orderby, $fields);
         if (empty($data)) return [];
 
         // hook app_Services_NavigationService_read_middle.php
@@ -104,7 +117,7 @@ class NavigationService
 
         // hook app_Services_NavigationService_find_start.php
 
-        $datalist = $this->dbModel->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         // hook app_Services_NavigationService_find_before.php
@@ -121,7 +134,7 @@ class NavigationService
     {
         // hook app_Services_NavigationService_findPaged_start.php
 
-        $datalist = $this->dbModel->find(['id' => $condition], $orderby, $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find(['id' => $condition], $orderby, $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         // hook app_Services_NavigationService_findPaged_before.php
@@ -140,7 +153,7 @@ class NavigationService
     public function delete($id): int
     {
         // hook app_Services_NavigationService_delete_start.php
-        $result = $this->dbModel->delete(['id' => $id]);
+        $result = $this->getModel()->delete(['id' => $id]);
         // hook app_Services_NavigationService_delete_end.php
         return $result;
     }
@@ -150,7 +163,7 @@ class NavigationService
         $maxId = $this->getState('maxId');
         if (null !== $maxId) return $maxId;
         // hook app_Services_NavigationService_maxid_start.php
-        $maxId = $this->dbModel->maxid();
+        $maxId = $this->getModel()->maxid();
         $this->setState('maxId', $maxId);
         // hook app_Services_NavigationService_maxid_end.php
         return $maxId;
@@ -162,7 +175,7 @@ class NavigationService
         $navCount = $this->getState('navCount', []);
         if (isset($navCount[$key])) return $navCount[$key];
 
-        $count = $this->dbModel->count($condition);
+        $count = $this->getModel()->count($condition);
         $navCount[$key] = $count;
         $this->setState('navCount', $navCount);
         return $count;
@@ -223,7 +236,7 @@ class NavigationService
             'NavigationList',
             'lock:NavigationList',
             function () {
-                return $this->dbModel->find([], [], 1, 1000);
+                return $this->getModel()->find([], [], 1, 1000);
             }
         );
 

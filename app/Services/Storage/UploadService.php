@@ -7,6 +7,11 @@ declare(strict_types=1);
 
 namespace App\Services\Storage;
 
+/*
+ * 上传链路保护（用户要求，2026-10-10；见根目录 AGENTS.md）：
+ * 未经用户明确授权，AI 禁止修改初始化、查重、秒传、分片合并及 tmp_files 会话契约。
+ * 此服务由所有插件共用；审计、重构、优化或修复测试均不构成授权，必须保留此备注。
+ */
 class UploadService
 {
     use \Framework\Core\Traits\StatefulTrait;
@@ -36,8 +41,6 @@ class UploadService
     private $container;
     /** @var array 配置对象或数组 */
     private $cfg;
-    /** @var string */
-    private $uploadNamespace = '';
 
     public function __construct(
         \Framework\Cache\Interfaces\CacheInterface $cache,
@@ -76,19 +79,18 @@ class UploadService
      */
     public function captureContext(\Framework\Http\Interfaces\ServerRequestInterface $request): void
     {
+        $this->setState('user', $request->getAttribute('user', []));
         $this->setState('language', $request->getAttribute(\App\Interfaces\LanguageLoaderInterface::class));
         $this->setState('session', $request->getAttribute(\Framework\Session\SessionInterface::class));
         $this->setState('ip', \Framework\Utils\IpHelper::ip($request->getServerParams()));
         // 可选: 从 request param 读取 namespace
         $ns = $request->getParsedBody()['namespace'] ?? '';
-        if ($ns !== '') {
-            $this->uploadNamespace = $ns;
-        }
+        $this->setState('uploadNamespace', is_string($ns) ? $ns : '');
     }
 
     public function setNamespace(string $namespace): void
     {
-        $this->uploadNamespace = $namespace;
+        $this->setState('uploadNamespace', $namespace);
     }
 
     /**
@@ -99,20 +101,25 @@ class UploadService
     {
         // hook app_Services_Storage_UploadService_init_start.php
 
+        $filehash = strtolower(trim($filehash));
+        if ($filehash !== '' && preg_match('/^(?:[a-f0-9]{32}|[a-f0-9]{64})$/', $filehash) !== 1) {
+            throw new \App\Exception\UploadClientException($this->getLang()->get('parameter_error', ['error' => 'filehash']), 1);
+        }
+
         if (!$filename || $filesize <= 0) {
-            throw new \InvalidArgumentException($this->getLang()->get('parameter_error', ['error' => 'filename/filesize']), 1);
+            throw new \App\Exception\UploadClientException($this->getLang()->get('parameter_error', ['error' => 'filename/filesize']), 1);
         }
 
         // 1. 统一配额与权限检查 (包含单文件大小限制、总数、后果及单场限制)
         $quotaCheck = $this->checkUploadQuota($user, $filesize, $filename);
         if (true !== $quotaCheck) {
-            throw new \RuntimeException($quotaCheck['msg'] ?? 'Upload quota exceeded', $quotaCheck['code'] ?? 1);
+            throw new \App\Exception\UploadClientException($quotaCheck['msg'] ?? 'Upload quota exceeded', $quotaCheck['code'] ?? 1);
         }
 
         // hook app_Services_Storage_UploadService_init_before.php
 
         // 2. 秒传检查
-        if ($filehash) {
+        if (strlen($filehash) === 64) {
             $fastData = $this->findHash($filehash);
             if (!empty($fastData)) {
                 // [关键修复] 秒传也要写会话，否则发布时将丢失该附件
@@ -148,7 +155,9 @@ class UploadService
             'chunkSize'  => $chunkSize,
             'total'      => $totalChunks,
             'status'     => 'init',
-            'created_at' => time()
+            'created_at' => time(),
+            'user_id' => (int)($user['id'] ?? 0),
+            'session_id_hash' => $this->uploadSessionIdentity(),
         ];
 
         // hook app_Services_Storage_UploadService_init_after.php
@@ -178,22 +187,24 @@ class UploadService
 
         // 基础参数校验
         if (!$uploadId || $chunkIdx <= 0 || $chunks <= 0) {
-            throw new \InvalidArgumentException('Missing uploadId/chunk/chunks', 1);
+            throw new \App\Exception\UploadClientException('Missing uploadId/chunk/chunks', 1);
         }
 
         // 配额与会话检查
         // 注意：此处仅检查是否超标，不扣费。分片阶段不重复检查扩展名
         $quotaCheck = $this->checkUploadQuota($user, $file->getSize());
         if (true !== $quotaCheck) {
-            throw new \RuntimeException($quotaCheck['msg'] ?? 'Upload quota exceeded', $quotaCheck['code'] ?? 1);
+            throw new \App\Exception\UploadClientException($quotaCheck['msg'] ?? 'Upload quota exceeded', $quotaCheck['code'] ?? 1);
         }
 
         // hook app_Services_Storage_UploadService_saveChunk_before.php
 
         $meta = $this->chunkStore->getMeta($uploadId);
         if (!$meta) {
-            throw new \RuntimeException($this->getLang()->get('the_session_does_not_exist_or_has_expired'), 1);
+            throw new \App\Exception\UploadClientException($this->getLang()->get('the_session_does_not_exist_or_has_expired'), 1);
         }
+
+        $this->assertUploadSessionOwner($meta, $user);
 
         // hook app_Services_Storage_UploadService_saveChunk_center.php
 
@@ -204,7 +215,15 @@ class UploadService
         }
 
         // 1. 获取存储路径 (相对路径)
-        $chunkDir = $this->fs->chunkDir($uploadId);
+        try {
+            $chunkDir = $this->fs->chunkDir($uploadId);
+        } catch (\InvalidArgumentException $clientError) {
+            throw new \App\Exception\UploadClientException(
+                $clientError->getMessage(),
+                (int)$clientError->getCode() ?: 1,
+                $clientError
+            );
+        }
         $partPath = $chunkDir . str_pad((string)$chunkIdx, 6, '0', STR_PAD_LEFT) . '.part';
 
         // 幂等处理：先删后写 (操作本地磁盘)
@@ -215,17 +234,26 @@ class UploadService
         // hook app_Services_Storage_UploadService_saveChunk_middle.php
 
         try {
-            // [关键修复] 使用 moveTo 确保原始临时文件被清理
+            // 使用 moveTo 确保原始临时文件被清理
             $file->moveTo($partPath);
         } catch (\Throwable $e) {
-            throw new \RuntimeException('Failed to move chunk: ' . $e->getMessage(), 1);
+            try {
+                if ($this->localDisk->exists($partPath) && !$this->localDisk->delete($partPath)) {
+                    throw new \RuntimeException('Partial upload chunk cleanup returned false');
+                }
+            } catch (\Throwable $cleanupFailure) {
+                throw new \RuntimeException('Failed to clean up partial upload chunk after move failure', 0, $e);
+            }
+            throw new \RuntimeException('Failed to move upload chunk', 0, $e);
         }
 
         // 安全检查 (基于已保存的文件)
         $mime = $this->localDisk->mimeType($partPath);
         if ($this->fs->blockDangerous($mime)) {
-            $this->localDisk->delete($partPath);
-            throw new \RuntimeException('Illegal shard types detected', 16);
+            if (!$this->localDisk->delete($partPath)) {
+                throw new \RuntimeException('Failed to remove rejected upload chunk');
+            }
+            throw new \App\Exception\UploadClientException('Illegal shard types detected', 16);
         }
 
         // hook app_Services_Storage_UploadService_saveChunk_end.php
@@ -250,29 +278,64 @@ class UploadService
     {
         // hook app_Services_Storage_UploadService_complete_start.php
 
-        // 1. 秒传检查
-        if ($filehash && ($fastData = $this->findHash($filehash))) {
-            return ['is_fast' => true, 'data' => $fastData];
+        $filehash = strtolower(trim($filehash));
+        if ($filehash !== '' && preg_match('/^(?:[a-f0-9]{32}|[a-f0-9]{64})$/', $filehash) !== 1) {
+            throw new \App\Exception\UploadClientException($this->getLang()->get('parameter_error', ['error' => 'filehash']), 1);
         }
+        $clientSha256 = strlen($filehash) === 64 ? $filehash : '';
 
         // 2. 校验 Session
         $meta = $this->chunkStore->getMeta($uploadId);
-        if (!$meta) throw new \RuntimeException($this->getLang()->get('the_session_does_not_exist_or_has_expired'), 1);
+        if (!$meta) throw new \App\Exception\UploadClientException($this->getLang()->get('the_session_does_not_exist_or_has_expired'), 1);
 
         // hook app_Services_Storage_UploadService_complete_before.php
 
+        $filename = $meta['filename'] ?? 'file';
+        $expectSize = (int)($meta['filesize'] ?? 0);
+        $metaHash = strtolower(trim((string)($meta['filehash'] ?? '')));
+        if ($metaHash !== '' && preg_match('/^(?:[a-f0-9]{32}|[a-f0-9]{64})$/', $metaHash) !== 1) {
+            throw new \App\Exception\UploadClientException($this->getLang()->get('parameter_error', ['error' => 'filehash']), 1);
+        }
+        $metaSha256 = strlen($metaHash) === 64 ? $metaHash : '';
+        if ($clientSha256 !== '' && $metaSha256 !== '' && !hash_equals($metaSha256, $clientSha256)) {
+            throw new \App\Exception\UploadClientException('Upload hash declaration mismatch', 1);
+        }
+        $declaredHash = $clientSha256 !== '' ? $clientSha256 : $metaSha256;
+        $this->assertUploadSessionOwner($meta, $user);
+        // 秒传也先核对本次会话与声明，随后登记 tmp_files 并收尾分片状态。
+        if ($declaredHash !== '' && ($fastData = $this->findHash($declaredHash))) {
+            if ((int)($fastData['data']['filesize'] ?? -1) !== $expectSize) {
+                throw new \App\Exception\UploadClientException('Upload size declaration mismatch', 1);
+            }
+            $this->saveToSession($declaredHash, $fastData['data'], $isAttachment);
+            $chunkDir = $this->fs->chunkDir($uploadId);
+            if (!$this->localDisk->deleteDir($chunkDir)) throw new \RuntimeException('Cannot clean completed upload chunks');
+            $this->chunkStore->destroy($uploadId);
+            return ['is_fast' => true, 'data' => $fastData];
+        }
         $total = (int)($meta['total'] ?? 0);
         $uploaded = $this->chunkStore->getUploadedParts($uploadId);
         if (count($uploaded) < $total) {
-            throw new \RuntimeException($this->getLang()->get('not_all_segments_have_been_uploaded'), 1);
+            throw new \App\Exception\UploadClientException($this->getLang()->get('not_all_segments_have_been_uploaded'), 1);
         }
 
-        $filename = $meta['filename'] ?? 'file';
-        $expectSize = (int)($meta['filesize'] ?? 0);
 
-        $chunkDir = $this->fs->chunkDir($uploadId);
-        $safeFilename = $this->fs->safeFilename($filename);
-        $finalDir = $this->fs->dailyFinalTmpDir($this->uploadNamespace);
+
+        try {
+            $chunkDir = $this->fs->chunkDir($uploadId);
+            $safeFilename = $this->fs->safeFilename($filename);
+        } catch (\InvalidArgumentException $clientError) {
+            throw new \App\Exception\UploadClientException(
+                $clientError->getMessage(),
+                (int)$clientError->getCode() ?: 1,
+                $clientError
+            );
+        }
+        try {
+            $finalDir = $this->fs->dailyFinalTmpDir($this->getState('uploadNamespace', ''));
+        } catch (\InvalidArgumentException $e) {
+            throw new \App\Exception\UploadClientException('Invalid upload namespace', 1, $e);
+        }
         $finalPath = $finalDir . $safeFilename;
 
         // 确保目标目录存在
@@ -280,7 +343,7 @@ class UploadService
             mkdir(dirname($finalPath), 0755, true);
         }
 
-        // 执行合并 (使用 appendStream 且不计算 Hash)
+        // 执行合并并在同一趟流读取中计算最终 SHA-256。
         // 确保目标文件不存在，避免脏数据追加
         if ($this->localDisk->exists($finalPath)) {
             $this->localDisk->delete($finalPath);
@@ -290,6 +353,8 @@ class UploadService
 
         // 3. 执行合并 (带锁)
         $lock = new \App\Services\Storage\Support\FileLock($chunkDir . '.merge.lock');
+        $hashCtx = hash_init('sha256');
+        $actualHash = '';
 
         try {
             for ($i = 1; $i <= $total; $i++) {
@@ -298,11 +363,10 @@ class UploadService
                 // 读取分片流
                 $readStream = $this->localDisk->readStream($partPath);
                 if ($readStream === false) {
-                    throw new \RuntimeException($this->getLang()->get('fragment_missing', ['fragment' => $i]), 1);
+                    throw new \App\Exception\UploadClientException($this->getLang()->get('fragment_missing', ['fragment' => $i]), 1);
                 }
 
-                // 不传递第三个参数 $hashCtx，使其内部走 stream_copy_to_stream 高性能通道
-                $success = $this->localDisk->appendStream($finalPath, $readStream);
+                $success = $this->localDisk->appendStream($finalPath, $readStream, $hashCtx);
                 fclose($readStream);
                 if (!$success) {
                     throw new \RuntimeException('Failed to append chunk ' . $i);
@@ -318,8 +382,18 @@ class UploadService
             $realSize = $this->localDisk->size($finalPath);
             if ($expectSize > 0 && $realSize !== $expectSize) {
                 // 大小不一致则视为失败，删除文件
-                $this->localDisk->delete($finalPath);
-                throw new \RuntimeException($this->getLang()->get('file_size_mismatch', ['filesize' => $expectSize, 'realSize' => $realSize]), 1);
+                if (!$this->localDisk->delete($finalPath)) {
+                    throw new \RuntimeException('Failed to remove size-mismatched upload');
+                }
+                throw new \App\Exception\UploadClientException($this->getLang()->get('file_size_mismatch', ['filesize' => $expectSize, 'realSize' => $realSize]), 1);
+            }
+
+            $actualHash = hash_final($hashCtx);
+            if ($declaredHash !== '' && !hash_equals($declaredHash, $actualHash)) {
+                if (!$this->localDisk->delete($finalPath)) {
+                    throw new \RuntimeException('Failed to remove hash-mismatched upload');
+                }
+                throw new \App\Exception\UploadClientException('Upload content hash mismatch', 1);
             }
 
             // hook app_Services_Storage_UploadService_complete_after.php
@@ -328,31 +402,34 @@ class UploadService
         } catch (\Throwable $e) {
             unset($lock);
             // 发生异常清理可能不完整的文件
-            if ($this->localDisk->exists($finalPath)) {
-                $this->localDisk->delete($finalPath);
+            try {
+                if ($this->localDisk->exists($finalPath) && !$this->localDisk->delete($finalPath)) {
+                    throw new \RuntimeException('Incomplete merged upload cleanup returned false');
+                }
+            } catch (\Throwable $cleanupFailure) {
+                throw new \RuntimeException('Failed to clean up incomplete merged upload', 0, $e);
             }
             throw $e;
         }
 
         // hook app_Services_Storage_UploadService_complete_end.php
 
-        // 清理分片和 Session
-        $this->localDisk->deleteDir($chunkDir);
-        $this->chunkStore->destroy($uploadId);
-
-        // 8. 持久化 (入库、扣费)
-        // 传递 filehashHex 避免重复计算
-        return $this->persistFile(
+        // 8. 回执和 tmp_files 可靠登记后才消费分片，失败仍可重试本次合并。
+        // 只能传递服务端在合并流中计算出的 SHA-256，禁止信任客户端声明。
+        $result = $this->persistFile(
             $finalPath,
             $safeFilename,
             $filename,
             $user,
             $tempId,
             $this->getLang()->get('merge_successfully'),
-            $filehash,
+            $actualHash,
             1,
             $isAttachment
         );
+        if (!$this->localDisk->deleteDir($chunkDir)) throw new \RuntimeException('Cannot clean completed upload chunks');
+        $this->chunkStore->destroy($uploadId);
+        return $result;
     }
 
     /**
@@ -364,16 +441,21 @@ class UploadService
     {
         // hook app_Services_Storage_UploadService_direct_start.php
 
+        $filehash = strtolower(trim($filehash));
+        if ($filehash !== '' && preg_match('/^(?:[a-f0-9]{32}|[a-f0-9]{64})$/', $filehash) !== 1) {
+            throw new \App\Exception\UploadClientException($this->getLang()->get('parameter_error', ['error' => 'filehash']), 1);
+        }
+
         // 1. 配额检查
         $quotaCheck = $this->checkUploadQuota($user, $filesize, $filename, $tempId);
         if (true !== $quotaCheck) {
-            throw new \RuntimeException($quotaCheck['msg'] ?? 'Upload quota exceeded', $quotaCheck['code'] ?? 1);
+            throw new \App\Exception\UploadClientException($quotaCheck['msg'] ?? 'Upload quota exceeded', $quotaCheck['code'] ?? 1);
         }
 
         // 校验
-        if ($filesize <= 0) throw new \InvalidArgumentException($this->getLang()->get('parameter_error', ['error' => 'filesize']), 1);
+        if ($filesize <= 0) throw new \App\Exception\UploadClientException($this->getLang()->get('parameter_error', ['error' => 'filesize']), 1);
         if ($filesize > $this->cfg['max_file_size']) {
-            throw new \RuntimeException($this->getLang()->get('filesize_too_large', [
+            throw new \App\Exception\UploadClientException($this->getLang()->get('filesize_too_large', [
                 'maxsize' => round($this->cfg['max_file_size'] / 1024 / 1024, 2) . 'MB',
                 'size' => round($filesize / 1024 / 1024, 2) . 'MB'
             ]), 1);
@@ -382,7 +464,7 @@ class UploadService
         // hook app_Services_Storage_UploadService_direct_before.php
 
         // 秒传检查
-        if ($filehash && ($fastData = $this->findHash($filehash))) {
+        if (strlen($filehash) === 64 && ($fastData = $this->findHash($filehash))) {
             $this->saveToSession($filehash, $fastData['data'], $isAttachment);
             return ['is_fast' => true, 'data' => $fastData];
         }
@@ -415,15 +497,34 @@ class UploadService
             return ['is_fast' => true, 'data' => $fastData];
         }
 
-        // [关键修复] 落盘到正式临时目录，使用 moveTo 彻底清理原始临时文件
-        $safeFilename = $this->fs->safeFilename($filename);
-        $finalDir = $this->fs->dailyFinalTmpDir($this->uploadNamespace);
+        // 落盘到正式临时目录，使用 moveTo 彻底清理原始临时文件
+        try {
+            $safeFilename = $this->fs->safeFilename($filename);
+        } catch (\InvalidArgumentException $clientError) {
+            throw new \App\Exception\UploadClientException(
+                $clientError->getMessage(),
+                (int)$clientError->getCode() ?: 1,
+                $clientError
+            );
+        }
+        try {
+            $finalDir = $this->fs->dailyFinalTmpDir($this->getState('uploadNamespace', ''));
+        } catch (\InvalidArgumentException $e) {
+            throw new \App\Exception\UploadClientException('Invalid upload namespace', 1, $e);
+        }
         $finalPath = $finalDir . $safeFilename;
 
         try {
             $file->moveTo($finalPath);
         } catch (\Throwable $e) {
-            throw new \RuntimeException($this->getLang()->get('upload_failed') . ': ' . $e->getMessage());
+            try {
+                if ($this->localDisk->exists($finalPath) && !$this->localDisk->delete($finalPath)) {
+                    throw new \RuntimeException('Partial direct upload cleanup returned false');
+                }
+            } catch (\Throwable $cleanupFailure) {
+                throw new \RuntimeException('Failed to clean up partial direct upload', 0, $e);
+            }
+            throw new \RuntimeException($this->getLang()->get('upload_failed'), 0, $e);
         }
 
         // 持久化 (入库、扣费)
@@ -451,8 +552,10 @@ class UploadService
         // 1. 安全检查 (在本地磁盘上进行)
         $realMime = $this->localDisk->mimeType($finalPath);
         if ($this->isDangerousFile($realMime ?: '', $orgFilename)) {
-            $this->localDisk->delete($finalPath);
-            throw new \RuntimeException($this->getLang()->get('illegal_file_type', ['name' => 'PHP']), 16);
+            if (!$this->localDisk->delete($finalPath)) {
+                throw new \RuntimeException('Failed to remove rejected upload');
+            }
+            throw new \App\Exception\UploadClientException($this->getLang()->get('illegal_file_type', ['name' => 'PHP']), 16);
         }
 
         $realSize = $this->localDisk->size($finalPath);
@@ -487,11 +590,12 @@ class UploadService
                 return ['is_fast' => true, 'data' => $fastData];
             }
         } else {
-            // 将十六进制字符串转换成二进制字符串
-            $filehash32 = @hex2bin((string)$filehashIndex);
-            if ($filehash32 === false) {
+            // 预计算值也必须是服务端产生的完整 SHA-256。
+            $filehashIndex = strtolower(trim((string)$filehashIndex));
+            if (preg_match('/^[a-f0-9]{64}$/', $filehashIndex) !== 1) {
                 throw new \RuntimeException($this->getLang()->get('parameter_error', ['error' => 'filehash']), 1);
             }
+            $filehash32 = hex2bin($filehashIndex);
         }
 
         // hook app_Services_Storage_UploadService_persistFile_middle.php
@@ -500,14 +604,18 @@ class UploadService
         // 最终状态核实：在入库前再次确认单场文件限制，彻底封堵高并发绕过风险
         $quotaCheck = $this->checkUploadQuota($user, (int)$realSize, $orgFilename, $tempId);
         if (true !== $quotaCheck) {
-            $this->localDisk->delete($finalPath);
-            throw new \RuntimeException($quotaCheck['msg'] ?? 'Upload quota exceeded', $quotaCheck['code'] ?? 1);
+            if (!$this->localDisk->delete($finalPath)) {
+                throw new \RuntimeException('Failed to remove quota-rejected upload');
+            }
+            throw new \App\Exception\UploadClientException($quotaCheck['msg'] ?? 'Upload quota exceeded', $quotaCheck['code'] ?? 1);
         }
 
         $this->recordUploadStats((int)($user['id'] ?? 0), $realSize);
 
         // 3. 准备数据
         $isImage = $this->fs->isImage($finalPath, $this->cfg['allowed_image_mimes']) ? 1 : 0;
+        // 审核分流：html/js（MIME 或扩展名命中）→ 标记待审核，审核通过前仅所有者与管理员可下载
+        $needsReview = $this->needsReview($realMime ?: '', $orgFilename);
         $ip = \Framework\Utils\IpHelper::ip();
 
         $data = [
@@ -515,9 +623,9 @@ class UploadService
             'filesize' => $realSize,
             'width' => 0,
             'height' => 0,
-            'is_reviewed' => 1,
-            'reviewed_at' => time(),
-            'reviewed_by' => 1,
+            'is_reviewed' => $needsReview ? 0 : 1,
+            'reviewed_at' => $needsReview ? 0 : time(),
+            'reviewed_by' => $needsReview ? 0 : 1,
             'exif_cleaned' => 0,
             'is_image' => $isImage,
             'create_ip' => $ip,
@@ -660,14 +768,17 @@ class UploadService
      */
     public function sanitizeMetadataForSession(array $data): array
     {
-        foreach ($data as $k => $v) {
-            if (is_array($v)) {
-                $data[$k] = $this->sanitizeMetadataForSession($v);
-            } elseif (is_string($v)) {
-                // 如果是 32 字节的二进制 Hash，转为 Hex
-                if (strlen($v) === 32 && !mb_check_encoding($v, 'UTF-8')) {
-                    $data[$k] = bin2hex($v);
-                }
+        foreach ($data as $key => $value) {
+            if (is_array($value)) {
+                $data[$key] = $this->sanitizeMetadataForSession($value);
+                continue;
+            }
+            if (!is_string($value)) continue;
+            if (in_array($key, ['filehash', 'newhash'], true) && strlen($value) === 32) {
+                $data[$key] = bin2hex($value);
+            } elseif ($key === 'create_ip' && !filter_var($value, FILTER_VALIDATE_IP)
+                && in_array(strlen($value), [4, 16], true)) {
+                $data[$key] = \Framework\Utils\IpHelper::bin2ip($value);
             }
         }
         return $data;
@@ -683,12 +794,45 @@ class UploadService
                 $data[$k] = $this->restoreMetadata($v);
             } elseif (is_string($v)) {
                 // 如果长度为 64 的 Hex 字符串且 Key 是 filehash，恢复为 32 字节二进制
-                if ($k === 'filehash' && strlen($v) === 64 && ctype_xdigit($v)) {
+                if (in_array($k, ['filehash', 'newhash'], true) && strlen($v) === 64 && ctype_xdigit($v)) {
                     $data[$k] = hex2bin($v);
                 }
             }
         }
         return $data;
+    }
+
+    /** 仅从当前上传会话补回遗漏的文件，不按正文中的任意路径扫描服务器。 */
+    public function sessionFileForUrl(string $url): array
+    {
+        $session = $this->getState('session');
+        if (!$session instanceof \Framework\Session\SessionInterface) return [];
+        $files = $session->get('tmp_files', []);
+        if (!is_array($files)) throw new \RuntimeException('Invalid temporary upload session');
+        foreach ($files as $file) {
+            if (is_array($file) && isset($file['url']) && hash_equals((string)$file['url'], $url)) {
+                return $this->restoreMetadata($file);
+            }
+        }
+        return [];
+    }
+
+    private function uploadSessionIdentity(): string
+    {
+        $session = $this->getState('session');
+        if (!$session instanceof \Framework\Session\SessionInterface || $session->getId() === '') {
+            throw new \RuntimeException('Upload session is unavailable');
+        }
+        return hash('sha256', $session->getId());
+    }
+
+    private function assertUploadSessionOwner(array $meta, array $user): void
+    {
+        if (!isset($meta['user_id'], $meta['session_id_hash'])
+            || (int)$meta['user_id'] !== (int)($user['id'] ?? 0)
+            || !hash_equals((string)$meta['session_id_hash'], $this->uploadSessionIdentity())) {
+            throw new \App\Exception\UploadClientException('Upload session ownership mismatch', 1);
+        }
     }
 
     /**
@@ -701,11 +845,13 @@ class UploadService
         if ($session instanceof \Framework\Session\SessionInterface) {
             $tmpFiles = $session->get($key, []);
             if (isset($tmpFiles[$hash])) {
-                $path = $tmpFiles[$hash]['path'] ?? '';
-                if ($path && strpos($path, 'temp') !== false) {
-                    $fullPath = $this->fs->normalizePath($path);
-                    if (is_file($fullPath)) {
+                $path = (string)($tmpFiles[$hash]['path'] ?? '');
+                if ($path !== '') {
+                    try {
+                        $fullPath = $this->fs->resolveManagedTempFile($path);
                         @unlink($fullPath);
+                    } catch (\Throwable $e) {
+                        // 根外、符号链接或已不存在：只清理当前会话项，绝不扩大删除边界。
                     }
                 }
                 unset($tmpFiles[$hash]);
@@ -721,7 +867,8 @@ class UploadService
     {
         if ($filehash) {
             $filehash = \App\Services\Storage\Support\Util::normalizeHash($filehash);
-            if ($filehash) {
+            // 32 位旧客户端值是 filename+filesize 的 MD5 兼容提示，不是内容身份。
+            if ($filehash && strlen($filehash) === 64) {
                 // 查 Cache 索引
                 $key = "hash:index:{$filehash}";
                 $hit = $this->cache->get($key); // 对应原 findByHash
@@ -733,7 +880,53 @@ class UploadService
                     $hit = $this->fileStorageService->getByFilehash($filehash32);
                 }
 
-                if ($hit && !empty($hit['path']) && $this->localDisk->exists($hit['path'])) {
+                if (is_array($hit) && empty($hit['id'])) {
+                    $owned = $this->sessionFileForUrl((string)($hit['url'] ?? ''));
+                    if (!$owned || (string)$owned['path'] !== (string)($hit['path'] ?? '')) {
+                        $this->cache->delete($key);
+                        $hit = $this->fileStorageService->getByFilehash($filehash32 ?? hex2bin($filehash));
+                    } else {
+                        $hit = $owned;
+                    }
+                }
+                if (is_array($hit) && !empty($hit['id'])) {
+                    $hit = $this->fileStorageService->readOnMaster((int)$hit['id']);
+                    if (!$hit || !hash_equals((string)($hit['filehash'] ?? ''), $filehash)) {
+                        $this->cache->delete($key);
+                        return [];
+                    }
+                }
+                $previewUrl = '';
+                // 上传保护：数据库 path 是受管定位值，先用既有边界解析器转为绝对路径；
+                // 不把 /storage/upload/... 直接交给 LocalStorage 当成系统根路径。
+                $available = false;
+                if (is_array($hit) && !empty($hit['path'])) {
+                    try {
+                        $localPath = !empty($hit['id'])
+                            ? $this->fileStorageService->resolveStoredFilePath((string)$hit['path'])
+                            : $this->fileStorageService->resolveTempFilePath((string)$hit['path']);
+                        $available = $this->localDisk->exists($localPath);
+                    } catch (\RuntimeException $unavailableLocalFile) {
+                        // 缺失或无效本地定位仍交给原云端复用检查，不宣称秒传成功。
+                    }
+                }
+                if (!$available && is_array($hit) && !empty($hit['id']) && (int)($hit['cloud_type'] ?? 0) === 1) {
+                    $user = $this->getState('user', []);
+                    $userId = (int)($user['id'] ?? 0);
+                    $diskKey = (string)($hit['disk_key'] ?? '');
+                    $owned = $userId > 0 && ((int)($user['group_id'] ?? 0) === 1
+                        || $this->attachmentService->findOnMaster(['storage_id' => (int)$hit['id'], 'user_id' => $userId], 0, 1));
+                    if ($owned && $diskKey !== '' && $diskKey !== 'local'
+                        && !($this->storage->disk($diskKey) instanceof \App\Services\Storage\Drivers\LocalStorage)) {
+                        $this->fileStorageService->resolveStoredFile($hit);
+                        $urls = $this->fileStorageService->cloudReadUrls($diskKey, [(string)$hit['url']], ['mode' => 'edit',
+                            'scope' => ['module' => 'storage', 'kind' => 'reuse', 'storageId' => (int)$hit['id'], 'actorId' => $userId],
+                            'expiresAt' => time() + 300]);
+                        $previewUrl = $urls[(string)$hit['url']];
+                        $available = true;
+                    }
+                }
+                if ($available) {
                     // 同步 Cache 索引
                     $this->saveToCacheIndex($filehash, $hit);
 
@@ -749,6 +942,8 @@ class UploadService
                             'size' => isset($hit['filesize']) ? (int)$hit['filesize'] : 0,
                             'url'  => isset($hit['url']) ? $hit['url'] : '',
                             'mime' => isset($hit['mime']) ? $hit['mime'] : 'application/octet-stream',
+                            'hash' => $filehash,
+                            'previewUrl' => $previewUrl,
                         ]
                     ];
                 }
@@ -759,37 +954,10 @@ class UploadService
 
     private function findBbHash(string $filehash32, string $filehashIndex): array
     {
-        // 1. 优先查 Cache 索引 (可能在 temp 中)
-        $key = "hash:index:{$filehashIndex}";
-        $hit = $this->cache->get($key);
-
-        if (empty($hit) || empty($hit['path'])) {
-            // 2. 查 DB (正式库)
-            $hit = $this->fileStorageService->getByFilehash($filehash32);
+        if (!hash_equals(bin2hex($filehash32), $filehashIndex)) {
+            throw new \InvalidArgumentException('Upload hash representation mismatch');
         }
-
-        if ($hit && !empty($hit['path'])) {
-            // 无论从哪里查到，都更新/同步 Cache 索引
-            $this->saveToCacheIndex($filehashIndex, $hit);
-
-            // [关键修复] 清洗元数据防止二进制字符进入 Session
-            $sanitizedHit = $this->sanitizeMetadataForSession($hit);
-
-            return [
-                'code' => 0,
-                'message' => $this->getLang()->get('upload_successfully'),
-                'status' => 'complete',
-                'data' => $sanitizedHit,
-                'file' => [
-                    'name' => $hit['orgfilename'] ?? ($hit['filename'] ?? basename($hit['path'])),
-                    'size' => (int)($hit['filesize'] ?? 0),
-                    'url'  => $hit['url'] ?? '',
-                    'mime' => $hit['mime'] ?? 'application/octet-stream',
-                    'hash' => $filehashIndex
-                ]
-            ];
-        }
-        return [];
+        return $this->findHash($filehashIndex);
     }
 
     private function saveToCacheIndex(string $filehash, array $meta): void{
@@ -908,33 +1076,118 @@ class UploadService
     }
 
     /**
-     * 检查文件是否需要审核或是否为危险文件
+     * 硬拦截判定：可执行文件 / 可执行代码 / 内容与扩展名类型混淆。
+     *
+     * 分层策略：
+     *   1. MIME 硬拦截：可执行代码与 Windows 可执行（代码层安全底线，不依赖配置）
+     *   2. 扩展名硬黑名单：finfo 识别失败或降级时的纵深防御
+     *   3. 内容-白名单一致性：强特征 MIME（有魔数/容器结构的二进制）必须存在于
+     *      allowed_mimes 白名单，防止"白名单扩展名 + 异形可执行内容"类型混淆。
+     *      svg（image/svg+xml）已在白名单移除，即使扩展名白名单被误改，内容层仍会拦截。
+     *
+     * 注意：html/js 不在拦截范围 —— 它们有正当附件业务且可安全分发（nginx deny 静态伺服
+     * + download 接口审核门禁），由 needsReview() 标记待审。
+     *
+     * @param string $mimetype finfo 内容检测的 MIME
+     * @param string $filename 原始文件名
+     * @return bool true=必须拒绝上传
      */
     public function isDangerousFile(string $mimetype, string $filename): bool
     {
-        // 从配置获取需要审核的文件类型
-        $requireReview = $this->cfg['require_review'] ?? [
-            'application/x-msdownload', // exe
+        // 1. MIME 硬拦截（可执行代码 / Windows 可执行）
+        //    注意：libmagic 对 PHP 文件的识别结果同时有 application/x-php 与 text/x-php
+        //    （实测 finfo），两种都必须拦截，否则伪装图片扩展名即可绕过。
+        $blockMimes = [
+            'application/x-msdownload', // exe/dll/com/bat/msi
             'application/x-sh',         // sh
             'application/x-bat',        // bat
             'application/x-php',        // php
-            'text/html',                // html
-            'text/javascript',          // js
+            'text/x-php',               // php（libmagic 变体）
         ];
-
-        // 1. 检查MIME类型
-        if (in_array($mimetype, $requireReview)) {
+        if (in_array($mimetype, $blockMimes, true)) {
             return true;
         }
 
-        // 2. 检查文件扩展名
+        // 2. 扩展名硬黑名单（纵深防御：finfo 不可用/识别失败时兜底）
         $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
-        $dangerousExts = ['exe', 'bat', 'sh', 'php', 'js', 'html', 'htm'];
-        if (in_array($ext, $dangerousExts)) {
+        $dangerousExts = ['exe', 'bat', 'sh', 'php', 'php3', 'php5', 'phtml', 'phar'];
+        if (in_array($ext, $dangerousExts, true)) {
+            return true;
+        }
+
+        // 3. 内容-扩展名一致性：强特征 MIME 必须命中 allowed_mimes 白名单
+        if ($this->isStrongMimeNotAllowed($mimetype)) {
             return true;
         }
 
         return false;
+    }
+
+    /**
+     * 待审判定：标记为待审核（is_reviewed=0），审核通过（is_reviewed=1）
+     * 前仅文件所有者与管理员可下载。
+     *
+     * 判定为 MIME 或扩展名任一命中：
+     *   - MIME：require_review 配置（text/html、text/javascript 等）
+     *   - 扩展名：html/htm/js —— 实测 libmagic 对简单 JS 内容识别为 text/plain，
+     *     仅查 MIME 会被绕过，扩展名判定兜底。
+     *
+     * @param string $mimetype finfo 内容检测的 MIME
+     * @param string $filename 原始文件名
+     * @return bool true=需要人工审核
+     */
+    public function needsReview(string $mimetype, string $filename): bool
+    {
+        $requireReview = $this->cfg['require_review'] ?? [
+            'text/html',             // html（可内嵌脚本）
+            'text/javascript',       // js（finfo 两种识别结果都要覆盖）
+            'application/javascript',
+        ];
+        if (in_array($mimetype, $requireReview, true)) {
+            return true;
+        }
+
+        $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+        if (in_array($ext, ['html', 'htm', 'js'], true)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * 强特征 MIME 白名单校验。
+     *
+     * 文本类（text/*、application/json、application/javascript）无魔数，
+     * finfo 按内容特征识别，不参与一致性校验；其余类型（image/*、video/*、
+     * application/pdf 等）必须有文件签名，内容 MIME 必须存在于 allowed_mimes。
+     *
+     * @param string $mimetype finfo 内容检测的 MIME
+     * @return bool true=强特征类型但不在白名单（类型混淆，应拒绝）
+     */
+    private function isStrongMimeNotAllowed(string $mimetype): bool
+    {
+        // 无法检测/无特征：交给扩展名白名单与黑名单兜底
+        if ($mimetype === '' || $mimetype === 'application/octet-stream') {
+            return false;
+        }
+
+        // 弱特征文本类：无文件签名，不参与强校验（txt/html/js/json/css 等）
+        $weakPrefixes = ['text/', 'application/json', 'application/javascript'];
+        foreach ($weakPrefixes as $prefix) {
+            if (strpos($mimetype, $prefix) === 0) {
+                return false;
+            }
+        }
+
+        // 强特征类型：内容 MIME 必须命中 allowed_mimes 白名单
+        $allowedMimes = $this->cfg['allowed_mimes'] ?? [];
+        foreach ($allowedMimes as $mime => $exts) {
+            if ($mime === $mimetype) {
+                return false;
+            }
+        }
+        return true;
     }
 
     protected function getLang(): \App\Interfaces\LanguageLoaderInterface

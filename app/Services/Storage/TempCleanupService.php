@@ -35,7 +35,7 @@ class TempCleanupService
         \App\Services\Content\TempContentService $tempContentService,
         \Framework\Core\Container $container
     ) {
-        // 铁律 #25：不使用 ?? 兜底，config 缺失时 PHP Warning 自然暴露
+        // config 缺失时 PHP Warning 自然暴露
         $this->config = $uploadConfig['temp_cleanup'];
         $this->logger = $logger;
         $this->cache = $cache;
@@ -56,8 +56,6 @@ class TempCleanupService
 
     /**
      * 完整清理（Scheduler Job + 管理员手动触发）
-     *
-     * 执行两阶段扫描（见 §五 决策矩阵）。
      *
      * 防御：首行检查 $this->tempRoot 目录是否存在（兼容首次安装/误删场景）。
      * 批量删除后调用 clearstatcache() 避免 PHP stat 缓存返回过期信息。
@@ -370,7 +368,7 @@ class TempCleanupService
     }
 
     /**
-     * 路径归一化（§15.5 详细分析了两种输入格式的一致性）
+     * 路径归一化
      *
      * TempContent 中存储的路径（APP_PATH 相对路径）与 scandir 产出的路径（绝对路径）
      * 必须归一化到相同格式才能做 O(1) isset 查找。
@@ -462,6 +460,13 @@ class TempCleanupService
             if ($sub === '.' || $sub === '..') continue;
             if ($processed >= $batchLimit) break;
             $filePath = $fullPath . '/' . $sub;
+            if (is_link($filePath)) continue;
+            if (is_dir($filePath)) {
+                $nested = $this->processNsDir($filePath, $entry, $nsTtl, $batchLimit - $processed, $protectedSet);
+                $processed += $nested['processed'];
+                foreach ($nested['stats'] as $name => $value) $stat[$name] += $value;
+                continue;
+            }
             if (!is_file($filePath)) continue;
             $mtime = filemtime($filePath);
             $age = time() - $mtime;
@@ -507,6 +512,13 @@ class TempCleanupService
             if ($sub === '.' || $sub === '..') continue;
             if ($processed >= $batchLimit) break;
             $filePath = $fullPath . '/' . $sub;
+            if (is_link($filePath)) continue;
+            if (is_dir($filePath)) {
+                $nested = $this->processNsDirLight($filePath, $entry, $nsTtl, $batchLimit - $processed);
+                $processed += $nested['processed'];
+                foreach ($nested['stats'] as $name => $value) $stat[$name] += $value;
+                continue;
+            }
             if (!is_file($filePath)) continue;
             $mtime = filemtime($filePath);
             $age = time() - $mtime;

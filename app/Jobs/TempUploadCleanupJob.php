@@ -58,8 +58,7 @@ class TempUploadCleanupJob implements \Framework\Scheduler\Interfaces\JobInterfa
 
             // hook app_Jobs_TempUploadCleanupJob_handle_end.php
 
-            $this->scheduleNext();
-            return $result['errors'] === 0;
+            return $result['errors'] === 0 && $this->scheduleNext();
         } catch (\Throwable $e) {
             // 异常不静默
             $this->logger->error('TempUploadCleanupJob failed', array(
@@ -73,7 +72,7 @@ class TempUploadCleanupJob implements \Framework\Scheduler\Interfaces\JobInterfa
     /**
      * 投递下一次任务（自循环，对标 PartitionMaintainJob）
      */
-    private function scheduleNext(): void
+    private function scheduleNext(): bool
     {
         try {
             $now = time();
@@ -84,7 +83,7 @@ class TempUploadCleanupJob implements \Framework\Scheduler\Interfaces\JobInterfa
                 $scheduledAt = strtotime('+1 day 04:00');
             }
 
-            $this->taskManage->createTask(array(
+            $dispatch = $this->taskManage->createTask(array(
                 'className'   => self::class,
                 'methodName'  => 'handle',
                 'args'        => array(),
@@ -96,14 +95,26 @@ class TempUploadCleanupJob implements \Framework\Scheduler\Interfaces\JobInterfa
                 'retryDelay'  => 60,
             ));
 
+            if (!\Framework\Scheduler\TaskDispatchResult::isAccepted($dispatch)) {
+                $this->logger->warning('TempUploadCleanupJob scheduleNext failed', array(
+                    'outcome' => \Framework\Scheduler\TaskDispatchResult::outcome($dispatch),
+                    'code' => \Framework\Scheduler\TaskDispatchResult::code($dispatch)
+                        ?? 'TASK_DISPATCH_UNKNOWN',
+                    'task_id' => \Framework\Scheduler\TaskDispatchResult::taskId($dispatch),
+                ));
+                return false;
+            }
+
             $this->logger->info('TempUploadCleanupJob scheduled next', array(
                 'scheduled_at' => date('Y-m-d H:i:s', $scheduledAt),
             ));
+            return true;
         } catch (\Throwable $e) {
             // TaskManage 不可用时（无 Redis）不抛异常，仅记录
             $this->logger->warning('TempUploadCleanupJob scheduleNext failed', array(
                 'error' => $e->getMessage(),
             ));
+            return false;
         }
     }
 }

@@ -9,9 +9,12 @@ namespace App\Services\Content;
 
 use Framework\Utils\Validator;
 use Framework\Exception\BusinessException;
+use Framework\Exception\Infra\DatabaseException;
 
 class TempContentService
 {
+    /** @var \Framework\Core\Container */
+    protected $container;
     /** @var \App\Models\TempContentModel */
     protected $dbModel;
     /** @var \Framework\Cache\Interfaces\CacheInterface */
@@ -26,13 +29,13 @@ class TempContentService
     protected $ttl;
 
     public function __construct(
-        \App\Models\TempContentModel $dbModel,
+        \Framework\Core\Container $container,
         \Framework\Cache\Interfaces\CacheInterface $cache,
         \App\Utils\I18nDateFormatter $i18nDateFmt,
         array $cacheConfig
     ) {
         // hook app_Services_TempContentService_construct_start.php
-        $this->dbModel = $dbModel;
+        $this->container = $container;
         $this->cache = $cache;
         $this->cacheConfig = $cacheConfig;
         $this->i18nDateFmt = $i18nDateFmt;
@@ -40,10 +43,19 @@ class TempContentService
         // hook app_Services_TempContentService_construct_end.php
     }
 
+    private function getModel()
+    {
+        if ($this->dbModel !== null) {
+            return $this->dbModel;
+        }
+        $resolved = $this->container->get(\App\Models\TempContentModel::class);
+        // 首次获取可能让出协程；保留已经建立的模型引用。
+        return $this->dbModel = $this->dbModel ?? $resolved;
+    }
+
     public function insert(array $data): string
     {
         Validator::make(['data' => $data], ['data' => 'required|array']);
-        !is_array($data) && $data = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         if (!isset($data['id'])) {
             $data['id'] = \Framework\Utils\UuidHelper::generate(true);
@@ -62,8 +74,8 @@ class TempContentService
 
         // hook app_Services_TempContentService_insert_start.php
 
-        $result = $this->dbModel->insert($data);
-        if (!$result) throw new BusinessException('TempContentService -> insert(): Data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $result = $this->getModel()->insert($data);
+        if (!$result) throw new DatabaseException('TempContentService -> insert(): data writing failed');
 
         // hook app_Services_TempContentService_insert_end.php
 
@@ -77,8 +89,8 @@ class TempContentService
 
         // hook app_Services_TempContentService_bulkInsert_start.php
 
-        $result = $this->dbModel->bulkInsert($data);
-        if (!$result) throw new BusinessException('TempContentService -> bulkInsert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $result = $this->getModel()->bulkInsert($data);
+        if (!$result) throw new DatabaseException('TempContentService -> bulkInsert(): data writing failed');
 
         // hook app_Services_TempContentService_bulkInsert_end.php
 
@@ -100,7 +112,7 @@ class TempContentService
 
         try {
             $binId = \Framework\Utils\UuidHelper::toBinary($id);
-            $result = $this->dbModel->update(['id' => $binId], $update);
+            $result = $this->getModel()->update(['id' => $binId], $update);
             if ($result === 0) throw new BusinessException('TempContentService -> update() Update failed');
 
             if (!empty($this->cacheConfig['stores'])) {
@@ -121,13 +133,13 @@ class TempContentService
         $hexId = bin2hex($binId);
 
         if (empty($this->cacheConfig['stores'])) {
-            $data = $this->dbModel->read(['id' => $binId], $orderby, $fields);
+            $data = $this->getModel()->read(['id' => $binId], $orderby, $fields);
         } else {
             $data = $this->cache->cacheWithLock(
                 'temp:' . $hexId,
                 'lock:temp:read:' . $hexId,
                 function () use ($binId, $orderby, $fields) {
-                    return $this->dbModel->read(['id' => $binId], $orderby, $fields);
+                    return $this->getModel()->read(['id' => $binId], $orderby, $fields);
                 },
                 3,
                 $this->ttl
@@ -157,7 +169,7 @@ class TempContentService
 
         // hook app_Services_TempContentService_find_start.php
 
-        $datalist = $this->dbModel->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         foreach ($datalist as &$data) $this->format($data);
@@ -175,7 +187,7 @@ class TempContentService
 
         // hook app_Services_TempContentService_findByIds_start.php
 
-        $datalist = $this->dbModel->find(['id' => $binIds], ['id' => $orderby], $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find(['id' => $binIds], ['id' => $orderby], $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         foreach ($datalist as &$data) $this->format($data);
@@ -191,7 +203,7 @@ class TempContentService
 
         // hook app_Services_TempContentService_findByUserId_start.php
 
-        $datalist = $this->dbModel->find(['user_id' => $userId], ['created_at' => -1], $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find(['user_id' => $userId], ['created_at' => -1], $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         foreach ($datalist as &$data) $this->format($data);
@@ -216,7 +228,7 @@ class TempContentService
 
         // hook app_Services_TempContentService_findPaged_start.php
 
-        $datalist = $this->dbModel->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         // hook app_Services_TempContentService_findPaged_before.php
@@ -239,7 +251,7 @@ class TempContentService
 
         // hook app_Services_TempContentService_findByUserIdPaged_start.php
 
-        $datalist = $this->dbModel->find(['user_id' => $condition], $orderby, $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find(['user_id' => $condition], $orderby, $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         // hook app_Services_TempContentService_findByUserIdPaged_before.php
@@ -263,21 +275,21 @@ class TempContentService
             : \Framework\Utils\UuidHelper::toBinary((string)$id);
 
         // hook app_Services_TempContentService_delete_start.php
-        $result = $this->dbModel->delete(['id' => $binId]);
+        $result = $this->getModel()->delete(['id' => $binId]);
         // hook app_Services_TempContentService_delete_end.php
         return $result;
     }
 
     public function count( array $condition= []): int
     {
-        return $this->dbModel->count($condition);
+        return $this->getModel()->count($condition);
     }
 
     public function maxid(): int
     {
         if (null !== $this->maxId) return $this->maxId;
         // hook app_Services_TempContentService_maxid_start.php
-        $this->maxId = $this->dbModel->maxid();
+        $this->maxId = $this->getModel()->maxid();
         // hook app_Services_TempContentService_maxid_end.php
         return $this->maxId;
     }

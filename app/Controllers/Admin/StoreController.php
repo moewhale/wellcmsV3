@@ -84,14 +84,14 @@ class StoreController extends BaseController
             $condition['type'] = $type;
         }
         if ($keywords) {
-            // FIX: 使用 LIKE 语义实现模糊搜索，避免精确匹配导致搜索无结果
+            // 使用 LIKE 语义实现模糊搜索，避免精确匹配导致搜索无结果
             $condition[$searchType] = ['LIKE' => $keywords];
         }
 
         $isLogged = $this->market->isLogged();
         if ($isLogged) {
             $dirs = array_column($this->getOfficialPlugins(), 'dir');
-            // 顺序：syncMarketData（增量更新已上架）→ syncRemovedDirs（增量清理已下架）→ syncOfficialCatalog（全量兜底）
+            // 顺序：购买态更新 → 增量下架清理 → 完整快照同步
             $this->extensionManager->syncMarketData($dirs);
             $this->extensionManager->syncRemovedDirs();
             $this->extensionManager->syncOfficialCatalog();
@@ -111,7 +111,17 @@ class StoreController extends BaseController
         });
         $pluginList = ArrayHelper::arrayListConditionOrderBy($officialPlugins, $condition, [], $page, $pageSize);
         $pluginList = $this->extensionManager->formatList($pluginList);
-        // FIX: 分页总数不再依赖登录状态
+        $csrfToken = $this->getCsrfToken($user['salt']);
+        foreach ($pluginList as &$pluginItem) {
+            $pluginItem['operation_links'] = $this->protectDeploymentLinks(
+                $pluginItem['operation_links'] ?? [],
+                $pluginItem,
+                (int)$user['id'],
+                $csrfToken
+            );
+        }
+        unset($pluginItem);
+        // 分页总数不再依赖登录状态
         $totalItems = count($officialPlugins);
 
         $menu = $this->getAdminMenu();
@@ -138,7 +148,7 @@ class StoreController extends BaseController
                 'searchType' => $searchType,
                 'keywords' => $keywords,
             ],
-            'csrf_token' => $this->getCsrfToken($user['salt']),
+            'csrf_token' => $csrfToken,
             'language' => [
                 'store' => $this->language->get('store'),
                 'official_market_content' => $this->language->get('official_market_content'),
@@ -204,7 +214,13 @@ class StoreController extends BaseController
         $menu = $this->getAdminMenu();
         $page_link_string = 'admin/store/detail';
 
-        $read['operation_links'] = $this->extensionManager->buildOperationLinks($read);
+        $csrfToken = $this->getCsrfToken($user['salt']);
+        $read['operation_links'] = $this->protectDeploymentLinks(
+            $this->extensionManager->buildOperationLinks($read),
+            $read,
+            (int)$user['id'],
+            $csrfToken
+        );
 
         $data = [
             'header' => [
@@ -222,7 +238,7 @@ class StoreController extends BaseController
             'payment_tip' => $payment_tip,
             'payment_link' => $this->urlGenerator->url('admin/store/payment', ['dir' => $dir]),
             'extension' => $read,
-            'csrf_token' => $this->getCsrfToken($user['salt']),
+            'csrf_token' => $csrfToken,
             'action' => $this->urlGenerator->url('admin/store/signin'),
             'signout_action' => $this->urlGenerator->url('admin/store/signout'),
             'language' => [
@@ -328,13 +344,22 @@ class StoreController extends BaseController
                 'expires_at'         => (int)($result['data']['expires_at'] ?? 0),
             ];
 
-            // 验证必要字段
-            if (empty($pluginData['access_token']) || empty($pluginData['site_id'])) {
+            // 验证完整凭证契约，禁止将半成品登录态持久化。
+            if ($pluginData['user_id'] <= 0
+                || $pluginData['access_token'] === ''
+                || $pluginData['site_id'] === ''
+                || $pluginData['domain'] === ''
+                || $pluginData['login_ip'] === ''
+                || !preg_match('/^[a-f0-9]{64}$/i', $pluginData['session_secret'])
+                || $pluginData['expires_at'] <= time()) {
                 return $this->errorMessage($this->language->get('signin_failed'), 4);
             }
 
-            // 保存凭证到 plugin_data（数组格式直接存储）
-            $kv->settingSet('plugin_data', $pluginData);
+            // 服务端已切换站点令牌：先清除旧用户购买投影，再原子持久化新凭证。
+            $this->market->logout();
+            if (!$kv->settingSet('plugin_data', $pluginData)) {
+                throw new \RuntimeException('Failed to persist store credentials');
+            }
 
             // --- 登录后闭环：立即强制触发全量本地扩展同步，刷新版本与授权状态 ---
             $localPlugins = $this->extensionManager->getLocalList('plugin');
@@ -345,23 +370,22 @@ class StoreController extends BaseController
             return $this->successMessage($this->language->get('signin_successfully'), 0, RequestUtils::server('HTTP_REFERER'));
         }
 
-        // V4.2: 处理公钥不匹配错误（服务端返回 status=error, data.code=public_key_mismatch）
-        $errorCode = $result['data']['code'] ?? $result['code'] ?? '';
+        // V4.2: 处理公钥不匹配错误（统一错误码 + 稳定业务标识）
+        $errorCode = $result['data']['error_key'] ?? '';
         if ($errorCode === 'public_key_mismatch') {
             $kv = $this->container->get(KeyValueService::class);
             $pluginData = $kv->settingGet('plugin_data');
             $siteId = (string)($pluginData['site_id'] ?? '');
             $officialUrl = rtrim($this->appConfig['official_url'] ?? 'https://www.wellcms.com', '/');
-            $unbindUrl = $officialUrl . '/my/sites' . (!empty($siteId) ? '?highlight=' . urlencode($siteId) : '');
+            $unbindUrl = $officialUrl . '/my/sites.html' . (empty($siteId) ? '' : '?highlight=' . urlencode($siteId));
 
             $message = $this->language->get('store_public_key_mismatch_detail')
-                ?: '公钥不匹配，无法登录。这通常发生在服务器迁移或重装后。'
-                   . '请前往官网用户中心解绑此站点，然后返回重新登录。';
+                ?: 'Public key mismatch, unable to log in. This usually happens after server migration or reinstallation. Please go to the official website user center to unbind this site, then return and log in again.';
 
             return $this->errorMessage($message, 4, '', 0, [
                 'action_links' => [
                     [
-                        'label'  => $this->language->get('store_unbind_site') ?: '前往官网解绑此站点',
+                        'label'  => $this->language->get('store_unbind_site') ?: 'Go to official website to unbind this site',
                         'url'    => $unbindUrl,
                         'target' => '_blank',
                     ],
@@ -369,7 +393,7 @@ class StoreController extends BaseController
             ]);
         }
 
-        return $this->errorMessage($result['data']['message'] ?? $result['message'] ?? $this->language->get('signin_failed'), 4);
+        return $this->errorMessage($result['message'] ?? $this->language->get('signin_failed'), 4);
     }
 
     /**
@@ -387,17 +411,11 @@ class StoreController extends BaseController
 
         $dir = SafeHelper::safeWord(RequestUtils::param('dir'));
         $storeId = RequestUtils::param('storeid', 0);
+        $operation = (string)$request->getAttribute('store_operation', 'download');
+        $operationToken = RequestUtils::param('_operation_token', '');
 
         if (!$dir) {
             return $this->errorMessage($this->language->get('params_error'), 4);
-        }
-
-        // 回退：旧缓存可能缺少 storeid，通过 queryExtensions 向服务端查询
-        if (!$storeId) {
-            $queryResult = $this->market->queryExtensions([$dir]);
-            if (!empty($queryResult[$dir]['storeid'])) {
-                $storeId = (int)$queryResult[$dir]['storeid'];
-            }
         }
 
         if (!$storeId) {
@@ -408,6 +426,9 @@ class StoreController extends BaseController
         if (empty($read)) {
             $read = $this->extensionManager->readByDir($dir, 'theme', false);
         }
+        if (empty($read)) {
+            return $this->errorMessage($this->language->get('data_malformation'), 8);
+        }
         $extensionType = (2 === (int)($read['type'] ?? 1)) ? 'theme' : 'plugin';
 
         // 本地付费校验，未购买禁止直接下载
@@ -417,6 +438,18 @@ class StoreController extends BaseController
                 1,
                 $this->urlGenerator->url('admin/store/payment', ['dir' => $dir])
             );
+        }
+
+        $user = $request->getAttribute('user', []);
+        $operationTokens = $this->container->get(\App\Services\Extension\ExtensionOperationTokenService::class);
+        if (!$operationTokens->consume(
+            $operationToken,
+            (int)($user['id'] ?? 0),
+            $operation,
+            $dir,
+            $storeId
+        )) {
+            return $this->errorMessage($this->language->get('illegal_operation'), 8);
         }
 
         // 使用统一部署逻辑 (物理安装 -> 脚本运行 -> 状态固化)
@@ -438,7 +471,38 @@ class StoreController extends BaseController
      */
     public function upgrade(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
-        return $this->download($request);
+        return $this->download($request->withAttribute('store_operation', 'upgrade'));
+    }
+
+    private function protectDeploymentLinks(array $links, array $item, int $userId, string $csrfToken): array
+    {
+        $dir = (string)($item['dir'] ?? '');
+        $storeId = (int)($item['storeid'] ?? 0);
+        if ($dir === '' || $storeId <= 0) {
+            $links['download'] = '';
+            $links['upgrade'] = '';
+            return $links;
+        }
+
+        $tokenService = $this->container->get(\App\Services\Extension\ExtensionOperationTokenService::class);
+        foreach (['download', 'upgrade'] as $action) {
+            if (empty($links[$action]['url'])) {
+                continue;
+            }
+            if ($action === 'download' && (float)($item['price'] ?? 0) > 0 && empty($item['payment_id'])) {
+                continue;
+            }
+
+            $links[$action]['url'] = $this->urlGenerator->url('admin/store/' . $action);
+            $links[$action]['arg'] = [
+                'dir' => $dir,
+                'storeid' => $storeId,
+                '_csrf_token' => $csrfToken,
+                '_operation_token' => $tokenService->issue($userId, $action, $dir, $storeId),
+            ];
+        }
+
+        return $links;
     }
 
     /**
@@ -474,8 +538,8 @@ class StoreController extends BaseController
             $payApi = (int)($data['pay_api'] ?? 0);
             $qrUrl = (string)($data['url'] ?? '');
         } else {
-            $errorMessage = $result['data']['message'] ?? $this->language->get('payment_prepare_failed');
-            $errorCode = (int)($result['data']['code'] ?? 4);
+            $errorMessage = $result['message'] ?? $this->language->get('payment_prepare_failed');
+            $errorCode = (int)($result['code'] ?? 4);
             return $this->errorMessage($errorMessage, $errorCode, RequestUtils::server('HTTP_REFERER'));
         }
 
@@ -540,8 +604,8 @@ class StoreController extends BaseController
         $result = SecurityHelper::jsonDecode($result);
 
         if (!isset($result['status']) || $result['status'] !== 'success') {
-            $errorCode = $result['data']['code'] ?? 4;
-            $errorMsg = $result['data']['message'] ?? $this->language->get('payment_prepare_failed');
+            $errorCode = $result['code'] ?? 4;
+            $errorMsg = $result['message'] ?? $this->language->get('payment_prepare_failed');
             return $this->errorMessage($errorMsg, $errorCode);
         }
 
@@ -572,7 +636,7 @@ class StoreController extends BaseController
                     'balance'           => (float)($data['balance'] ?? 0),
                     'pay_token'         => (string)($data['pay_token'] ?? ''),
                     'requires_password' => (bool)($data['requires_password'] ?? false),
-                    'recharge_url'      => $officialUrl . '/my/recharge',
+                    'recharge_url'      => $officialUrl . '/my/recharge.html',
                 ]
             ]
         );
@@ -600,26 +664,41 @@ class StoreController extends BaseController
         $result = SecurityHelper::jsonDecode($result);
 
         if (isset($result['status']) && 'success' === $result['status']) {
-            // 1. 强制同步本地授权状态（异常时静默降级，不阻塞主流程）
-            $this->extensionManager->forceSyncSingle($dir);
+            // 1. 扣款已在服务端事务中提交，本地投影同步是独立的提交后阶段。
+            // 同步失败不得把已扣款事实伪装成“支付失败”，必须显式告知用户。
+            $syncError = '';
+            try {
+                $this->extensionManager->forceSyncSingle($dir);
+            } catch (\Throwable $e) {
+                $this->container->get(\Framework\Logger\LoggerInterface::class)->error(
+                    'Store payment committed but local purchase projection synchronization failed',
+                    ['dir' => $dir, 'error' => $e->getMessage()]
+                );
+                $syncError = 'Payment completed, but local authorization synchronization failed. '
+                    . 'Please refresh the store data before downloading.';
+            }
 
             // 2. 构造详情页 URL（支付完成后引导用户到详情页手动触发下载安装）
             $detailUrl = $this->urlGenerator->url('admin/store/detail', ['dir' => $dir]);
 
             // 3. 返回带 redirect 的成功消息，由 GlobalFormHandler 自闭环
+            $message = $result['data']['message'] ?? $this->language->get('payment_success');
+            if ($syncError !== '') {
+                $message .= ' ' . $syncError;
+            }
             return $this->successMessage(
-                $result['data']['message'] ?? $this->language->get('payment_success'),
+                $message,
                 0,
                 $detailUrl
             );
         }
 
-        $errorCode = $result['data']['code'] ?? '';
-        $errorMsg = $result['data']['message'] ?? $this->language->get('payment_failed');
+        $errorCode = $result['code'] ?? '';
+        $errorMsg = $result['message'] ?? $this->language->get('payment_failed');
 
         if (in_array($errorCode, ['insufficient_balance', 3], true)) {
             $officialUrl = rtrim($this->appConfig['official_url'] ?? '', '/');
-            $errorMsg .= ' <a href="' . $officialUrl . '/my/recharge" target="_blank">去充值</a>';
+            $errorMsg .= ' <a href="' . $officialUrl . '/my/recharge.html" target="_blank">去充值</a>';
         }
 
         return $this->errorMessage($errorMsg, 4);
@@ -635,7 +714,7 @@ class StoreController extends BaseController
             return $this->errorMessage($this->language->get('params_error'), 4);
         }
 
-        // ─── FIX: 调用专用 bought 端点，传递 dirs ───
+        // 调用专用 bought 端点，传递 dirs
         $result = $this->market->request('bought.html', ['dirs' => [$dir]]);
         $result = SecurityHelper::jsonDecode($result);
 
@@ -671,8 +750,11 @@ class StoreController extends BaseController
 
         $this->extensionManager->syncMarketData($allDirs, true);
         $this->extensionManager->syncRemovedDirs();
+        $this->extensionManager->syncOfficialCatalog(true);
 
-        $this->container->get(KeyValueService::class)->settingSet('storePostSyncLastTime', time());
+        if (!$this->container->get(KeyValueService::class)->settingSet('storePostSyncLastTime', time())) {
+            throw new \RuntimeException('Failed to persist store synchronization timestamp');
+        }
 
         return $this->successMessage($this->language->get('sync_success'), 0, RequestUtils::server('HTTP_REFERER'));
     }

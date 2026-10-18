@@ -8,71 +8,394 @@ declare(strict_types=1);
 namespace App\Utils;
 
 /**
- * 通用 HTML 解析工具（PHP 7.2 兼容）
+ * 通用 HTML 解析工具
  * - detectEncoding(): 从 HTTP 头 / <meta> 猜测原始编码
  * - normalizeToUtf8(): 将 HTML 统一转为 UTF-8，并注入 <meta charset="utf-8">
  * - loadDom(): 安全加载为 DOMDocument
- * - fetchUrl(): 简易抓取，返回 [body, headers]
+ * - fetchUrl(): 受 SSRF 边界保护的抓取，返回 [body, headers]
  * - absolutizeUrl(): 把相对链接转为绝对 URL（用于 favicon 等）
  */
 trait HtmlParseHelper
 {
     /**
-     * 简易抓取：优先用框架 HttpClient，兜底 stream
+     * 受 SSRF 边界保护的抓取。
+     *
+     * 自动重定向会绕过应用层目标校验，因此每一跳均重新解析、校验并固定 DNS。
+     * 无 cURL 时安全能力不完整，选择显式失败，由调用方降级为空预览。
+     *
      * @return array [string $body, array $headers]
      */
     protected function fetchUrl(string $url): array
     {
-        // 真实浏览器 User-Agent 串，降低被 Cloudflare / bot 检测拦截的概率
+        $currentUrl = $url;
+        $redirects = 0;
+        $maxRedirects = 3;
+        $maxBytes = 512 * 1024;
+
+        while (true) {
+            $target = $this->validatePreviewTarget($currentUrl);
+            $lastFailure = null;
+            foreach ($target['ips'] as $ip) {
+                try {
+                    [$status, $headers, $body] = $this->requestPreviewHop(
+                        $currentUrl,
+                        $target['host'],
+                        $target['port'],
+                        $ip,
+                        $maxBytes
+                    );
+                    $lastFailure = null;
+                    break;
+                } catch (\RuntimeException $e) {
+                    $lastFailure = $e;
+                }
+            }
+            if ($lastFailure !== null) {
+                throw $lastFailure;
+            }
+
+            if (in_array($status, [301, 302, 303, 307, 308], true)) {
+                $location = $this->previewHeaderLine($headers, 'Location');
+                if ($location === '') {
+                    return [$body, $this->flattenPreviewHeaders($headers)];
+                }
+                if ($redirects >= $maxRedirects) {
+                    throw new \RuntimeException('Too many redirects');
+                }
+
+                $currentUrl = $this->resolvePreviewRedirect($currentUrl, $location);
+                $redirects++;
+                continue;
+            }
+
+            return [$body, $this->flattenPreviewHeaders($headers)];
+        }
+    }
+
+    /**
+     * 校验一跳目标并返回用于 DNS pinning 的地址。
+     *
+     * @return array{host:string,port:int,ip:string,ips:array<int,string>}
+     */
+    protected function validatePreviewTarget(string $url): array
+    {
+        if ($url === '' || strlen($url) > 4096 || preg_match('/[\\x00-\\x20\\x7f\\\\]/', $url)) {
+            throw new \InvalidArgumentException('Invalid URL');
+        }
+        if (filter_var($url, FILTER_VALIDATE_URL) === false) {
+            throw new \InvalidArgumentException('Invalid URL');
+        }
+
+        $parts = parse_url($url);
+        if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
+            throw new \InvalidArgumentException('Invalid URL');
+        }
+
+        $scheme = strtolower((string)$parts['scheme']);
+        if (!in_array($scheme, ['http', 'https'], true)) {
+            throw new \InvalidArgumentException('Protocol not allowed');
+        }
+        if (isset($parts['user']) || isset($parts['pass'])) {
+            throw new \InvalidArgumentException('URL credentials not allowed');
+        }
+
+        $port = isset($parts['port']) ? (int)$parts['port'] : ($scheme === 'https' ? 443 : 80);
+        if (!in_array($port, [80, 443], true)) {
+            throw new \InvalidArgumentException('Port not allowed');
+        }
+
+        $host = strtolower(trim((string)$parts['host'], '[]'));
+        if ($host === '') {
+            throw new \InvalidArgumentException('Invalid URL');
+        }
+
+        $ips = array_values(array_unique($this->resolvePreviewHost($host)));
+        if (empty($ips)) {
+            throw new \InvalidArgumentException('DNS resolution failed');
+        }
+
+        foreach ($ips as $ip) {
+            if (!$this->isPublicPreviewIp($ip)) {
+                throw new \InvalidArgumentException('Private or reserved IP not allowed');
+            }
+        }
+
+        return [
+            'host' => $host,
+            'port' => $port,
+            'ip' => $ips[0],
+            'ips' => $ips,
+        ];
+    }
+
+    /**
+     * 解析目标全部 A/AAAA 地址；任一结果不安全时由调用方整组拒绝。
+     *
+     * @return string[]
+     */
+    protected function resolvePreviewHost(string $host): array
+    {
+        if (filter_var($host, FILTER_VALIDATE_IP) !== false) {
+            return [$host];
+        }
+
+        $ips = [];
+        if (function_exists('dns_get_record')) {
+            $dnsType = (defined('DNS_A') ? DNS_A : 0) | (defined('DNS_AAAA') ? DNS_AAAA : 0);
+            $records = $dnsType ? @dns_get_record($host, $dnsType) : false;
+            if (is_array($records)) {
+                foreach ($records as $record) {
+                    if (!empty($record['ip'])) {
+                        $ips[] = (string)$record['ip'];
+                    }
+                    if (!empty($record['ipv6'])) {
+                        $ips[] = (string)$record['ipv6'];
+                    }
+                }
+            }
+        }
+
+        $ipv4 = @gethostbynamel($host);
+        if (is_array($ipv4)) {
+            $ips = array_merge($ips, $ipv4);
+        }
+
+        return array_values(array_unique(array_filter($ips, static function ($ip) {
+            return filter_var($ip, FILTER_VALIDATE_IP) !== false;
+        })));
+    }
+
+    /**
+     * 执行单跳请求；连接固定到已校验 IP，且在接收阶段限制响应体。
+     *
+     * @return array{0:int,1:array<string,array<int,string>>,2:string}
+     */
+    protected function requestPreviewHop(string $url, string $host, int $port, string $ip, int $maxBytes): array
+    {
+        if (!function_exists('curl_init')) {
+            throw new \RuntimeException('cURL extension required for secure preview');
+        }
+
+        $ch = curl_init();
+        if ($ch === false) {
+            throw new \RuntimeException('Unable to initialize cURL');
+        }
+
+        $headers = [];
+        $body = '';
+        $tooLarge = false;
+        $pinnedIp = strpos($ip, ':') !== false ? '[' . $ip . ']' : $ip;
         $browserUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
-        // 优先使用框架 HttpClient（走 cURL）
         try {
-            $client = new \Framework\Utils\HttpClient();
-            $response = $client->request([
-                'url' => $url,
-                'timeout' => 8,
-                'followRedirects' => true,
-                'maxRedirects' => 3,
-                'verifySSL' => false,
-                'returnResponse' => true,
-                'throwOnError' => false,
-                'headers' => [
+            $options = [
+                CURLOPT_URL => $url,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HEADER => false,
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_MAXREDIRS => 0,
+                CURLOPT_CONNECTTIMEOUT => 5,
+                CURLOPT_TIMEOUT => 8,
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+                // 必须直连已校验并固定的 IP。环境代理会自行解析目标域名，
+                // 既使 CURLOPT_RESOLVE 失效，也会让 CURLINFO_PRIMARY_IP 变成代理 IP。
+                CURLOPT_PROXY => '',
+                CURLOPT_HTTPHEADER => [
                     'User-Agent: ' . $browserUA,
                     'Accept: text/html, application/xhtml+xml',
                 ],
-            ]);
+                CURLOPT_ENCODING => '',
+                CURLOPT_RESOLVE => [sprintf('%s:%d:%s', $host, $port, $pinnedIp)],
+                CURLOPT_DNS_CACHE_TIMEOUT => 0,
+                CURLOPT_FRESH_CONNECT => true,
+                CURLOPT_FORBID_REUSE => true,
+                CURLOPT_HEADERFUNCTION => function ($resource, string $line) use (&$headers) {
+                    $length = strlen($line);
+                    $trimmed = trim($line);
+                    if (stripos($trimmed, 'HTTP/') === 0) {
+                        $headers = [];
+                    } elseif ($trimmed !== '' && strpos($trimmed, ':') !== false) {
+                        [$name, $value] = explode(':', $trimmed, 2);
+                        $name = strtolower(trim($name));
+                        $headers[$name][] = trim($value);
+                    }
+                    return $length;
+                },
+                CURLOPT_WRITEFUNCTION => function ($resource, string $chunk) use (&$body, &$tooLarge, $maxBytes) {
+                    $length = strlen($chunk);
+                    if (strlen($body) + $length > $maxBytes) {
+                        $tooLarge = true;
+                        return 0;
+                    }
+                    $body .= $chunk;
+                    return $length;
+                },
+            ];
 
-            if ($response instanceof \Framework\Http\Interfaces\ResponseInterface) {
-                $body = (string) $response->getBody();
-                $headers = [];
-                foreach ($response->getHeaders() as $name => $values) {
-                    $headers[] = "$name: " . implode(', ', $values);
-                }
-                return [$body, $headers];
+            if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTP') && defined('CURLPROTO_HTTPS')) {
+                $options[CURLOPT_PROTOCOLS] = CURLPROTO_HTTP | CURLPROTO_HTTPS;
             }
-        } catch (\Throwable $e) {
-            // HttpClient 异常，降级到 stream
+
+            curl_setopt_array($ch, $options);
+            $result = curl_exec($ch);
+            $error = curl_error($ch);
+            $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $primaryIp = (string)curl_getinfo($ch, CURLINFO_PRIMARY_IP);
+
+            if ($tooLarge) {
+                throw new \RuntimeException('Preview response exceeds 512 KiB');
+            }
+            if ($result === false || $status === 0) {
+                throw new \RuntimeException($error !== '' ? $error : 'Preview network error');
+            }
+            if (!$this->isPublicPreviewIp($primaryIp) || !$this->samePreviewIp($primaryIp, $ip)) {
+                throw new \RuntimeException('Connected IP validation failed');
+            }
+
+            return [$status, $headers, $body];
+        } finally {
+            curl_close($ch);
+        }
+    }
+
+    protected function isPublicPreviewIp(string $ip): bool
+    {
+        if (filter_var($ip, FILTER_VALIDATE_IP) === false) {
+            return false;
+        }
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
+            return false;
         }
 
-        // 兜底：stream 上下文（仅当 cURL 不可用时）
-        $prevLevel = error_reporting();
-        error_reporting($prevLevel & ~E_DEPRECATED);
-        try {
-            $context = stream_context_create([
-                'http' => [
-                    'method' => 'GET',
-                    'timeout' => 8,
-                    'header' => "User-Agent: " . $browserUA . "\r\nAccept: text/html\r\n",
-                    'ignore_errors' => true,
-                ],
-                'ssl' => ['verify_peer' => false, 'verify_peer_name' => false],
-            ]);
-            $body = @file_get_contents($url, false, $context);
-        } finally {
-            error_reporting($prevLevel);
+        $blocked = strpos($ip, ':') === false
+            ? ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24', '192.168.0.0/16', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4']
+            : ['::/96', '::ffff:0:0/96', '64:ff9b::/96', '64:ff9b:1::/48', '100::/64', '2001::/23', '2002::/16', 'fc00::/7', 'fe80::/10', 'ff00::/8'];
+
+        foreach ($blocked as $cidr) {
+            if ($this->previewIpInCidr($ip, $cidr)) {
+                return false;
+            }
         }
-        return [$body ?: '', []];
+        return true;
+    }
+
+    protected function previewIpInCidr(string $ip, string $cidr): bool
+    {
+        [$network, $prefixText] = explode('/', $cidr, 2);
+        $packedIp = @inet_pton($ip);
+        $packedNetwork = @inet_pton($network);
+        if ($packedIp === false || $packedNetwork === false || strlen($packedIp) !== strlen($packedNetwork)) {
+            return false;
+        }
+
+        $prefix = (int)$prefixText;
+        $fullBytes = intdiv($prefix, 8);
+        $remainingBits = $prefix % 8;
+        if ($fullBytes > 0 && substr($packedIp, 0, $fullBytes) !== substr($packedNetwork, 0, $fullBytes)) {
+            return false;
+        }
+        if ($remainingBits === 0) {
+            return true;
+        }
+
+        $mask = (0xff << (8 - $remainingBits)) & 0xff;
+        return (ord($packedIp[$fullBytes]) & $mask) === (ord($packedNetwork[$fullBytes]) & $mask);
+    }
+
+    protected function samePreviewIp(string $left, string $right): bool
+    {
+        $packedLeft = @inet_pton($left);
+        $packedRight = @inet_pton($right);
+        return $packedLeft !== false && $packedRight !== false && hash_equals($packedLeft, $packedRight);
+    }
+
+    /**
+     * 按当前 URL 解析 Location，并在下一轮重新执行完整目标校验。
+     */
+    protected function resolvePreviewRedirect(string $baseUrl, string $location): string
+    {
+        $location = trim($location);
+        if ($location === '' || preg_match('/[\\x00-\\x20\\x7f\\\\]/', $location)) {
+            throw new \InvalidArgumentException('Invalid redirect URL');
+        }
+        if (preg_match('#^https?://#i', $location)) {
+            return $location;
+        }
+
+        $base = parse_url($baseUrl);
+        if (!is_array($base) || empty($base['scheme']) || empty($base['host'])) {
+            throw new \InvalidArgumentException('Invalid redirect base URL');
+        }
+
+        $host = (string)$base['host'];
+        if (strpos($host, ':') !== false && $host[0] !== '[') {
+            $host = '[' . $host . ']';
+        }
+        $origin = strtolower((string)$base['scheme']) . '://' . $host;
+        if (isset($base['port'])) {
+            $origin .= ':' . (int)$base['port'];
+        }
+
+        if (strpos($location, '//') === 0) {
+            return strtolower((string)$base['scheme']) . ':' . $location;
+        }
+
+        $basePath = isset($base['path']) && $base['path'] !== '' ? (string)$base['path'] : '/';
+        if ($location[0] === '?') {
+            return $origin . $basePath . $location;
+        }
+        if ($location[0] === '#') {
+            $withoutFragment = preg_replace('/#.*$/', '', $baseUrl);
+            return $withoutFragment . $location;
+        }
+
+        $suffix = '';
+        $path = $location;
+        $suffixPos = strcspn($path, '?#');
+        if ($suffixPos < strlen($path)) {
+            $suffix = substr($path, $suffixPos);
+            $path = substr($path, 0, $suffixPos);
+        }
+        if ($path === '' || $path[0] !== '/') {
+            $directory = substr($basePath, 0, strrpos($basePath . '/', '/'));
+            $path = $directory . '/' . $path;
+        }
+
+        $segments = [];
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '' || $segment === '.') {
+                continue;
+            }
+            if ($segment === '..') {
+                array_pop($segments);
+                continue;
+            }
+            $segments[] = $segment;
+        }
+
+        return $origin . '/' . implode('/', $segments) . $suffix;
+    }
+
+    /** @param array<string,array<int,string>> $headers */
+    protected function previewHeaderLine(array $headers, string $name): string
+    {
+        $values = $headers[strtolower($name)] ?? $headers[$name] ?? [];
+        if (!is_array($values)) {
+            $values = [$values];
+        }
+        return isset($values[0]) ? trim((string)$values[0]) : '';
+    }
+
+    /** @param array<string,array<int,string>> $headers */
+    protected function flattenPreviewHeaders(array $headers): array
+    {
+        $result = [];
+        foreach ($headers as $name => $values) {
+            $values = is_array($values) ? $values : [$values];
+            $result[] = $name . ': ' . implode(', ', $values);
+        }
+        return $result;
     }
 
     /**

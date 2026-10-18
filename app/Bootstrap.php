@@ -70,14 +70,6 @@ class Bootstrap
 
         // hook app_Bootstrap_before.php
 
-        // 加载 Scheduler 工业级配置（v2 服务注册前必须可用）
-        try {
-            $schedulerConfig = require APP_PATH . 'config/Scheduler.php';
-            $container->set('schedulerConfig', is_array($schedulerConfig) ? $schedulerConfig : []);
-        } catch (\Throwable $e) {
-            $container->set('schedulerConfig', []);
-        }
-
         // 绑定服务 & 初始化逻辑
         foreach ($providers as $providerClass) {
             $prov = new $providerClass();
@@ -124,6 +116,12 @@ class Bootstrap
             'Session' => [\App\Middleware\SessionMiddleware::class, []],
             'Runtime' => [\App\Middleware\RuntimeMiddleware::class, []],
             // hook app_Bootstrap_middleware_center.php
+            'Router' => [
+                \App\Middleware\RouterMiddleware::class,
+                [
+                    'compiledRouter' => $container->get(\Framework\Http\Router\CompiledRouter::class),
+                ]
+            ],
             'Throttle' => [
                 \App\Middleware\ThrottleMiddleware::class,
                 [
@@ -134,12 +132,6 @@ class Bootstrap
                 ]
             ],
             // hook app_Bootstrap_middleware_middle.php
-            'Router' => [
-                \App\Middleware\RouterMiddleware::class,
-                [
-                    'compiledRouter' => $container->get(\Framework\Http\Router\CompiledRouter::class),
-                ]
-            ],
             'XssFilter' => [
                 \App\Middleware\XssFilterMiddleware::class,
                 [

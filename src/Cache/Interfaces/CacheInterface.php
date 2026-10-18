@@ -69,6 +69,9 @@ interface CacheInterface
      */
     public function delete(string $key): bool;
 
+    /** 批量删除缓存，返回驱动报告的成功处理数量。 */
+    public function deleteMulti(array $keys): int;
+
     /** 自增缓存值
      * @param string $key
      * @param int    $step

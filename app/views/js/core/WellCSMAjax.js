@@ -201,12 +201,23 @@ async uploadFileWithProgress(options) {
   try {
     initResp = await this.post(url, initFd);
   } catch (e) {
-    // Fallback for servers not supporting chunking: Direct Upload
+    // Only legacy/direct-only endpoints use these explicit HTTP responses.
+    if (
+      e.message !== "HTTP 400" &&
+      e.message !== "HTTP 404" &&
+      e.message !== "HTTP 405"
+    ) {
+      throw e;
+    }
     console.warn("Init failed, falling back to direct upload");
     const directFd = new FormData();
     directFd.append("file", file);
     appendExtra(directFd);
     return await this.post(url, directFd, onProgress);
+  }
+
+  if (initResp.code) {
+    return initResp;
   }
 
   if (
@@ -240,7 +251,10 @@ async uploadFileWithProgress(options) {
     fd.append("file", chunk, `${filename}.part${i}`);
     appendExtra(fd);
 
-    await this.post(url, fd);
+    const chunkResp = await this.post(url, fd);
+    if (chunkResp.code) {
+      return chunkResp;
+    }
 
     if (onChunk) onChunk(i, totalChunks);
     if (onProgress) onProgress(Math.min(99, (i / totalChunks) * 100));

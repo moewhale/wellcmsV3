@@ -9,6 +9,7 @@ namespace App\Services\Storage;
 
 use Framework\Utils\Validator;
 use Framework\Exception\BusinessException;
+use Framework\Exception\Infra\DatabaseException;
 
 class UploadLogService
 {
@@ -39,7 +40,7 @@ class UploadLogService
         // hook app_Services_UploadLogService_insert_start.php
 
         $result = $this->dbModel->insert($data);
-        if (!$result) throw new BusinessException('UploadLogService - Time:' . $this->timeFormat . ' / insert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        if (!$result) throw new DatabaseException('UploadLogService -> insert(): data writing failed');
 
         // hook app_Services_UploadLogService_insert_end.php
 
@@ -53,7 +54,7 @@ class UploadLogService
         // hook app_Services_UploadLogService_bulkInsert_start.php
 
         $result = $this->dbModel->bulkInsert($data);
-        if (!$result) throw new BusinessException('UploadLogService - Time:' . $this->timeFormat . ' / bulkInsert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        if (!$result) throw new DatabaseException('UploadLogService -> bulkInsert(): data writing failed');
 
         // hook app_Services_UploadLogService_bulkInsert_end.php
 
@@ -67,7 +68,7 @@ class UploadLogService
         // hook app_Services_UploadLogService_update_start.php
 
         $result = $this->dbModel->update(['id' => $id], $update);
-        if ($result === 0) throw new BusinessException('UploadLogService - Time:' . $this->timeFormat . ' / update() update failed : ' . json_encode(['id' => $id, 'update' => $update], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        if ($result === 0) throw new BusinessException('UploadLogService -> update(): update failed');
 
         // hook app_Services_UploadLogService_update_end.php
 
@@ -81,7 +82,7 @@ class UploadLogService
         // hook app_Services_UploadLogService_bulkUpdate_start.php
 
         $result = $this->dbModel->bulkUpdate($update, $keyColumn, $wheres);
-        if ($result === 0) throw new BusinessException('UploadLogService - Time:' . $this->timeFormat . ' / bulkUpdate() update failed : ' . json_encode($update, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        if ($result === 0) throw new BusinessException('UploadLogService -> bulkUpdate(): update failed');
 
         // hook app_Services_UploadLogService_bulkUpdate_end.php
 

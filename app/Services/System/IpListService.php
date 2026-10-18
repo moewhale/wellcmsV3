@@ -9,11 +9,14 @@ namespace App\Services\System;
 
 use Framework\Utils\Validator;
 use Framework\Exception\BusinessException;
+use Framework\Exception\Infra\DatabaseException;
 
 class IpListService
 {
     use \Framework\Core\Traits\StatefulTrait;
 
+    /** @var \Framework\Core\Container */
+    protected $container;
     /** @var \App\Models\IpListModel */
     protected $dbModel;
     /** @var \Framework\Cache\Interfaces\CacheInterface */
@@ -26,18 +29,28 @@ class IpListService
     protected $ttl;
 
     public function __construct(
-        \App\Models\IpListModel $dbModel,
+        \Framework\Core\Container $container,
         \Framework\Cache\Interfaces\CacheInterface $cache,
         \App\Utils\I18nDateFormatter $i18nDateFmt,
         array $cacheConfig
     ) {
         // hook app_Services_IpListService_construct_start.php
-        $this->dbModel = $dbModel;
+        $this->container = $container;
         $this->cache = $cache;
         $this->cacheConfig = $cacheConfig;
         $this->i18nDateFmt = $i18nDateFmt;
         $this->ttl = $this->cacheConfig['ip_ttl'] ?? 3600;
         // hook app_Services_IpListService_construct_end.php
+    }
+
+    private function getModel()
+    {
+        if ($this->dbModel !== null) {
+            return $this->dbModel;
+        }
+        $resolved = $this->container->get(\App\Models\IpListModel::class);
+        // 首次获取可能让出协程；保留已经建立的模型引用。
+        return $this->dbModel = $this->dbModel ?? $resolved;
     }
 
     /**
@@ -72,13 +85,13 @@ class IpListService
 
         try {
             // 锁内二次检查，防止数据库 Duplicate Entry 报错
-            $exists = $this->dbModel->read(['ip' => $ip2bin]);
+            $exists = $this->getModel()->read(['ip' => $ip2bin]);
             if (!empty($exists)) {
                 return (int)$exists['id'];
             }
 
-            $result = $this->dbModel->insert($data);
-            if (!$result) throw new BusinessException('IpListService -> insert(): Data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            $result = $this->getModel()->insert($data);
+            if (!$result) throw new DatabaseException('IpListService -> insert(): data writing failed');
 
             if (!empty($this->cacheConfig['stores'])) {
                 $this->cache->delete('readByIp:' . $ip);
@@ -98,8 +111,8 @@ class IpListService
 
         // hook app_Services_IpListService_bulkInsert_start.php
 
-        $result = $this->dbModel->bulkInsert($data);
-        if (!$result) throw new BusinessException('IpListService -> bulkInsert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $result = $this->getModel()->bulkInsert($data);
+        if (!$result) throw new DatabaseException('IpListService -> bulkInsert(): data writing failed');
 
         // hook app_Services_IpListService_bulkInsert_end.php
 
@@ -124,11 +137,11 @@ class IpListService
 
         try {
             // 先读取旧数据用于缓存清除
-            $oldData = $this->dbModel->read(['id' => $id]);
+            $oldData = $this->getModel()->read(['id' => $id]);
             if (empty($oldData)) return 0;
 
-            $result = $this->dbModel->update(['id' => $id], $update);
-            if ($result === 0) throw new BusinessException('IpListService -> update() Update failed : ' . json_encode(['id' => $id, 'update' => $update], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            $result = $this->getModel()->update(['id' => $id], $update);
+            if ($result === 0) throw new BusinessException('IpListService -> update(): update failed');
 
             if (!empty($this->cacheConfig['stores'])) {
                 // 清除旧数据的缓存键
@@ -160,7 +173,7 @@ class IpListService
 
         // hook app_Services_IpListService_read_start.php
 
-        $data = $this->dbModel->read(['id' => $id], $orderby, $fields);
+        $data = $this->getModel()->read(['id' => $id], $orderby, $fields);
         if (empty($data)) return [];
 
         // hook app_Services_IpListService_read_middle.php
@@ -179,7 +192,7 @@ class IpListService
         $static = $this->getState('static', []);
         if (isset($static[$ip])) return $static[$ip];
 
-        $data = $this->dbModel->read(['ip' => $ip2bin], $orderby, $fields);
+        $data = $this->getModel()->read(['ip' => $ip2bin], $orderby, $fields);
         if (empty($data)) return [];
 
         $data && $this->format($data);
@@ -228,7 +241,7 @@ class IpListService
     {
         $staticUserId = $this->getState('staticUserId', []);
         if (isset($staticUserId[$userId])) return $staticUserId[$userId];
-        $data = $this->dbModel->read(['user_id' => $userId], $orderby, $fields);
+        $data = $this->getModel()->read(['user_id' => $userId], $orderby, $fields);
         if (empty($data)) return [];
         //$data && $this->format($data);
         $staticUserId[$userId] = $data;
@@ -248,7 +261,7 @@ class IpListService
         }
 
         if (empty($this->cacheConfig['stores'])) {
-            $data = $this->dbModel->read(['user_id' => $userId], $orderby, $fields);
+            $data = $this->getModel()->read(['user_id' => $userId], $orderby, $fields);
             $this->format($data);
             return $data;
         }
@@ -259,7 +272,7 @@ class IpListService
             $key,
             'lock:readByUserId:' . $userId,
             function () use ($userId, $orderby, $fields) {
-                return $this->dbModel->read(['user_id' => $userId], $orderby, $fields);
+                return $this->getModel()->read(['user_id' => $userId], $orderby, $fields);
             },
             3,
             $this->ttl
@@ -284,7 +297,7 @@ class IpListService
 
         // hook app_Services_IpListService_find_start.php
 
-        $datalist = $this->dbModel->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         foreach ($datalist as &$data) $this->format($data);
@@ -307,14 +320,14 @@ class IpListService
     public function delete($id): int
     {
         // hook app_Services_IpListService_delete_start.php
-        $result = $this->dbModel->delete(['id' => $id]);
+        $result = $this->getModel()->delete(['id' => $id]);
         // hook app_Services_IpListService_delete_end.php
         return $result;
     }
 
     public function count( array $condition= []): int
     {
-        return $this->dbModel->count($condition);
+        return $this->getModel()->count($condition);
     }
 
     public function maxid(): int
@@ -322,7 +335,7 @@ class IpListService
         $maxId = $this->getState('maxId');
         if (null !== $maxId) return $maxId;
         // hook app_Services_IpListService_maxid_start.php
-        $maxId = $this->dbModel->maxid();
+        $maxId = $this->getModel()->maxid();
         $this->setState('maxId', $maxId);
         // hook app_Services_IpListService_maxid_end.php
         return $maxId;

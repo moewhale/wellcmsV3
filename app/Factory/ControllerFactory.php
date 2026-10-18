@@ -25,7 +25,8 @@ class ControllerFactory
      */
     public function create(string $class)
     {
-        // 直接利用容器的自动解析能力，确保所有依赖（包括 ServerRequestInterface）正确注入
-        return $this->container->get($class);
+        // Controller 持有 Request/Session 等请求级状态，在 Swoole Worker 中必须按请求创建。
+        // 依赖仍由容器解析，但控制器本身不得进入常驻单例缓存。
+        return $this->container->makeTransient($class);
     }
 }

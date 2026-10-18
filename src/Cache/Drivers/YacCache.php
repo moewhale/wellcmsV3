@@ -75,6 +75,12 @@ class YacCache implements \Framework\Cache\Interfaces\CacheInterface
         return $this->yac->delete($key);
     }
 
+    public function deleteMulti(array $keys): int
+    {
+        if (empty($keys)) return 0;
+        return $this->yac->delete(array_map([$this, 'withPrefix'], $keys)) ? count($keys) : 0;
+    }
+
     public function increment(string $key, int $step = 1, int $ttl = 0)
     {
         $key = $this->getCacheKey($key);

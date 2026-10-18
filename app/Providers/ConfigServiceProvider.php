@@ -53,14 +53,14 @@ class ConfigServiceProvider implements \Framework\Providers\ServiceProviderInter
                 'validate' => function ($v) {
                     return !empty($v);
                 },
-                'error' => 'Database configuration "appConfig" is missing'
+                'error' => 'Configuration "appConfig" is missing or empty'
             ],
             'cacheConfig' => [
                 'key' => 'cache',
                 'validate' => function ($v) {
                     return !empty($v);
                 },
-                'error' => 'Database configuration "cacheConfig" is missing'
+                'error' => 'Configuration "cacheConfig" is missing or empty'
             ],
             'dbConfig' => [
                 'key' => 'db',
@@ -69,8 +69,8 @@ class ConfigServiceProvider implements \Framework\Providers\ServiceProviderInter
                     $dbConfig['master'] = isset($dbConfig['connections'][$driver]['master']) ? $dbConfig['connections'][$driver]['master'] : array();
                     $dbConfig['slaves'] = isset($dbConfig['connections'][$driver]['slaves']) ? $dbConfig['connections'][$driver]['slaves'] : array();
 
-                    // 分片配置扁平化：将 sharding.tables 转换为 shards，并注入 Pool 可见的 slaves
-                    $dbConfig['shards'] = [];
+                    // 保留按表名/节点标识配置的独立连接，追加按键分片的物理节点。
+                    $dbConfig['shards'] = $dbConfig['shards'] ?? [];
                     $dbConfig['shard_routers'] = [];
                     if (!empty($dbConfig['sharding']['tables'])) {
                         foreach ($dbConfig['sharding']['tables'] as $tableName => $shardingCfg) {
@@ -78,34 +78,8 @@ class ConfigServiceProvider implements \Framework\Providers\ServiceProviderInter
                             if (empty($nodes)) {
                                 continue;
                             }
-                            $firstNode = reset($nodes);
-
-                            // 向后兼容：表级默认配置（使用第一个 node 的 master）
-                            $dbConfig['shards'][$tableName] = [
-                                'master' => $firstNode['master'] ?? [],
-                                'slaves' => [],
-                            ];
-
                             foreach ($nodes as $nodeId => $nodeCfg) {
-                                // 为每个 shard 节点生成独立的连接配置
-                                $dbConfig['shards'][$nodeId] = [
-                                    'master' => $nodeCfg['master'] ?? [],
-                                    'slaves' => $nodeCfg['slaves'] ?? [],
-                                ];
-
-                                if (!empty($nodeCfg['slaves'])) {
-                                    foreach ($nodeCfg['slaves'] as $slave) {
-                                        // 节点级 slave（供 Router 使用）
-                                        $slaveNode = $slave;
-                                        $slaveNode['shard'] = (string)$nodeId;
-                                        $dbConfig['slaves'][] = $slaveNode;
-
-                                        // 表级默认 slave（向后兼容）
-                                        $slaveDefault = $slave;
-                                        $slaveDefault['shard'] = (string)$tableName;
-                                        $dbConfig['shards'][$tableName]['slaves'][] = $slaveDefault;
-                                    }
-                                }
+                                $dbConfig['shards'][$nodeId] = $nodeCfg;
                             }
 
                             // 分片路由元信息
@@ -122,7 +96,7 @@ class ConfigServiceProvider implements \Framework\Providers\ServiceProviderInter
                 'validate' => function ($v) {
                     return !empty($v);
                 },
-                'error' => 'Database configuration "dbConfig" is missing'
+                'error' => 'Configuration "dbConfig" is missing or empty'
             ],
             'i18nConfig' => [
                 'key' => 'i18n',
@@ -144,7 +118,7 @@ class ConfigServiceProvider implements \Framework\Providers\ServiceProviderInter
                 'validate' => function ($v) {
                     return !empty($v);
                 },
-                'error' => 'Database configuration "i18nConfig" is missing'
+                'error' => 'Configuration "i18nConfig" is missing or empty'
             ],
             'loggerConfig' => [
                 'key' => 'logger',
@@ -162,14 +136,14 @@ class ConfigServiceProvider implements \Framework\Providers\ServiceProviderInter
                 'validate' => function ($v) {
                     return !empty($v);
                 },
-                'error' => 'Database configuration "loggerConfig" is missing'
+                'error' => 'Configuration "loggerConfig" is missing or empty'
             ],
             'sessionConfig' => [
                 'key' => 'session',
                 'validate' => function ($v) {
                     return !empty($v);
                 },
-                'error' => 'Database configuration "sessionConfig" is missing'
+                'error' => 'Configuration "sessionConfig" is missing or empty'
             ],
             'uploadConfig' => [
                 'key' => 'upload',
@@ -185,7 +159,7 @@ class ConfigServiceProvider implements \Framework\Providers\ServiceProviderInter
                 'validate' => function ($v) {
                     return !empty($v);
                 },
-                'error' => 'Database configuration "uploadConfig" is missing'
+                'error' => 'Configuration "uploadConfig" is missing or empty'
             ],
             'pluginConfig' => [
                 'key' => 'plugin',
@@ -199,7 +173,14 @@ class ConfigServiceProvider implements \Framework\Providers\ServiceProviderInter
                 'validate' => function ($v) {
                     return !empty($v);
                 },
-                'error' => 'Database configuration "viewConfig" is missing'
+                'error' => 'Configuration "pluginConfig" is missing or empty'
+            ],
+            'schedulerConfig' => [
+                'key' => 'scheduler',
+                'validate' => function ($v) {
+                    return !empty($v);
+                },
+                'error' => 'Configuration "schedulerConfig" is missing or empty'
             ],
             'viewConfig' => [
                 'key' => 'view',
@@ -213,7 +194,7 @@ class ConfigServiceProvider implements \Framework\Providers\ServiceProviderInter
                 'validate' => function ($v) {
                     return !empty($v);
                 },
-                'error' => 'Database configuration "viewConfig" is missing'
+                'error' => 'Configuration "viewConfig" is missing or empty'
             ]
         ];
 
@@ -230,7 +211,7 @@ class ConfigServiceProvider implements \Framework\Providers\ServiceProviderInter
 
             // 验证配置
             if (!$def['validate']($value)) {
-                throw new \RuntimeException($def['error']);
+                throw new \Framework\Exception\Infra\ConfigException($def['error']);
             }
 
             // 直接注册实例（即时加载）

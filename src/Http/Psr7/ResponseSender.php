@@ -38,18 +38,20 @@ class ResponseSender
                 /** @var \Framework\Http\Interfaces\StreamInterface $body */
                 $body = $response->getBody();
 
-                if ($body->isReadable() && $body->getSize() > 2 * 1024 * 1024) {
+                if ($body->isReadable() && (!$body->isSeekable() || $body->getSize() === null || $body->getSize() > 2 * 1024 * 1024)) {
                     // 大于 2MB 的内容使用 chunked 发送
-                    $body->rewind();
-                    while (!$body->eof()) {
-                        $chunk = $body->read(8192); // 8KB chunks
-                        if ($chunk !== '') {
-                            /** @noinspection PhpUndefinedMethodInspection */
-                            $swooleResponse->write($chunk);
+                    try {
+                        if ($body->isSeekable()) $body->rewind();
+                        while (!$body->eof()) {
+                            $chunk = $body->read(8192); // 8KB chunks
+                            if ($chunk !== '') {
+                                /** @noinspection PhpUndefinedMethodInspection */
+                                $swooleResponse->write($chunk);
+                            }
                         }
-                    }
-                    /** @noinspection PhpUndefinedMethodInspection */
-                    $swooleResponse->end();
+                        /** @noinspection PhpUndefinedMethodInspection */
+                        $swooleResponse->end();
+                    } finally { $body->close(); }
                 } else {
                     /** @noinspection PhpUndefinedMethodInspection */
                     $swooleResponse->end((string)$body);
@@ -75,7 +77,15 @@ class ResponseSender
             }
         }
 
-        // 输出 body
-        echo (string)$response->getBody();
+        // 云流可能不可 seek 或没有可预知长度，不能用强制 rewind 的字符串转换。
+        $body = $response->getBody();
+        if ($body->isReadable() && (!$body->isSeekable() || $body->getSize() === null || $body->getSize() > 2 * 1024 * 1024)) {
+            try {
+                if ($body->isSeekable()) $body->rewind();
+                while (!$body->eof()) echo $body->read(8192);
+            } finally { $body->close(); }
+        } else {
+            echo (string)$body;
+        }
     }
 }

@@ -12,6 +12,12 @@ use Framework\Http\Psr7\RequestUtils;
 use App\Controllers\Base\BaseController;
 
 // 所有上传和存搞都应走上传临时目录，提交后再移动到最终目录，避免未完成的上传文件被误用。
+/*
+ * 上传链路保护（用户要求，2026-10-10；见根目录 AGENTS.md）：
+ * 此入口由论坛、文章等插件共用。未经用户明确授权，AI 禁止修改上传行为；
+ * 审计、重构、优化或修复测试均不构成授权，必须保留此备注。
+ */
+
 class UploadController extends BaseController
 {
     use \App\Traits\Frontend\FrontendTrait;
@@ -82,15 +88,15 @@ class UploadController extends BaseController
                     }
                     return $this->direct($request);
             }
-        } catch (\Throwable $e) {
-            // 统一异常处理，Service 层抛出的 Runtime\Exception 或 Error 在此捕获
+        } catch (\App\Exception\UploadClientException $e) {
+            // 仅转换已审查、可由上传客户端纠正的业务错误。
             return $this->errorMessage($e->getMessage(), (int)$e->getCode() ?: 1);
         }
     }
 
     /**
      * 初始化
-     * GET /upload/?action=init
+     * POST /upload/?action=init
      */
     public function init(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
@@ -403,8 +409,16 @@ class UploadController extends BaseController
     // hook app_Controllers_Frontend_UploadController_end.php
 
     /**
-     * 安全下载附件
-     * GET /attachment/download/{id}
+     * 下载绑定当前 Session 的临时签名附件链接。
+     * GET /download/{id}?downloadExpires={timestamp}&downloadSignature={signature}
+     *
+     * 路由 requiresDownloadSignature 经 DownloadSignatureResolver 注入 DownloadSignatureMiddleware，
+     * 先校验完整查询参数、Session 绑定与签名有效期；
+     * 本方法继续执行所属模块授权、文件审核及文件流响应，成功响应为 private, no-store。
+     *
+     * 主程序 URL 生成示例：$attachmentId 为已授权附件 ID，签名参数由 DownloadService::createQueries() 计算。
+     * $downloadUrl = $this->urlGenerator->url('download/' . $attachmentId, ['downloadExpires' => $timestamp, 'downloadSignature' => $signature]);
+     * 有业务查询参数时一并参与签名并传入 url()；路由格式及语言前缀由主程序 URL 生成器和插件处理。
      */
     public function download(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
@@ -417,36 +431,54 @@ class UploadController extends BaseController
             return $this->errorMessage($this->language->get('item_not_exists', ['item' => 'Attachment']), 404);
         }
 
+        // 所属模块先授权；未知模块保持原读取合同。
+        $readContext = [];
+        // hook app_Controllers_Frontend_UploadController_download_context.php
+
         // 2. 获取存储信息
         $storageService = $this->container->get(\App\Services\Storage\FileStorageService::class);
-        $storage = $storageService->readByCache((int)$attachment['storage_id']);
+        $storage = $readContext
+            ? $storageService->readOnMaster((int)$attachment['storage_id'])
+            : $storageService->readByCache((int)$attachment['storage_id']);
 
         if (empty($storage) || empty($storage['path'])) {
             return $this->errorMessage($this->language->get('file_not_exists'), 404);
         }
 
-        // 3. 拼接绝对路径 (注意：数据库里存的是移除 APP_PATH 后的相对路径)
-        $filePath = APP_PATH . ltrim((string)$storage['path'], '/\\');
-
-        if (!is_file($filePath)) {
-            return $this->errorMessage($this->language->get('file_not_exists'), 404);
+        // 3. 审核门禁（权威状态在 well_file_storage）：待审(0)/拒绝(2) 的文件
+        //    仅文件所有者与管理员（group_id=1）可下载，其余视为不存在。
+        //    配合 nginx /upload/ 对 html/js/json/svg 的 deny，待审文件无法绕过。
+        if ((int)($storage['is_reviewed'] ?? 0) !== 1) {
+            $user = $request->getAttribute('user', []);
+            $isOwner = (int)($attachment['user_id'] ?? 0) === (int)($user['id'] ?? 0);
+            $isAdmin = (int)($user['group_id'] ?? 0) === 1;
+            if (!$isOwner && !$isAdmin) {
+                return $this->errorMessage($this->language->get('item_not_exists', ['item' => 'Attachment']), 404);
+            }
         }
 
-        // 4. 准备文件名 (处理中文及特殊字符)
-        $orgFilename = $attachment['orgfilename'] ?: ($attachment['filename'] ?: basename($filePath));
+        // 上传保护：所属模块先核对内容权限与精确修订，核心随后统一选择文件源。
+        $cloud = (int)($readContext['cloudReadyAt'] ?? 0) > 0;
+        if ($cloud && ((int)($storage['cloud_type'] ?? 0) !== 1
+            || (string)($storage['disk_key'] ?? '') !== (string)($readContext['cloudDisk'] ?? ''))) {
+            throw new \RuntimeException('Content cloud state does not match attachment storage');
+        }
+        $diskKey = $cloud ? (string)$readContext['cloudDisk'] : 'local';
+        try {
+            $source = $storageService->openStoredFile($storage, $diskKey);
+        } catch (\Framework\Exception\Http\NotFoundException $missing) {
+            return $this->errorMessage($this->language->get('file_not_exists'), 404);
+        }
+        $orgFilename = $attachment['orgfilename'] ?: ($attachment['filename'] ?: basename((string)$storage['path']));
         $encodedName = rawurlencode($orgFilename);
-
-        // 5. 生成流式响应 (高性能，不占用 PHP 内存)
-        $stream = \Framework\Http\Psr7\Factories\StreamFactory::getInstance()->createStreamFromFile($filePath, 'rb');
-
-        // 6. 构造响应对象
+        $stream = \Framework\Http\Psr7\Factories\StreamFactory::getInstance()->createStreamFromResource($source['stream']);
         $responseFactory = $this->container->get(\Framework\Http\Interfaces\ResponseFactoryInterface::class);
         $response = $responseFactory->createResponse(200)
-            ->withHeader('Content-Type', $storage['mime'] ?: 'application/octet-stream')
+            ->withHeader('Content-Type', $source['mime'])
             ->withHeader('Content-Disposition', 'attachment; filename="' . $encodedName . '"; filename*=UTF-8\'\'' . $encodedName)
-            ->withHeader('Content-Length', (string)filesize($filePath))
-            ->withHeader('Cache-Control', 'public, max-age=3600')
+            ->withHeader('Cache-Control', 'private, no-store')
             ->withBody($stream);
+        if ($source['size'] !== null) $response = $response->withHeader('Content-Length', (string)$source['size']);
 
         return $response;
     }

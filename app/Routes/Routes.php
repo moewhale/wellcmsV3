@@ -18,7 +18,9 @@ Router::get('/', [IndexController::class, 'index'], ['layout' => 'index']);
 Router::get('/403', [ErrorController::class, 'error403'], ['layout' => '403']);
 Router::get('/404', [ErrorController::class, 'error404'], ['layout' => '404']);
 Router::get('/500', [ErrorController::class, 'error500'], ['layout' => '500']);
-Router::get('/download/{id}', [UploadController::class, 'download']);
+Router::get('/download/{id}', [UploadController::class, 'download'], [
+    'requiresDownloadSignature' => true,
+]);
 
 // 外链安全跳转提示页（公开 GET，不附加登录或 CSRF 限制）
 Router::get('/redirect/external', [ExternalLinkRedirectController::class, 'external'], [
@@ -47,13 +49,16 @@ Router::group(['prefix' => '/my'], function () {
     });
 
     Router::post('/postEmail', [MyController::class, 'postEmail'], ['requiresCsrf' => ['enable' => true, 'ttl' => 3600]]);
+    Router::post('/PostVerifyOriginalEmail', [MyController::class, 'postVerifyOriginalEmail'], [
+        'requiresAuth' => true,
+        'requiresCsrf' => ['enable' => true, 'ttl' => 3600],
+    ]);
 });
 
 // hook app_Routes_manage_before.php
 
-// 管理仪表盘
-Router::group(['prefix' => '/manage', 'meta' => ['requiresAuth' => true],
-'requiresUserPerm' => ['enable' => true, 'role' => ['delete']]], function () {
+// 管理聚合页仅要求登录；具体入口和目标路由由各插件按固定权限或分类版主身份授权。
+Router::group(['prefix' => '/manage', 'meta' => ['requiresAuth' => true]], function () {
     Router::get('/dashboard', [ManageController::class, 'dashboard'], ['layout' => 'manage_dashboard']);
 });
 
@@ -63,10 +68,11 @@ Router::group(['prefix' => '/manage', 'meta' => ['requiresAuth' => true],
 Router::group(['prefix' => '/auth'], function () {
     Router::get('/signUp', [AuthController::class, 'signUp'], ['layout' => 'sign_up']);
     Router::get('/signIn', [AuthController::class, 'signIn'], ['layout' => 'sign_in']);
-    Router::get('/logout', [AuthController::class, 'logout'], ['requiresAuth' => true]);
+    Router::post('/logout', [AuthController::class, 'logout'], [
+        'requiresAuth' => true,
+        'requiresCsrf' => ['enable' => true, 'ttl' => 3600],
+    ]);
     Router::get('/resetPassword', [AuthController::class, 'resetPassword'], ['layout' => 'reset_password']);
-    Router::get('/synSignIn', [AuthController::class, 'synSignIn']);
-
     // 提交操作 (带 Token 验证)
     Router::group(['meta' => ['requiresToken' => ['enable' => true, 'ttl' => 600]]], function () {
         Router::post('/postSignUp', [AuthController::class, 'postSignUp']);
@@ -106,7 +112,10 @@ Router::group(['prefix' => '/admin'], function () {
     Router::group(['meta' => ['requiresAdminSignIn' => true]], function () {
 
         // 登出与基础信息
-        Router::get('/logout', [AdminIndex::class, 'logout'], ['requiresUserPerm' => ['enable' => true, 'role' => ['administer']]]);
+        Router::post('/logout', [AdminIndex::class, 'logout'], [
+            'requiresCsrf' => ['enable' => true, 'ttl' => 3600],
+            'requiresUserPerm' => ['enable' => true, 'role' => ['administer']],
+        ]);
         Router::get('/systemInfo', [AdminIndex::class, 'systemInfo'], ['requiresUserPerm' => ['enable' => true, 'role' => ['administer']]]);
         Router::get('/panel', [AdminIndex::class, 'panel'], [
             'layout' => 'panel',
@@ -222,7 +231,7 @@ Router::group(['prefix' => '/admin'], function () {
             Router::post('/postInstall', [ThemeController::class, 'install'], ['requiresCsrf' => ['enable' => true, 'ttl' => 3600]]);
             Router::post('/postUninstall', [ThemeController::class, 'uninstall'], ['requiresCsrf' => ['enable' => true, 'ttl' => 3600]]);
             Router::get('/setting', [ThemeController::class, 'setting'], ['layout' => 'setting']);
-            Router::get('/postSetting', [ThemeController::class, 'postSetting'], ['requiresCsrf' => ['enable' => true, 'ttl' => 3600]]);
+            Router::post('/postSetting', [ThemeController::class, 'postSetting'], ['requiresCsrf' => ['enable' => true, 'ttl' => 3600]]);
         });
 
         // 商店管理 (Store)
@@ -234,8 +243,8 @@ Router::group(['prefix' => '/admin'], function () {
             Router::get('/detail', [StoreController::class, 'detail'], ['layout' => 'plugin_detail']);
             Router::get('/payment', [StoreController::class, 'payment'], ['layout' => 'store_payment']);
             Router::get('/paymentDialog', [StoreController::class, 'paymentDialog']);
-            Router::get('/download', [StoreController::class, 'download']);
-            Router::get('/upgrade', [StoreController::class, 'upgrade']);
+            Router::post('/download', [StoreController::class, 'download'], ['requiresCsrf' => ['enable' => true, 'ttl' => 3600]]);
+            Router::post('/upgrade', [StoreController::class, 'upgrade'], ['requiresCsrf' => ['enable' => true, 'ttl' => 3600]]);
 
             Router::post('/postPayment', [StoreController::class, 'postPayment'], ['requiresCsrf' => ['enable' => true, 'ttl' => 600]]);
             Router::post('/bought', [StoreController::class, 'bought'], ['requiresCsrf' => ['enable' => true, 'ttl' => 600]]);
@@ -299,7 +308,7 @@ Router::group(['prefix' => '/admin'], function () {
         // 升级检查与处理
         Router::group(['meta' => ['requiresUserPerm' => ['enable' => true, 'role' => ['administer']]]], function () {
             Router::get('/check/upgrade', [AdminIndex::class, 'checkUpgrade'], ['layout' => 'upgrade_check']);
-            Router::get('/process/upgrade', [AdminIndex::class, 'processUpgrade']);
+            Router::post('/process/upgrade', [AdminIndex::class, 'processUpgrade'], ['requiresCsrf' => ['enable' => true, 'ttl' => 3600]]);
             Router::get('/upgrade/success', [AdminIndex::class, 'upgradeSuccess'], ['layout' => 'upgrade_success']);
         });
 
@@ -317,15 +326,22 @@ Router::group(['prefix' => '/admin'], function () {
 
 // 6. 上传动作 (Upload Group)
 Router::group(['prefix' => '/upload', 'meta' => ['requiresAuth' => true]], function () {
-    Router::get('/', [UploadController::class, 'handle']);
-    Router::post('/', [UploadController::class, 'handle']);
-
-    // 仅限管理精细控制的动作 (如果不想在 handle 里写死权限)
-    Router::group(['meta' => ['requiresUserPerm' => ['enable' => true, 'role' => ['administer', 'upload']]]], function () {
-        Router::post('/delete', [UploadController::class, 'delete']);
-        Router::post('/batchDelete', [UploadController::class, 'batchDelete']);
-        Router::post('/review', [UploadController::class, 'review']);
-    });
+    Router::post('/', [UploadController::class, 'handle'], [
+        'requiresCsrf' => ['enable' => true, 'ttl' => 600],
+        'requiresUserPerm' => ['enable' => true, 'role' => ['upload']],
+    ]);
+    Router::post('/delete', [UploadController::class, 'delete'], [
+        'requiresCsrf' => ['enable' => true, 'ttl' => 600],
+        'requiresUserPerm' => ['enable' => true, 'role' => ['delete']],
+    ]);
+    Router::post('/batchDelete', [UploadController::class, 'batchDelete'], [
+        'requiresCsrf' => ['enable' => true, 'ttl' => 600],
+        'requiresUserPerm' => ['enable' => true, 'role' => ['delete']],
+    ]);
+    Router::post('/review', [UploadController::class, 'review'], [
+        'requiresCsrf' => ['enable' => true, 'ttl' => 600],
+        'requiresUserPerm' => ['enable' => true, 'role' => ['review']],
+    ]);
 });
 
 // hook app_Routes_Routes_end.php

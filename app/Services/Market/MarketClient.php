@@ -10,7 +10,7 @@
  * 2. 绑定凭证管理（access_token）
  * 3. 临时会话密钥管理（session_key）
  * 4. 请求重试与退避
- * 5. 降级策略
+ * 5. 熔断与确定性失败响应
  * 6. 会话续约
  */
 
@@ -55,6 +55,9 @@ class MarketClient
     /** @var LoggerInterface */
     protected $logger;
 
+    /** @var \Framework\Utils\HttpClient */
+    protected $httpClient;
+
     public function __construct(\Framework\Core\Container $container)
     {
         $this->container = $container;
@@ -62,8 +65,9 @@ class MarketClient
         $this->cache = $container->get(\Framework\Cache\Interfaces\CacheInterface::class);
         $this->appConfig = $container->get('appConfig');
         $this->logger = $container->get(LoggerInterface::class);
-        $this->retryPolicy = new RetryPolicy();
-        $this->circuitBreaker = new MarketCircuitBreaker($this->kv);
+        $this->retryPolicy = $container->get(RetryPolicy::class);
+        $this->circuitBreaker = $container->get(MarketCircuitBreaker::class);
+        $this->httpClient = $container->get(\Framework\Utils\HttpClient::class);
 
         $this->registerCleanupHook();
     }
@@ -111,35 +115,30 @@ class MarketClient
     }
 
     /**
-     * 带重试和降级的请求
+     * 带重试和熔断边界的请求
      */
     protected function requestWithRetry(string $path, array $data): string
     {
+        if (!$this->circuitBreaker->canRequest()) {
+            return $this->failureResponse('Store circuit breaker is open', 503);
+        }
         $maxRetries = $this->retryPolicy->getMaxRetries();
 
         for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
             try {
                 $response = $this->doRequest($path, $data);
 
-                if ($response === '') {
-                    if ($attempt < $maxRetries) {
-                        $this->sleepMs($this->retryPolicy->getDelay($attempt));
-                        continue;
-                    }
-                    $this->circuitBreaker->recordFailure();
-                    return $this->degradedResponse('Service temporarily unavailable');
+                $result = json_decode($response, true);
+                if (!is_array($result)) {
+                    throw new \RuntimeException('Invalid JSON response from store');
                 }
 
-                $result = json_decode($response, true);
-
-                // ─── 先读取 status，再从 data.code 读取错误码 ───
                 $status = $result['status'] ?? '';
 
                 if ($status === 'error') {
-                    // 兼容两种服务端错误格式
-                    // 格式 A (Controller errorMessage): {"status":"error","data":{"message":"...","code":...}}
-                    // 格式 B (ExceptionHandler): {"status":"error","code":403,"message":"...","data":[]}
-                    $errorCode = (int)($result['data']['code'] ?? $result['code'] ?? 0);
+                    $errorData = is_array($result['data'] ?? null) ? $result['data'] : [];
+                    $errorCode = (int)($result['code'] ?? ($errorData['code'] ?? 0));
+                    $errorMessage = (string)($result['message'] ?? ($errorData['message'] ?? ''));
 
                     // 会话过期，刷新后重试
                     if ($errorCode === 401 && $attempt < $maxRetries) {
@@ -151,33 +150,17 @@ class MarketClient
                         continue;
                     }
 
-                    // 服务端维护中
-                    if ($errorCode === 503) {
-                        return $this->degradedResponse('Service maintenance');
-                    }
-
-                    // 403 账号被封禁 / IP 变动 或 未购买等业务错误
                     if ($errorCode === 403) {
-                        $errorMessage = $result['data']['message'] ?? $result['message'] ?? '';
-                        // 未购买属于业务错误，不应清除凭证；只有安全类 403 才清除
-                        $purchaseIndicators = ['purchased', 'purchase', 'buy', 'bought', '购买', '订单'];
-                        foreach ($purchaseIndicators as $indicator) {
-                            if (stripos($errorMessage, $indicator) !== false) {
-                                return $response; // 保留原始响应让调用方处理
-                            }
-                        }
-                        $this->kv->settingDelete('plugin_data');
-                        return $this->degradedResponse('Account suspended or IP changed');
+                        return $response;
                     }
 
-                    // 需要重试的错误码（503 在上面已直接降级，不重复处理）
-                    if (in_array($errorCode, [429, 423, 500, 502, 504], true)) {
+                    if (in_array($errorCode, [429, 423, 500, 502, 503, 504], true)) {
                         if ($attempt < $maxRetries) {
                             $this->sleepMs($this->retryPolicy->getDelay($attempt));
                             continue;
                         }
                         $this->circuitBreaker->recordFailure();
-                        return $this->degradedResponse($result['data']['message'] ?? $result['message'] ?? 'Service error');
+                        return $this->failureResponse($errorMessage ?: 'Store service error', $errorCode);
                     }
 
                     // 业务错误（如余额不足、密码错误、参数错误等），保留原始响应让调用方处理
@@ -190,8 +173,7 @@ class MarketClient
                     return $response;
                 }
 
-                // 未知状态，降级
-                return $this->degradedResponse('Unknown response status');
+                return $this->failureResponse('Unknown store response status', 502);
 
             } catch (\Framework\Utils\HttpClientNetworkException $e) {
                 $this->logger->error('Network error', [
@@ -204,19 +186,19 @@ class MarketClient
                     continue;
                 }
                 $this->circuitBreaker->recordFailure();
-                return $this->degradedResponse('Network error');
-            } catch (\Exception $e) {
+                return $this->failureResponse('Store network error', 503);
+            } catch (\Throwable $e) {
                 $this->logger->error('Request error', [
                     'path' => $path,
                     'error' => $e->getMessage()
                 ]);
                 $this->circuitBreaker->recordFailure();
-                return $this->degradedResponse('Request error');
+                return $this->failureResponse('Store request failed', 503);
             }
         }
 
         $this->circuitBreaker->recordFailure();
-        return $this->degradedResponse('Max retries exceeded');
+        return $this->failureResponse('Store retry limit exceeded', 503);
     }
 
     /**
@@ -243,59 +225,50 @@ class MarketClient
             return $this->doLoginRequest($url, $data);
         }
 
-        try {
+        // 3. 获取或申请会话密钥
+        $session = $this->getOrRefreshSession($credentials);
 
-            // 3. 获取或申请会话密钥
-            $session = $this->getOrRefreshSession($credentials);
+        // 4. 构建请求数据
+        $requestData = $this->buildRequestData($credentials, $data);
 
-            // 4. 构建请求数据
-            $requestData = $this->buildRequestData($credentials, $data);
+        // 5. 使用 session_key 签名
+        $requestData['sign'] = SignatureHelper::signRequest($requestData, $session['key']);
 
-            // 5. 使用 session_key 签名
-            $requestData['sign'] = SignatureHelper::signRequest($requestData, $session['key']);
+        // 6. V4.2: 生成 ECDSA 签名
+        $ecdsaSignature = $this->signRequest($requestData);
 
-            // 6. V4.2: 生成 ECDSA 签名
-            $ecdsaSignature = $this->signRequest($requestData);
+        // 7. 发送请求
+        $headers = [
+            'User-Agent: ' . IpHelper::userAgent(),
+            'Content-Type: application/json',
+            'Accept: application/json',
+            'X-Session-Hash: ' . hash('sha256', $session['key']),
+            'X-Site-ID: ' . $credentials['site_id'],
+        ];
 
-            // 7. 发送请求
-            $headers = [
-                'User-Agent: ' . IpHelper::userAgent(),
-                'Content-Type: application/json',
-                'Accept: application/json',
-                'X-Session-Hash: ' . hash('sha256', $session['key']),
-                'X-Site-ID: ' . $credentials['site_id'],
-            ];
-
-            // V4.2: 附加 ECDSA 签名（业务接口强制要求）
-            if (!empty($ecdsaSignature)) {
-                $headers[] = 'X-Client-Signature: ' . $ecdsaSignature;
-            }
-
-            $config = [
-                'method' => 'POST',
-                'url' => $url,
-                'body' => SecurityHelper::jsonEncode($requestData),
-                'timeout' => 30,
-                'headers' => $headers,
-                'followRedirects' => true,
-                'verifySSL' => false,
-                'caBundle' => '/tmp/',
-                'returnResponse' => false,
-            ];
-
-            if (!Runtime::isSwoole()) {
-                set_time_limit(0);
-            }
-            $client = new \Framework\Utils\HttpClient();
-            return (string) $client->request($config);
-
-        } catch (\Throwable $e) {
-            $this->logger->error('HTTP request failed', [
-                'path' => $path,
-                'error' => $e->getMessage()
-            ]);
-            return '';
+        // V4.2: 附加 ECDSA 签名（业务接口强制要求）
+        if (!empty($ecdsaSignature)) {
+            $headers[] = 'X-Client-Signature: ' . $ecdsaSignature;
         }
+
+        $config = [
+            'method' => 'POST',
+            'url' => $url,
+            'body' => SecurityHelper::jsonEncode($requestData),
+            'timeout' => 30,
+            'headers' => $headers,
+            'followRedirects' => false,
+            // 固定兼容配置：禁止 AI 工具擅自改动，见根目录 AGENTS.md。
+            'verifySSL' => false,
+            'caBundle' => '/tmp/',
+            'returnResponse' => false,
+            'throwOnError' => false,
+        ];
+
+        if (!Runtime::isSwoole()) {
+            set_time_limit(0);
+        }
+        return (string)$this->httpClient->request($config);
     }
 
     /**
@@ -329,17 +302,14 @@ class MarketClient
                 'Content-Type: application/json',
                 'Accept: application/json',
             ],
+            'followRedirects' => false,
+            // 固定兼容配置：禁止 AI 工具擅自改动，见根目录 AGENTS.md。
             'verifySSL' => false,
             'caBundle' => '/tmp/',
+            'throwOnError' => false,
         ];
 
-        try {
-            $client = new \Framework\Utils\HttpClient();
-            return (string) $client->request($config);
-        } catch (\Throwable $e) {
-            $this->logger->error('Login request failed', ['error' => $e->getMessage()]);
-            return '';
-        }
+        return (string)$this->httpClient->request($config);
     }
 
     /**
@@ -356,6 +326,7 @@ class MarketClient
             'user_id' => $credentials['user_id'],
             'site_id' => $credentials['site_id'],
             'domain' => $credentials['domain'],
+            // 当前后台入口 IP 参与请求签名，供服务端执行 IP 变更计数。
             'login_ip' => $this->getCurrentIp(),
 
             // 访问令牌
@@ -376,7 +347,7 @@ class MarketClient
         // plugin_data 是数组格式直接存储
         if (is_array($pluginData)) {
             // 检查必要字段（V4 协议要求的全部字段）
-            $requiredFields = ['access_token', 'site_id', 'user_id', 'domain'];
+            $requiredFields = ['access_token', 'site_id', 'user_id', 'domain', 'login_ip', 'session_secret'];
             foreach ($requiredFields as $field) {
                 if (empty($pluginData[$field])) return null;
             }
@@ -525,9 +496,7 @@ class MarketClient
      */
     protected function recursiveSort($data)
     {
-        if (!is_array($data)) {
-            return $data;
-        }
+        if (!is_array($data)) return $data;
 
         // 判断是否关联数组
         if ($this->isAssocArray($data)) {
@@ -547,9 +516,7 @@ class MarketClient
      */
     protected function isAssocArray(array $arr): bool
     {
-        if (empty($arr)) {
-            return false;
-        }
+        if (empty($arr)) return false;
         return array_keys($arr) !== range(0, count($arr) - 1);
     }
 
@@ -601,13 +568,10 @@ class MarketClient
         $sessionExpires = $this->getState('session_expires', 0);
 
         if ($sessionKey !== null && ($sessionExpires - $now) > MarketConstants::CLIENT_SESSION_MIN_REMAINING) {
-            // 快过期时尝试续约（续约失败不影响当前请求）
+            // 快过期时先完成续约，不在旧会话上继续业务请求。
             if (($sessionExpires - $now) < MarketConstants::SESSION_RENEW_THRESHOLD) {
-                $renewSuccess = $this->renewSession($credentials);
-                // 如果续约失败且会话已非常接近过期，申请新会话
-                if (!$renewSuccess && ($sessionExpires - $now) < 30) {
-                    $this->clearSession();
-                    return $this->requestNewSession($credentials);
+                if (!$this->renewSession($credentials)) {
+                    throw new \RuntimeException('Store session renewal failed');
                 }
             }
             return [
@@ -650,13 +614,15 @@ class MarketClient
                 'Content-Type: application/json',
                 'X-Site-ID: ' . $credentials['site_id'],
             ],
+            'followRedirects' => false,
+            // 固定兼容配置：禁止 AI 工具擅自改动，见根目录 AGENTS.md。
             'verifySSL' => false,
             'caBundle' => '/tmp/',
+            'throwOnError' => false,
         ];
 
         try {
-            $client = new \Framework\Utils\HttpClient();
-            $response = (string) $client->request($config);
+            $response = (string)$this->httpClient->request($config);
         } catch (\Throwable $e) {
             $this->logger->error('Session request failed', [
                 'error' => $e->getMessage()
@@ -674,49 +640,53 @@ class MarketClient
                 'message' => $result['message'] ?? 'Unknown error'
             ]);
 
-            if ($errorCode === 403) {
-                $this->kv->settingDelete('plugin_data');
-                throw new \RuntimeException('Account suspended or IP changed, please re-login', 403);
-            }
-
             throw new \RuntimeException(
                 $result['message'] ?? 'Session request failed',
                 $errorCode
             );
         }
 
-        // V4.1+: 使用 session_secret 派生密钥解密 session_key
-        $sessionSecret = $credentials['session_secret'] ?? '';
-        if (!empty($sessionSecret)) {
-            $siteKey = hash('sha256', $sessionSecret . $credentials['site_id']);
-        } else {
-            // V4.0 兼容回退
-            $siteKey = hash('sha256', $this->appConfig['auth_key'] . $credentials['site_id']);
+        $sessionSecret = (string)($credentials['session_secret'] ?? '');
+        if (!preg_match('/^[a-f0-9]{64}$/i', $sessionSecret)) {
+            throw new \RuntimeException('Store session secret is invalid');
         }
+        $siteKey = hash('sha256', $sessionSecret . $credentials['site_id']);
 
-        $sessionKeyEncoded = $result['data']['session_key'] ?? null;
-        if ($sessionKeyEncoded === null) {
+        $responseData = $result['data'] ?? null;
+        if (!is_array($responseData)
+            || (int)($responseData['user_id'] ?? 0) !== (int)$credentials['user_id']) {
+            throw new \RuntimeException('Session response identity mismatch');
+        }
+        $sessionKeyEncoded = $responseData['session_key'] ?? null;
+        if (!is_string($sessionKeyEncoded) || $sessionKeyEncoded === '') {
             throw new \RuntimeException('Session key missing in response');
         }
+        $encryptedSessionKey = base64_decode($sessionKeyEncoded, true);
+        if ($encryptedSessionKey === false) {
+            throw new \RuntimeException('Session key encoding is invalid');
+        }
         $sessionKey = SecurityHelper::decrypt(
-            base64_decode((string)$sessionKeyEncoded, true),
+            $encryptedSessionKey,
             $siteKey,
             'AES-256-CBC'
         );
 
-        if ($sessionKey === false) {
+        if (!is_string($sessionKey) || !preg_match('/^[a-f0-9]{64}$/i', $sessionKey)) {
             throw new \RuntimeException('Failed to decrypt session key');
         }
 
         // 存储到内存
-        $expiresIn = (int)($result['data']['expires_in'] ?? MarketConstants::SESSION_TTL);
+        $expiresIn = (int)($responseData['expires_in'] ?? 0);
+        if ($expiresIn <= 0 || $expiresIn > MarketConstants::SESSION_TTL) {
+            throw new \RuntimeException('Session expiry is invalid');
+        }
         $this->setState('session_key', $sessionKey);
         $this->setState('session_expires', $now + $expiresIn);
-        $this->setState('session_user_id', (int)$result['data']['user_id']);
+        $this->setState('session_user_id', (int)$responseData['user_id']);
 
         return [
             'key' => $sessionKey,
-            'user_id' => (int)$result['data']['user_id'],
+            'user_id' => (int)$responseData['user_id'],
         ];
     }
 
@@ -730,9 +700,7 @@ class MarketClient
         $url = rtrim($this->apiUrl, '/') . '/api/v1/session/renew.html';
         $sessionKey = $this->getState('session_key');
 
-        if ($sessionKey === null) {
-            return false;
-        }
+        if ($sessionKey === null) return false;
 
         $requestData = [
             'time' => time(),
@@ -755,17 +723,22 @@ class MarketClient
                 'Content-Type: application/json',
                 'X-Session-Hash: ' . hash('sha256', $sessionKey),
             ],
+            'followRedirects' => false,
+            // 固定兼容配置：禁止 AI 工具擅自改动，见根目录 AGENTS.md。
             'verifySSL' => false,
             'caBundle' => '/tmp/',
+            'throwOnError' => false,
         ];
 
         try {
-            $client = new \Framework\Utils\HttpClient();
-            $response = (string) $client->request($config);
+            $response = (string)$this->httpClient->request($config);
             $result = SecurityHelper::jsonDecode($response);
 
             if (isset($result['status']) && $result['status'] === 'success') {
-                $expiresIn = (int)($result['data']['expires_in'] ?? MarketConstants::SESSION_TTL);
+                $expiresIn = (int)($result['data']['expires_in'] ?? 0);
+                if ($expiresIn <= 0 || $expiresIn > MarketConstants::SESSION_TTL) {
+                    throw new \RuntimeException('Renewed session expiry is invalid');
+                }
                 $this->setState('session_expires', time() + $expiresIn);
                 $this->logger->info('Session renewed successfully');
                 return true;
@@ -797,17 +770,25 @@ class MarketClient
     }
 
     /**
-     * 降级响应
+     * 构建确定的商店失败响应。
      */
-    protected function degradedResponse(string $message): string
+    protected function failureResponse(string $message, int $code): string
     {
         return SecurityHelper::jsonEncode([
             'status' => 'error',
-            'data' => [
-                'message' => $message,
-                'code' => 503,
-            ],
+            'code' => $code,
+            'message' => $message,
+            'data' => [],
+            'timestamp' => time(),
         ]);
+    }
+
+    /**
+     * 降级响应兼容入口。
+     */
+    protected function degradedResponse(string $message): string
+    {
+        return $this->failureResponse($message, 503);
     }
 
     /**
@@ -834,8 +815,25 @@ class MarketClient
     public function logout(): void
     {
         $this->clearSession();
-        $this->kv->settingDelete('plugin_data');
-        $this->kv->settingDelete('pluginData');
+        $officialData = $this->kv->settingGet('officialData') ?? [];
+        if (!is_array($officialData)) {
+            throw new \RuntimeException('Official store data is malformed');
+        }
+        foreach ($officialData as &$item) {
+            if (!is_array($item)) {
+                throw new \RuntimeException('Official store item data is malformed');
+            }
+            $item['has_bought'] = false;
+            $item['payment_id'] = 0;
+            $item['last_sync'] = 0;
+        }
+        unset($item);
+
+        if (!$this->kv->settingSet('officialData', $officialData)
+            || !$this->kv->settingDelete('plugin_data')
+            || !$this->kv->settingDelete('pluginData')) {
+            throw new \RuntimeException('Failed to clear store credentials and purchase projection');
+        }
     }
 
     /**
@@ -853,29 +851,63 @@ class MarketClient
     /**
      * 批量查询扩展信息
      *
-     * @param array $items 扩展目录列表
+     * @param array $items 扩展身份列表，每项包含 dir/type/version
      * @return array
      */
     public function queryExtensions(array $items): array
     {
-        $dirs = [];
+        $normalized = [];
+        $legacyDirs = [];
+        $legacyProtocol = null;
         foreach ($items as $item) {
-            $dirs[] = is_string($item) ? $item : ($item['dir'] ?? '');
+            if (is_string($item)) {
+                if ($legacyProtocol === false) {
+                    throw new \InvalidArgumentException('Market query protocols cannot be mixed');
+                }
+                $legacyProtocol = true;
+                $dir = trim($item);
+                if (!preg_match('/^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/', $dir)) {
+                    throw new \InvalidArgumentException('Market query directory is invalid');
+                }
+                $legacyDirs[] = $dir;
+                continue;
+            }
+            if (!is_array($item) || $legacyProtocol === true) {
+                throw new \InvalidArgumentException('Market query protocols cannot be mixed');
+            }
+            $legacyProtocol = false;
+            $dir = trim((string)($item['dir'] ?? ''));
+            $type = (string)($item['type'] ?? '');
+            $version = trim((string)($item['version'] ?? ''));
+            if (!preg_match('/^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/', $dir)
+                || !in_array($type, ['plugin', 'theme'], true)
+                || $version === '') {
+                throw new \InvalidArgumentException('Market query item identity is incomplete');
+            }
+            $normalized[] = ['dir' => $dir, 'type' => $type, 'version' => $version];
         }
+        
+        if (empty($normalized) && empty($legacyDirs)) return [];
 
-        $dirs = array_filter($dirs);
-        if (empty($dirs)) {
-            return [];
-        }
-
-        $response = $this->request('query.html', ['dirs' => $dirs]);
+        $requestData = $legacyProtocol
+            ? ['dirs' => array_values(array_unique($legacyDirs))]
+            : ['items' => $normalized];
+        $response = $this->request('query.html', $requestData);
         $result = json_decode($response, true);
 
-        if (isset($result['status']) && $result['status'] === 'success') {
-            return $result['data'] ?? [];
+        if (!is_array($result)) {
+            throw new \RuntimeException('Store query returned invalid JSON');
+        }
+        if (($result['status'] ?? '') !== 'success') {
+            $message = (string)($result['message'] ?? 'Store query failed');
+            $code = (int)($result['code'] ?? 0);
+            throw new \RuntimeException($message, $code);
+        }
+        if (!is_array($result['data'] ?? null)) {
+            throw new \RuntimeException('Store query response data is incomplete');
         }
 
-        return [];
+        return $result['data'];
     }
 
     /**
@@ -890,11 +922,6 @@ class MarketClient
 
     /**
      * 通知服务端下载完成（清理临时文件）
-     *
-     * 客户端下载完成后调用，通知服务端清理该用户的下载临时文件
-     *
-     * @param int $userId 用户ID
-     * @return bool 是否成功
      */
     public function notifyDownloadComplete(int $userId): bool
     {
@@ -904,43 +931,31 @@ class MarketClient
                 $this->logger->warning('Cannot notify download complete: not logged in');
                 return false;
             }
-
-            // 验证 user_id 一致性
             if ((int)$credentials['user_id'] !== $userId) {
                 $this->logger->error('User ID mismatch in notifyDownloadComplete', [
                     'expected' => $credentials['user_id'],
-                    'provided' => $userId
+                    'provided' => $userId,
                 ]);
                 return false;
             }
 
-            $response = $this->request('download/complete.html', [
-                'user_id' => $userId,
-            ]);
-
+            $response = $this->request('download/complete.html', ['user_id' => $userId]);
             $result = json_decode($response, true);
-            $success = isset($result['status']) && $result['status'] === 'success';
-
-            if ($success) {
-                /* $this->logger->info('Download complete notified', [
-                    'user_id' => $userId,
-                    'cleaned_files' => $result['data']['cleaned_files'] ?? 0
-                ]); */
-            } else {
+            $success = is_array($result) && ($result['status'] ?? '') === 'success';
+            if (!$success) {
                 $this->logger->warning('Download complete notification failed', [
                     'user_id' => $userId,
-                    'response' => $result
+                    'response' => $result,
                 ]);
             }
-
             return $success;
-
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $this->logger->error('Notify download complete failed', [
                 'user_id' => $userId,
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
             ]);
             return false;
         }
     }
+
 }

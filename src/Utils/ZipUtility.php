@@ -21,6 +21,11 @@ namespace Framework\Utils;
  */
 class ZipUtility
 {
+	private const MAX_ENTRIES = 10000;
+	private const MAX_TOTAL_UNCOMPRESSED = 1073741824;
+	private const MAX_FILE_UNCOMPRESSED = 268435456;
+	private const MAX_COMPRESSION_RATIO = 200;
+
 	/**
 	 * 压缩
 	 * @param string|null $zipRootName ZIP 内根目录名（null 则使用 basename($srcPath)）
@@ -42,7 +47,7 @@ class ZipUtility
 	}
 
 	/** 解压 */
-	public function unzip(string $zipfile, string $destPath): void
+	public function unzip(string $zipfile, string $destPath, bool $flattenSameName = true): void
 	{
 		$zipfile  = strtr($zipfile,  '\\', '/');
 		$destPath = rtrim(strtr($destPath, '\\', '/'), '/') . '/';
@@ -52,6 +57,8 @@ class ZipUtility
 		} else {
 			$this->unzipFallback($zipfile, $destPath);
 		}
+
+		if (!$flattenSameName) return;
 
 		// 自动扁平化同名双层目录
 		$last = basename(rtrim($destPath, '/'));
@@ -97,8 +104,42 @@ class ZipUtility
 		if ($za->open($zipfile) !== true) {
 			throw new \RuntimeException("Unable to open $zipfile");
 		}
-		$za->extractTo($destPath);
-		$za->close();
+		try {
+			if ($za->numFiles > self::MAX_ENTRIES) {
+				throw new \RuntimeException('ZIP entry count exceeds the allowed limit');
+			}
+			$totalSize = 0;
+			for ($i = 0; $i < $za->numFiles; $i++) {
+				$stat = $za->statIndex($i);
+				if (!is_array($stat)) {
+					throw new \RuntimeException('Unable to read ZIP entry metadata');
+				}
+				$name = (string)($stat['name'] ?? '');
+				$size = (int)($stat['size'] ?? 0);
+				$compressedSize = (int)($stat['comp_size'] ?? 0);
+				$this->validateEntry($name, $size, $compressedSize);
+				$totalSize += $size;
+				if ($totalSize > self::MAX_TOTAL_UNCOMPRESSED) {
+					throw new \RuntimeException('ZIP total uncompressed size exceeds the allowed limit');
+				}
+
+				$operationsSystem = 0;
+				$attributes = 0;
+				if ($za->getExternalAttributesIndex($i, $operationsSystem, $attributes)) {
+					$mode = ($attributes >> 16) & 0170000;
+					if ($mode === 0120000) {
+						throw new \RuntimeException('ZIP symbolic links are not allowed');
+					}
+				}
+			}
+
+			$this->ensureDir($destPath);
+			if (!$za->extractTo($destPath)) {
+				throw new \RuntimeException('ZIP extraction failed');
+			}
+		} finally {
+			$za->close();
+		}
 	}
 
 	/* ========= 纯 PHP fallback ========= */
@@ -133,21 +174,50 @@ class ZipUtility
 			throw new \RuntimeException("Cannot open $zipfile");
 		}
 
-		$cdir = $this->readCentralDirectory($zip, $zipfile);
-		$pos  = $cdir['offset'];
+		try {
+			$cdir = $this->readCentralDirectory($zip, $zipfile);
+			if ($cdir['entries'] > self::MAX_ENTRIES) {
+				throw new \RuntimeException('ZIP entry count exceeds the allowed limit');
+			}
+			$pos = $cdir['offset'];
+			$totalSize = 0;
+			$entries = [];
 
-		for ($i = 0; $i < $cdir['entries']; $i++) {
-			fseek($zip, $pos);
-			$hdr = $this->centralHeader($zip);
-			$pos = ftell($zip);
+			for ($i = 0; $i < $cdir['entries']; $i++) {
+				if (fseek($zip, $pos) !== 0) {
+					throw new \RuntimeException('Invalid ZIP central directory offset');
+				}
+				$header = $this->centralHeader($zip);
+				$pos = ftell($zip);
+				$this->validateEntry($header['name'], $header['usize'], $header['csize']);
+				if (($header['flag'] & 1) !== 0 || !in_array($header['cmpr'], [0, 8], true)) {
+					throw new \RuntimeException('Encrypted or unsupported ZIP entry');
+				}
+				$mode = ($header['ext'] >> 16) & 0170000;
+				if ($mode === 0120000) {
+					throw new \RuntimeException('ZIP symbolic links are not allowed');
+				}
+				$totalSize += $header['usize'];
+				if ($totalSize > self::MAX_TOTAL_UNCOMPRESSED) {
+					throw new \RuntimeException('ZIP total uncompressed size exceeds the allowed limit');
+				}
+				$entries[] = $header;
+			}
 
-			fseek($zip, $hdr['off']);
-			$fileHdr = $this->fileHeader($zip);
-			$hdr     = array_merge($hdr, $fileHdr);
-
-			$this->extractFile($hdr, $destPath, $zip);
+			$this->ensureDir($destPath);
+			foreach ($entries as $header) {
+				if (fseek($zip, $header['off']) !== 0) {
+					throw new \RuntimeException('Invalid ZIP local header offset');
+				}
+				$local = $this->fileHeader($zip);
+				if (!hash_equals($header['name'], $local['name']) || $header['cmpr'] !== $local['cmpr']) {
+					throw new \RuntimeException('ZIP central and local headers do not match');
+				}
+				$this->extractFile($header, $destPath, $zip);
+			}
+		} finally {
+			fclose($zip);
 		}
-		fclose($zip);
 	}
 
 	/* ========= 工具 ========= */
@@ -165,7 +235,29 @@ class ZipUtility
 
 	private function ensureDir(string $dir): void
 	{
-		is_dir($dir) || mkdir($dir, 0755, true);
+		if (!is_dir($dir) && !mkdir($dir, 0755, true) && !is_dir($dir)) {
+			throw new \RuntimeException('Unable to create ZIP extraction directory');
+		}
+	}
+
+	private function validateEntry(string $name, int $size, int $compressedSize): void
+	{
+		if ($name === '' || strlen($name) > 4096 || strpos($name, "\0") !== false
+			|| strpos($name, '\\') !== false || $name[0] === '/'
+			|| preg_match('/^[A-Za-z]:/', $name)) {
+			throw new \RuntimeException('Unsafe ZIP entry name');
+		}
+		foreach (explode('/', rtrim($name, '/')) as $segment) {
+			if ($segment === '' || $segment === '.' || $segment === '..') {
+				throw new \RuntimeException('ZIP entry path traversal detected');
+			}
+		}
+		if ($size < 0 || $compressedSize < 0 || $size > self::MAX_FILE_UNCOMPRESSED) {
+			throw new \RuntimeException('ZIP entry size exceeds the allowed limit');
+		}
+		if ($size > 0 && ($compressedSize === 0 || $size > $compressedSize * self::MAX_COMPRESSION_RATIO)) {
+			throw new \RuntimeException('ZIP compression ratio exceeds the allowed limit');
+		}
 	}
 
 	private function rmdirRecursive(string $dir): void
@@ -195,14 +287,16 @@ class ZipUtility
 		// local header
 		$fr  = "\x50\x4b\x03\x04\x14\x00\x00\x00\x08\x00";
 		$fr .= pack('V', $dos) . pack('VVVvv', $crc, strlen($z), strlen($data), strlen($name), 0);
-		$fr .= $name . $z . pack('VVV', $crc, strlen($z), strlen($data));
+		$fr .= $name . $z;
 
 		$this->dataSec[] = $fr;
 		$offset          = strlen(implode('', $this->dataSec));
 
 		// central directory
 		$cd  = "\x50\x4b\x01\x02\x00\x00\x14\x00\x00\x00\x08\x00";
-		$cd .= pack('V', $dos) . pack('VVVvvvVVV', $crc, strlen($z), strlen($data), strlen($name), 0, 0, 0, 32, $this->oldOffset) . $name;
+		$cd .= pack('V', $dos)
+			. pack('VVVvvvvvVV', $crc, strlen($z), strlen($data), strlen($name), 0, 0, 0, 0, 32, $this->oldOffset)
+			. $name;
 
 		$this->oldOffset = $offset;
 		$this->ctrlDir[] = $cd;
@@ -227,16 +321,24 @@ class ZipUtility
 	private function readCentralDirectory($zip, string $file): array
 	{
 		$size = filesize($file);
-		$max  = ($size < 277) ? $size : 277;
-		fseek($zip, $size - $max);
-		$pos = ftell($zip);
-		$sig = 0;
-		while ($pos < $size && $sig !== 0x504b0506) {
-			$sig = ($sig << 8) | ord(fread($zip, 1));
-			$pos++;
+		if (!is_int($size) || $size < 22) {
+			throw new \RuntimeException('Invalid ZIP file');
 		}
-		$d = unpack('vdisk/vdisk_start/vdisk_entries/ventries/Vsize/Voffset/vcomment', fread($zip, 18));
-		return ['entries' => $d['entries'], 'size' => $d['size'], 'offset' => $d['offset']];
+		$length = min($size, 65557);
+		fseek($zip, $size - $length);
+		$tail = fread($zip, $length);
+		$position = strrpos($tail, "\x50\x4b\x05\x06");
+		if ($position === false || strlen($tail) < $position + 22) {
+			throw new \RuntimeException('ZIP end-of-central-directory record not found');
+		}
+		$data = unpack(
+			'vdisk/vdisk_start/ventries_disk/ventries/Vsize/Voffset/vcomment',
+			substr($tail, $position + 4, 18)
+		);
+		if ($data['disk'] !== 0 || $data['disk_start'] !== 0 || $data['entries_disk'] !== $data['entries']) {
+			throw new \RuntimeException('Multi-disk ZIP archives are not supported');
+		}
+		return ['entries' => $data['entries'], 'size' => $data['size'], 'offset' => $data['offset']];
 	}
 
 	/**
@@ -245,15 +347,13 @@ class ZipUtility
 	private function centralHeader($zip): array
 	{
 		$bin = fread($zip, 46);
-		$h   = unpack('vchk/vid/vvers/vverex/vflag/vcmpr/vtime/vdate/Vcrc/Vcsize/Vusize/vnlen/velen/vclen/vdisk/vint/Vext/Voff', $bin);
+		if (strlen($bin) !== 46) throw new \RuntimeException('Truncated ZIP central header');
+		$h = unpack('Vsignature/vmade/vneeded/vflag/vcmpr/vtime/vdate/Vcrc/Vcsize/Vusize/vnlen/velen/vclen/vdisk/vint/Vext/Voff', $bin);
+		if ($h['signature'] !== 0x02014b50) throw new \RuntimeException('Invalid ZIP central header signature');
 		$h['name'] = $h['nlen'] ? fread($zip, $h['nlen']) : '';
 		// 跳过 extra 与 comment
-		fread($zip, $h['elen'] + $h['clen']);
-		// 别名，便于后续处理
-		$h['cmpr'] = $h['vcmpr'];
-		$h['time'] = $h['vtime'];
-		$h['date'] = $h['vdate'];
-		$h['off']  = $h['Voff'];
+		$skip = $h['elen'] + $h['clen'];
+		if ($skip > 0) fread($zip, $skip);
 		return $h;
 	}
 
@@ -263,14 +363,11 @@ class ZipUtility
 	private function fileHeader($zip): array
 	{
 		$bin = fread($zip, 30);
-		$h   = unpack('vchk/vid/vvers/vflag/vcmpr/vtime/vdate/Vcrc/Vcsize/Vusize/vnlen/velen', $bin);
+		if (strlen($bin) !== 30) throw new \RuntimeException('Truncated ZIP local header');
+		$h = unpack('Vsignature/vneeded/vflag/vcmpr/vtime/vdate/Vcrc/Vcsize/Vusize/vnlen/velen', $bin);
+		if ($h['signature'] !== 0x04034b50) throw new \RuntimeException('Invalid ZIP local header signature');
 		$h['name'] = $h['nlen'] ? fread($zip, $h['nlen']) : '';
-		fread($zip, $h['elen']); // 跳过 extra
-		$h['cmpr'] = $h['vcmpr'];
-		$h['time'] = $h['vtime'];
-		$h['date'] = $h['vdate'];
-		$h['csize'] = $h['Vcsize'];
-		$h['usize'] = $h['Vusize'];
+		if ($h['elen'] > 0) fread($zip, $h['elen']);
 		return $h;
 	}
 
@@ -289,29 +386,38 @@ class ZipUtility
 		$target = $dest . $hdr['name'];
 
 		$out = fopen($target, 'wb');
-		if (!$out) return;
+		if (!$out) throw new \RuntimeException('Unable to create extracted ZIP entry');
+		$hash = hash_init('crc32b');
+		$written = 0;
 
-		if ($hdr['cmpr'] === 0) { // stored
-			$remaining = $hdr['usize'];
+		try {
+			$remaining = $hdr['csize'];
+			$inflate = $hdr['cmpr'] === 8 ? inflate_init(ZLIB_ENCODING_RAW) : null;
 			while ($remaining > 0) {
-				$read = min($remaining, 8192);
-				$chunk = fread($zip, $read);
-				if ($chunk === false) break;
-				fwrite($out, $chunk);
+				$chunk = fread($zip, min($remaining, 65536));
+				if ($chunk === false || $chunk === '') throw new \RuntimeException('Truncated ZIP entry data');
 				$remaining -= strlen($chunk);
+				$data = $inflate === null
+					? $chunk
+					: inflate_add($inflate, $chunk, $remaining === 0 ? ZLIB_FINISH : ZLIB_SYNC_FLUSH);
+				if ($data === false) throw new \RuntimeException('ZIP inflate failed');
+				if ($data !== '') {
+					$length = strlen($data);
+					if (fwrite($out, $data) !== $length) throw new \RuntimeException('ZIP extraction write failed');
+					hash_update($hash, $data);
+					$written += $length;
+				}
 			}
-		} else { // deflate
-			// 工业级流式解压：利用 php://filter 或 临时流
-			// 为保持零依赖兼容性，这里采用分块处理（如果 gzip 数据很大，gzinflate 仍可能占用内存）
-			// 但在 WellCMS 环境下，通常 ZipArchive 是存在的，此路径为极少数降级情况
-			$compressedData = fread($zip, $hdr['csize']);
-			$data = @gzinflate($compressedData);
-			if ($data !== false) {
-				fwrite($out, $data);
+			if ($written !== $hdr['usize']
+				|| strtolower(hash_final($hash)) !== strtolower(sprintf('%08x', $hdr['crc']))) {
+				throw new \RuntimeException('ZIP entry size or CRC verification failed');
 			}
+			fflush($out);
+		} catch (\Throwable $e) {
+			fclose($out);
+			@unlink($target);
+			throw $e;
 		}
-
-		fflush($out);
 		fclose($out);
 		touch($target, $this->dos2unixtime($hdr['date'], $hdr['time']));
 	}

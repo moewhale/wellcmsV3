@@ -8,6 +8,7 @@ declare(strict_types=1);
 namespace App\Services\Auth;
 
 use Framework\Exception\BusinessException;
+use Framework\Exception\Infra\DatabaseException;
 use Framework\Utils\{IpHelper, Validator};
 
 class UserService
@@ -47,7 +48,6 @@ class UserService
 
         $this->container = $container;
 
-        $this->dbModel        = $container->get(\App\Models\UserModel::class);
         $this->sessionService = $container->get(\App\Services\Auth\SessionService::class);
         $this->groupService   = $container->get(\App\Services\Auth\GroupService::class);
         $this->cache          = $container->get(\Framework\Cache\Interfaces\CacheInterface::class);
@@ -61,6 +61,16 @@ class UserService
         $this->cacheTtl = $this->cacheConfig['user_ttl'] ?? 7200;
 
         // hook app_Services_UserService_construct_end.php
+    }
+
+    private function getModel()
+    {
+        if ($this->dbModel !== null) {
+            return $this->dbModel;
+        }
+        $resolved = $this->container->get(\App\Models\UserModel::class);
+        // 首次获取可能让出协程；保留已经建立的模型引用。
+        return $this->dbModel = $this->dbModel ?? $resolved;
     }
 
     /**
@@ -186,7 +196,10 @@ class UserService
         ]);
 
         // 9. 云存储同步
-        if ($uploadConfig['default'] !== 'local') {
+        // 上传链路保护：独立对象只使用已验证可公开读取的真实云盘。
+        if ($uploadConfig['default'] !== 'local'
+            && !empty($uploadConfig['disks'][$uploadConfig['default']]['capabilities']['public'])
+            && !($this->storageManager->disk($uploadConfig['default']) instanceof \App\Services\Storage\Drivers\LocalStorage)) {
             $taskManage = null;
             if ($this->container->has(\Framework\Scheduler\TaskManage::class)) {
                 try {
@@ -199,19 +212,40 @@ class UserService
             if ($taskManage) {
                 $localUrl = $uploadConfig['disks']['local']['url'] ?? '/upload/';
                 $cloudKey = ltrim($localUrl, '/') . 'avatar/' . $ym . '/' . $targetFilename;
-                $taskManage->createTask([
+                $dispatch = $taskManage->createTask([
                     'className' => \App\Jobs\SyncAvatarToCloudJob::class,
                     'methodName' => 'handle',
                     'args' => [
                         'userId' => $userId,
                         'localPath' => $targetPath,
                         'cloudKey' => $cloudKey,
-                        'uploadConfig' => $uploadConfig
+                        'uploadConfig' => [
+                            'default' => $uploadConfig['default'],
+                            'upload_temp' => $uploadConfig['upload_temp'],
+                            'disks' => ['local' => array_intersect_key($uploadConfig['disks']['local'], array_flip(['root', 'url']))],
+                        ],
+                        'expectedAvatar' => (int)$timestamp,
+                        'expectedHash' => \Framework\Utils\FileHasher::sha256($targetPath, 'hex'),
+                        'expectedSize' => filesize($targetPath),
                     ],
                     'priority' => 5,
                     'maxRetries' => 3,
                     'retryDelay' => 10
                 ]);
+                if (!\Framework\Scheduler\TaskDispatchResult::isAccepted($dispatch)) {
+                    try {
+                        $logger = $this->container->get(\Framework\Logger\LoggerInterface::class);
+                        $logger->warning('Avatar cloud sync dispatch pending', [
+                            'outcome' => \Framework\Scheduler\TaskDispatchResult::outcome($dispatch),
+                            'code' => \Framework\Scheduler\TaskDispatchResult::code($dispatch)
+                                ?? 'TASK_DISPATCH_UNKNOWN',
+                            'task_id' => \Framework\Scheduler\TaskDispatchResult::taskId($dispatch),
+                            'user_id' => $userId,
+                        ]);
+                    } catch (\Throwable $logError) {
+                        // 最佳努力日志不得反向回滚已经提交的头像事实。
+                    }
+                }
             } else {
                 $logger = $this->container->get(\Framework\Logger\LoggerInterface::class);
                 $logger->info('Avatar cloud sync skipped: scheduler/TaskManage unavailable');
@@ -251,8 +285,8 @@ class UserService
 
         try {
             // 锁内检查唯一性
-            if ($this->dbModel->read(['username' => $username])) throw new BusinessException('Username already exists');
-            if ($email && $this->dbModel->read(['email' => $email])) throw new BusinessException('Email already exists');
+            if ($this->getModel()->read(['username' => $username])) throw new BusinessException('Username already exists');
+            if ($email && $this->getModel()->read(['email' => $email])) throw new BusinessException('Email already exists');
 
             if (isset($data['create_ip'])) {
                 list($ip, $ip2bin) = \Framework\Utils\IpHelper::normalizeIp($data['create_ip'] ?? '');
@@ -264,8 +298,8 @@ class UserService
                 $data['login_ip'] = $ip2bin;
             }
 
-            $result = $this->dbModel->insert($data);
-            if (!$result) throw new BusinessException('UserService -> insert() data writing failed');
+            $result = $this->getModel()->insert($data);
+            if (!$result) throw new DatabaseException('UserService -> insert(): data writing failed');
 
             $data['id'] = $result;
             $this->format($data);
@@ -290,8 +324,8 @@ class UserService
 
         // hook app_Services_UserService_bulkInsert_start.php
 
-        $result = $this->dbModel->bulkInsert($data);
-        if (!$result) throw new BusinessException('UserService -> bulkInsert() data writing failed : ' . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $result = $this->getModel()->bulkInsert($data);
+        if (!$result) throw new DatabaseException('UserService -> bulkInsert(): data writing failed');
 
         // hook app_Services_UserService_bulkInsert_end.php
 
@@ -317,8 +351,8 @@ class UserService
                 $update['login_ip'] = $ip2bin;
             }
 
-            $result = $this->dbModel->update(['id' => $userId], $update);
-            if ($result === 0) throw new BusinessException('UserService->update(' . $userId . ',' . json_encode($update, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . ') update failed');
+            $result = $this->getModel()->update(['id' => $userId], $update);
+            if ($result === 0) throw new BusinessException('UserService -> update(): update failed');
 
             // 强一致性要求：更新 DB 后必须删除缓存
             if (!empty($this->cacheConfig['stores'])) {
@@ -366,12 +400,45 @@ class UserService
 
         // hook app_Services_UserService_bulkUpdate_start.php
 
-        $result = $this->dbModel->bulkUpdate($update, $keyColumn, $wheres);
-        if ($result === 0) throw new BusinessException('UserService -> bulkUpdate() update failed : ' . json_encode($update, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        $result = $this->getModel()->bulkUpdate($update, $keyColumn, $wheres);
+        if ($result === 0) throw new BusinessException('UserService -> bulkUpdate(): update failed');
 
         // hook app_Services_UserService_bulkUpdate_end.php
 
         return $result;
+    }
+
+    public function readOnMaster(int $userId): array
+    {
+        return $this->getModel()->readFromMaster(['id' => $userId]);
+    }
+
+    public function completeAvatarCloud(int $userId, int $avatar): bool
+    {
+        $updated = $this->getModel()->update(['id' => $userId, 'avatar' => $avatar], ['avatar_status' => 1]);
+        if ($updated !== 1) {
+            $current = $this->readOnMaster($userId);
+            if (!$current || (int)$current['avatar'] !== $avatar) return false;
+            if ((int)$current['avatar_status'] !== 1) throw new \RuntimeException('Cannot commit avatar cloud status');
+        }
+        $this->cache->delete('user-' . $userId);
+        $users = $this->getState('users', []);
+        unset($users[$userId]);
+        $this->setState('users', $users);
+        return true;
+    }
+
+    public function releaseAvatarLocalCopy(int $userId, int $avatar, string $path, string $diskKey, string $hash, int $size): void
+    {
+        $config = $this->container->get('uploadConfig');
+        if ((int)($config['local_file'] ?? 0) !== 1 || (string)$config['default'] !== $diskKey) return;
+        $current = $this->readOnMaster($userId);
+        if (!$current || (int)$current['avatar'] !== $avatar || (int)$current['avatar_status'] !== 1) return;
+        $helper = new \App\Services\Storage\Support\FileSystemHelper($config);
+        $path = $helper->resolveStoredTarget($path);
+        if (!is_file($path)) return;
+        if (filesize($path) !== $size || !hash_equals($hash, \Framework\Utils\FileHasher::sha256($path, 'hex'))) return;
+        if (!$this->storageManager->disk('local')->delete($path)) throw new \RuntimeException('Cannot delete synced local avatar');
     }
 
     public function read(int $userId, array $orderby = [], array $fields = ['*']): array
@@ -386,7 +453,7 @@ class UserService
 
         // hook app_Services_UserService_read_start.php
 
-        $data = $this->dbModel->read(['id' => $userId], $orderby, $fields);
+        $data = $this->getModel()->read(['id' => $userId], $orderby, $fields);
         if (empty($data)) return [];
 
         // hook app_Services_UserService_read_middle.php
@@ -461,7 +528,7 @@ class UserService
 
         // hook app_Services_UserService_find_start.php
 
-        $datalist = $this->dbModel->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find($condition, $orderby, $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         // hook app_Services_UserService_find_before.php
@@ -485,7 +552,7 @@ class UserService
     {
         // hook app_Services_UserService_findPaged_start.php
 
-        $datalist = $this->dbModel->find(['id' => $condition], $orderby, $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find(['id' => $condition], $orderby, $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         // hook app_Services_UserService_findPaged_before.php
@@ -508,7 +575,7 @@ class UserService
         // hook app_Services_UserService_findByGid_start.php
 
         $orderby = true == $desc ? -1 : 1;
-        $datalist = $this->dbModel->find(['group_id' => $groupId], ['id' => $orderby], $page, $pageSize, $indexKey, $fields);
+        $datalist = $this->getModel()->find(['group_id' => $groupId], ['id' => $orderby], $page, $pageSize, $indexKey, $fields);
         if (empty($datalist)) return [];
 
         // hook app_Services_UserService_findByGid_before.php
@@ -541,7 +608,7 @@ class UserService
             $this->storageManager->deleteAvatar((int)$data['avatar'], (int)($data['avatar_status'] ?? 0));
         }
 
-        $result = $this->dbModel->delete(['id' => $userId]);
+        $result = $this->getModel()->delete(['id' => $userId]);
         if ($result === 0) return 0;
 
         // hook app_Services_UserService_delete_center.php
@@ -598,7 +665,7 @@ class UserService
             }
         }
 
-        $result = $this->dbModel->delete(['id' => $userIds]);
+        $result = $this->getModel()->delete(['id' => $userIds]);
         if ($result === 0) return false;
 
         // hook app_Services_UserService_bulkDelete_end.php
@@ -618,7 +685,7 @@ class UserService
             try {
                 // 防止 RuntimeStats 初始化回调再次进入本方法导致死循环
                 if ($this->getState('in_runtime_stats_lookup')) {
-                    return $this->dbModel->count($condition);
+                    return $this->getModel()->count($condition);
                 }
 
                 $stats = $this->container->get(\App\Services\Stats\RuntimeStats::class);
@@ -633,7 +700,7 @@ class UserService
             }
         }
 
-        return $this->dbModel->count($condition);
+        return $this->getModel()->count($condition);
     }
 
     /**
@@ -654,7 +721,7 @@ class UserService
     public function readByEmail(string $email): array
     {
         // hook app_Services_UserService_readByEmail_start.php
-        $data = $this->dbModel->read(['email' => $email]);
+        $data = $this->getModel()->read(['email' => $email]);
         if ($data) {
             $this->format($data);
             $users = $this->getState('users', []);
@@ -671,7 +738,7 @@ class UserService
     public function readByUsername($username): array
     {
         // hook app_Services_UserService_readByUsername_start.php
-        $data = $this->dbModel->read(['username' => $username]);
+        $data = $this->getModel()->read(['username' => $username]);
 
         if ($data) {
             $this->format($data);
@@ -689,7 +756,7 @@ class UserService
         $maxId = $this->getState('maxId');
         if (null !== $maxId) return $maxId;
         // hook app_Services_UserService_maxid_start.php
-        $maxId = $this->dbModel->maxid();
+        $maxId = $this->getModel()->maxid();
         $this->setState('maxId', $maxId);
         // hook app_Services_UserService_maxid_end.php
         return $maxId;

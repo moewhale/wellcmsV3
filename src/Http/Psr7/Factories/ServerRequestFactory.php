@@ -219,12 +219,15 @@ class ServerRequestFactory implements \Framework\Http\Interfaces\ServerRequestFa
             $ctx = call_user_func([$coroClass, 'getContext']);
             // 在 Swoole 协程下，全局数据源来自协程上下文
             if (isset($ctx['server'])) {
-                $server = (array)$ctx['server'] + (array)($ctx['header'] ?? []);
+                $server = \Framework\Http\Psr7\Factories\UriFactory::normalizeSwooleServer(
+                    (array)$ctx['server'],
+                    (array)($ctx['header'] ?? [])
+                );
             }
         }
 
-        $method = $server['REQUEST_METHOD'] ?? $server['request_method'] ?? 'GET';
-        $uri = \Framework\Http\Psr7\Factories\UriFactory::getInstance()->createFromGlobals();
+        $method = $server['REQUEST_METHOD'] ?? 'GET';
+        $uri = \Framework\Http\Psr7\Factories\UriFactory::buildUriFromServer($server);
 
         return $this->createServerRequest($method, $uri, $server);
     }

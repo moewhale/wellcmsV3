@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+    演示文件：评论回复列表页（对应 plugins/well_article/views/htm/article_comment_sublist.htm）
+    功能：居中页头 / 回复表单 / 子评论列表（点赞/编辑/删除+原因/举报） / 游标分页
+    纯静态演示稿，Idea Box 玩乐编辑风
+-->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>评论回复 - WellCMS 演示</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+    <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body class="flex flex-col min-h-screen bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-gray-200 font-sans">
+
+    <header class="sticky top-0 z-50 bg-stone-50/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-stone-200 dark:border-slate-800">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <a href="index.htm" class="flex items-center gap-2 shrink-0">
+                    <div class="w-8 h-8 rounded-lg bg-rose-500 flex items-center justify-center text-white font-black text-sm shadow-md shadow-rose-500/30">W</div>
+                    <span class="text-xl font-black tracking-tight">WellCMS <span class="text-rose-500">3.0</span></span>
+                </a>
+                <nav class="hidden md:flex items-center gap-6 text-sm font-bold text-stone-500 dark:text-gray-400">
+                    <a href="index.htm" class="hover:text-rose-500 transition-colors">首页</a>
+                    <a href="article_index.htm" class="text-stone-900 dark:text-white border-b-2 border-rose-500 pb-0.5">文章</a>
+                    <a href="forum_index.htm" class="hover:text-rose-500 transition-colors">论坛</a>
+                    <a href="forum_collection_list.htm" class="hover:text-rose-500 transition-colors">合集</a>
+                </nav>
+                <div class="flex items-center gap-2">
+                    <button onclick="wellcms.toggleDarkMode()" class="p-2 rounded-lg hover:bg-stone-200 dark:hover:bg-white/10 transition-colors" title="切换深浅色"><span class="dark:hidden">🌙</span><span class="hidden dark:inline">☀️</span></button>
+                    <a href="my_home.htm" title="个人中心"><span class="w-9 h-9 rounded-xl bg-gradient-to-br from-rose-400 to-amber-500 flex items-center justify-center text-white text-sm font-black shadow">林</span></a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 mx-auto w-full max-w-7xl px-4 py-12 md:px-8" id="main-content">
+        <!-- 居中页头 -->
+        <header class="mx-auto mb-12 max-w-3xl text-center">
+            <p class="text-sm font-black text-blue-600 uppercase tracking-[0.2em]">
+                <a href="article_detail.htm" class="hover:text-blue-700 transition-colors">模板编译与物理压平详解</a>
+            </p>
+            <h1 class="mt-2 text-3xl font-black tracking-tight md:text-4xl">评论回复</h1>
+            <!-- 父评论摘要 -->
+            <div class="mt-6 rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 text-left flex items-start gap-3">
+                <span class="h-9 w-9 rounded-xl bg-violet-500 flex items-center justify-center text-white text-xs font-black shrink-0">苏</span>
+                <div>
+                    <p class="text-xs text-stone-400 font-bold">苏晚晴 · 2026-09-12 14:20</p>
+                    <p class="mt-1 text-sm text-stone-600 dark:text-gray-300">把 filemtime 检查从热路径拿掉之后，我们的列表页 TTFB 直接降了 18%。这篇文章解释了我一直模糊的地方。</p>
+                </div>
+            </div>
+        </header>
+
+        <div class="mx-auto max-w-3xl">
+            <!-- 回复表单 -->
+            <form action="#" class="ajax-form rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm mb-8 space-y-4 p-6" method="post">
+                <label class="block">
+                    <span class="mb-2 block text-xs font-black text-stone-500 dark:text-gray-400 uppercase tracking-wider">回复这条评论</span>
+                    <textarea class="block w-full rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 placeholder-stone-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-slate-700 dark:bg-slate-800/60 dark:text-gray-100 transition-all" name="content" rows="4" maxlength="20480" required placeholder="写下你的回复…"></textarea>
+                </label>
+                <button class="inline-flex items-center justify-center gap-1 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-black text-white transition hover:bg-blue-700 shadow-md shadow-blue-600/25" type="submit">发表回复</button>
+            </form>
+
+            <!-- 子评论列表 -->
+            <section class="grid w-full gap-4" aria-label="评论列表">
+                <article class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-5" id="comment-2049">
+                    <header class="flex flex-wrap items-center justify-between gap-2">
+                        <a class="flex min-w-0 items-center gap-2 text-sm font-black" href="user_home.htm">
+                            <span class="h-9 w-9 rounded-xl bg-blue-600 flex items-center justify-center text-white text-xs font-black">顾</span>
+                            <span class="truncate">顾云帆</span>
+                            <span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-600 text-[10px] font-black dark:bg-blue-500/15 dark:text-blue-400">作者</span>
+                        </a>
+                        <time class="shrink-0 text-xs text-stone-400 font-bold" datetime="2026-09-12T15:02:00+08:00">2026-09-12 15:02</time>
+                    </header>
+                    <div class="mt-3 break-words text-sm leading-6 text-stone-600 dark:text-gray-300">
+                        是的，DEBUG &gt; 0 时才会做 mtime 探测；生产环境直接信任编译清单。
+                    </div>
+                    <footer class="mt-3 flex flex-wrap items-center gap-3 text-xs text-stone-400 font-bold">
+                        <a class="transition hover:text-blue-600" href="article_comment_sublist.htm">查看回复 (1)</a>
+                        <form action="#" method="post">
+                            <button class="inline-flex h-7 items-center justify-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2 text-xs font-bold text-blue-700 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-400" type="submit" aria-pressed="true">
+                                <svg class="h-3 w-3" fill="currentColor" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+                                取消点赞 (<span>9</span>)
+                            </button>
+                        </form>
+                        <button type="button" class="inline-flex h-7 items-center justify-center gap-1 rounded-lg border border-stone-200 bg-white px-2 text-xs font-bold text-stone-500 transition hover:bg-stone-50 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" data-modal-url="article_comment_edit_modal.htm" data-modal-title="编辑评论" data-modal-size="md">编辑</button>
+                        <form class="ajax-form flex items-center gap-2" action="#" method="post" data-confirm="确认删除该评论？">
+                            <select class="rounded-lg border border-stone-200 bg-white px-2 py-1 text-xs font-bold focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" name="reasonCode" required>
+                                <option value="1">垃圾信息</option>
+                                <option value="2">违规内容</option>
+                                <option value="3">其他</option>
+                            </select>
+                            <button class="inline-flex h-7 items-center justify-center gap-1 rounded-lg bg-rose-500 px-2 text-xs font-bold text-white transition hover:bg-rose-600" type="submit">删除</button>
+                        </form>
+                        <button type="button" class="inline-flex h-7 items-center justify-center gap-1 rounded-lg border border-stone-200 bg-white px-2 text-xs font-bold text-stone-500 transition hover:bg-stone-50 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" data-modal-url="article_report_modal.htm" data-modal-title="举报" data-modal-size="md">
+                            <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                            举报
+                        </button>
+                    </footer>
+                </article>
+
+                <article class="rounded-2xl border border-stone-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-5" id="comment-2050">
+                    <header class="flex flex-wrap items-center justify-between gap-2">
+                        <a class="flex min-w-0 items-center gap-2 text-sm font-black" href="user_home.htm">
+                            <span class="h-9 w-9 rounded-xl bg-amber-500 flex items-center justify-center text-white text-xs font-black">赵</span>
+                            <span class="truncate">赵启铭</span>
+                        </a>
+                        <time class="shrink-0 text-xs text-stone-400 font-bold" datetime="2026-09-12T16:47:00+08:00">2026-09-12 16:47</time>
+                    </header>
+                    <div class="mt-3 break-words text-sm leading-6 text-stone-600 dark:text-gray-300">
+                        补充一个数据点：我们 40 个插件的站，压平后首页 SQL 从 60+ 降到 18 条。
+                    </div>
+                    <footer class="mt-3 flex flex-wrap items-center gap-3 text-xs text-stone-400 font-bold">
+                        <a class="transition hover:text-blue-600" href="article_comment_sublist.htm">查看回复 (0)</a>
+                        <form action="#" method="post">
+                            <button class="inline-flex h-7 items-center justify-center gap-1 rounded-lg border border-stone-200 bg-white px-2 text-xs font-bold text-stone-500 transition hover:bg-stone-50 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" type="submit" aria-pressed="false">
+                                <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+                                点赞 (<span>3</span>)
+                            </button>
+                        </form>
+                        <button type="button" class="inline-flex h-7 items-center justify-center gap-1 rounded-lg border border-stone-200 bg-white px-2 text-xs font-bold text-stone-500 transition hover:bg-stone-50 dark:border-slate-700 dark:bg-slate-800 dark:text-gray-300" data-modal-url="article_report_modal.htm" data-modal-title="举报" data-modal-size="md">
+                            <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                            举报
+                        </button>
+                    </footer>
+                </article>
+            </section>
+
+            <!-- 游标分页 -->
+            <nav class="mt-6 flex items-center justify-between gap-3" aria-label="分页">
+                <span></span>
+                <span>
+                    <a class="inline-flex items-center justify-center gap-1 rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-bold text-stone-600 transition hover:border-stone-900 hover:text-stone-900 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-300" rel="next" href="#">下一页 <span aria-hidden="true">→</span></a>
+                </span>
+            </nav>
+        </div>
+    </main>
+
+    <footer class="border-t border-stone-200 dark:border-slate-800 bg-white/60 dark:bg-slate-950">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row justify-between items-center gap-2 text-xs text-stone-400">
+            <span>© 2026 <a href="http://www.wellcms.com/" target="_blank" class="font-bold hover:text-rose-500">WellCMS</a> 演示站 · 页面为 UI 演示稿，数据均为演示数据</span>
+            <span>Processed: <b>0.0231</b>, SQL: <b>18</b></span>
+        </div>
+    </footer>
+    <script src="../assets/js/main.js"></script>
+</body>
+</html>

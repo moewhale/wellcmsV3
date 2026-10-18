@@ -533,20 +533,16 @@ class TaskController extends BaseController
             return $this->errorMessage($this->language->get('parameter_error', array('error' => 'task_id')), 1);
         }
 
-        try {
-            if (!$this->getTaskManage()) {
-                return $this->errorMessage($this->language->get('operation_failed'), -1);
-            }
-            $result = $this->taskManage->cancelTask($taskId);
-
-            if ($result['status'] === 'success') {
-                return $this->successMessage($this->language->get('task_cancel_success'), 0);
-            }
-
-            return $this->errorMessage($result['msg'] ?? $this->language->get('task_cancel_failed'), -1);
-        } catch (\Exception $e) {
-            return $this->errorMessage($this->language->get('task_cancel_failed') . ': ' . $e->getMessage(), -1);
+        if (!$this->getTaskManage()) {
+            return $this->errorMessage($this->language->get('operation_failed'), -1);
         }
+        $result = $this->taskManage->cancelTask($taskId);
+
+        if ($result['status'] === 'success') {
+            return $this->successMessage($this->language->get('task_cancel_success'), 0);
+        }
+
+        return $this->errorMessage($result['msg'] ?? $this->language->get('task_cancel_failed'), -1);
     }
 
     /**
@@ -561,23 +557,19 @@ class TaskController extends BaseController
             return $this->errorMessage($this->language->get('parameter_error', array('error' => 'task_id')), 1);
         }
 
-        try {
-            if (!$this->getTaskManage()) {
-                return $this->errorMessage($this->language->get('operation_failed'), -1);
-            }
-            $result = $this->taskManage->retryTask($taskId);
-
-            if ($result['status'] === 'success') {
-                return $this->successMessage(
-                    $this->language->get('task_retry_success') . ' - TaskID: ' . $taskId,
-                    0
-                );
-            }
-
-            return $this->errorMessage($result['msg'] ?? $this->language->get('task_retry_failed'), -1);
-        } catch (\Exception $e) {
-            return $this->errorMessage($this->language->get('task_retry_failed') . ': ' . $e->getMessage(), -1);
+        if (!$this->getTaskManage()) {
+            return $this->errorMessage($this->language->get('operation_failed'), -1);
         }
+        $result = $this->taskManage->retryTask($taskId);
+
+        if ($result['status'] === 'success') {
+            return $this->successMessage(
+                $this->language->get('task_retry_success') . ' - TaskID: ' . $taskId,
+                0
+            );
+        }
+
+        return $this->errorMessage($result['msg'] ?? $this->language->get('task_retry_failed'), -1);
     }
 
     /**
@@ -593,23 +585,19 @@ class TaskController extends BaseController
         }
 
         // 对每个 ID 单独校验，返回成功数与失败明细
-        try {
-            if (!$this->getTaskManage()) {
-                return $this->errorMessage($this->language->get('operation_failed'), -1);
-            }
-            $result = $this->taskManage->requeueFailed($taskIds);
-
-            if ($result['status'] === 'success') {
-                return $this->successMessage(
-                    $this->language->get('task_requeue_success', array('count' => $result['count'])),
-                    0
-                );
-            }
-
-            return $this->errorMessage($result['msg'] ?? $this->language->get('task_requeue_failed'), -1);
-        } catch (\Exception $e) {
-            return $this->errorMessage($this->language->get('task_requeue_failed') . ': ' . $e->getMessage(), -1);
+        if (!$this->getTaskManage()) {
+            return $this->errorMessage($this->language->get('operation_failed'), -1);
         }
+        $result = $this->taskManage->requeueFailed($taskIds);
+
+        if ($result['status'] === 'success') {
+            return $this->successMessage(
+                $this->language->get('task_requeue_success', array('count' => $result['count'])),
+                0
+            );
+        }
+
+        return $this->errorMessage($result['msg'] ?? $this->language->get('task_requeue_failed'), -1);
     }
 
     /** @var array 驼峰→蛇形字段映射表，减少 formatTask 中逐条 mapping */
@@ -750,41 +738,34 @@ class TaskController extends BaseController
         $currentUser = $request->getAttribute('user', []);
         $menu = $this->getAdminMenu();
 
-        try {
-            if (!$this->getTaskManage()) {
-                return $this->errorMessage($this->language->get('operation_failed'), -1);
-            }
-            $logs = $this->taskManage->getLogs($taskId, 500);
-
-            $data = [
-                'header' => [
-                    'title' => $this->language->get('admin_task_logs') . ($taskId ? ' - ' . $taskId : ''),
-                    'keywords' => $this->language->get('admin_task_logs'),
-                    'description' => '查看任务执行日志'
-                ],
-                'menu' => $menu,
-                'menu_fixed' => ['parent' => 'system', 'child' => 'task'],
-                'logs' => $logs,
-                'task_id' => $taskId,
-                'language' => [
-                    'task_logs' => $this->language->get('admin_task_logs'),
-                    'timestamp' => $this->language->get('created_at'),
-                    'level' => '级别',
-                    'message' => '消息',
-                    'back_to_list' => $this->language->get('back_to_task_list'),
-                    'refresh' => $this->language->get('refresh'),
-                    'no_logs' => '暂无日志'
-                ]
-            ];
-
-            $routeMeta = $request->getAttributes()['_route_meta'] ?? ['layout' => 'task_logs'];
-            return $this->render($routeMeta['layout'], $data, true);
-        } catch (\Exception $e) {
-            return $this->errorMessage(
-                $this->language->get('operation_failed') . ': ' . $e->getMessage(),
-                -1
-            );
+        if (!$this->getTaskManage()) {
+            return $this->errorMessage($this->language->get('operation_failed'), -1);
         }
+        $logs = $this->taskManage->getLogs($taskId, 500);
+
+        $data = [
+            'header' => [
+                'title' => $this->language->get('admin_task_logs') . ($taskId ? ' - ' . $taskId : ''),
+                'keywords' => $this->language->get('admin_task_logs'),
+                'description' => $this->language->get('admin_task_logs')
+            ],
+            'menu' => $menu,
+            'menu_fixed' => ['parent' => 'system', 'child' => 'task'],
+            'logs' => $logs,
+            'task_id' => $taskId,
+            'language' => [
+                'task_logs' => $this->language->get('admin_task_logs'),
+                'timestamp' => $this->language->get('created_at'),
+                'level' => 'Level',
+                'message' => 'Message',
+                'back_to_list' => $this->language->get('back_to_task_list'),
+                'refresh' => $this->language->get('refresh'),
+                'no_logs' => 'No logs available'
+            ]
+        ];
+
+        $routeMeta = $request->getAttributes()['_route_meta'] ?? ['layout' => 'task_logs'];
+        return $this->render($routeMeta['layout'], $data, true);
     }
 
     /**
@@ -807,22 +788,18 @@ class TaskController extends BaseController
             return $this->errorMessage($this->language->get('parameter_error', array('error' => 'priority must be 0-10')), 1);
         }
 
-        try {
-            if (!$this->getTaskManage()) {
-                return $this->errorMessage($this->language->get('operation_failed'), -1);
-            }
-            $result = $this->taskManage->updatePriority($taskId, $priority);
-
-            if ($result['status'] === 'success') {
-                return $this->successMessage(
-                    sprintf($this->language->get('task_priority_updated'), $taskId, $result['newPriority']),
-                    0
-                );
-            }
-
-            return $this->errorMessage($result['msg'] ?? $this->language->get('operation_failed'), -1);
-        } catch (\Exception $e) {
-            return $this->errorMessage($this->language->get('operation_failed') . ': ' . $e->getMessage(), -1);
+        if (!$this->getTaskManage()) {
+            return $this->errorMessage($this->language->get('operation_failed'), -1);
         }
+        $result = $this->taskManage->updatePriority($taskId, $priority);
+
+        if ($result['status'] === 'success') {
+            return $this->successMessage(
+                sprintf($this->language->get('task_priority_updated'), $taskId, $result['newPriority']),
+                0
+            );
+        }
+
+        return $this->errorMessage($result['msg'] ?? $this->language->get('operation_failed'), -1);
     }
 }

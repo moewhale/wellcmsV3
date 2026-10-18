@@ -11,6 +11,9 @@ namespace App\Services\Upgrade;
  */
 class UpgradeService
 {
+    private const DEFAULT_API_URL = 'https://www.wellcms.com/api/v1/version.html';
+    private const MAX_VERSION_RESPONSE_BYTES = 1048576;
+
     /** @var \App\Services\System\KeyValueService */
     private $kv;
     /** @var \Framework\Core\Container */
@@ -31,13 +34,18 @@ class UpgradeService
      */
     public function checkVersion(): array
     {
-        $currentVersion = $this->appConfig['version'];
         $config = (array)($this->kv->settingGet('config') ?? []);
-        $apiUrl = !empty($config['upgrade_url']) ? $config['upgrade_url'] : 'https://www.wellcms.com/api/v1/version.html';
+        $currentVersion = (string)($config['version'] ?? $this->appConfig['version'] ?? '');
+        if (!$this->isVersion($currentVersion)) {
+            throw new \App\Exception\UpgradeException('Current WellCMS version is invalid', 22);
+        }
+        $apiUrl = (string)($this->appConfig['upgrade_api_url'] ?? self::DEFAULT_API_URL);
+        $this->assertHttpsUrl($apiUrl, 'Upgrade API');
 
-        $client = new \Framework\Utils\HttpClient();
+        /** @var \Framework\Utils\HttpClient $client */
+        $client = $this->container->get(\Framework\Utils\HttpClient::class);
         try {
-            $response = $client->request([
+            $response = (string)$client->request([
                 'method' => 'POST',
                 'url' => $apiUrl,
                 'body' => json_encode([
@@ -51,14 +59,18 @@ class UpgradeService
                     'Content-Type: application/json',
                     'Accept: application/json',
                 ],
-                'followRedirects' => true,
+                'followRedirects' => false,
+                // 固定兼容配置：禁止 AI 工具擅自改动，见根目录 AGENTS.md。
                 'verifySSL' => false,
                 'caBundle' => '/tmp/',
                 'returnResponse' => false,
             ]);
 
+            if (strlen($response) > self::MAX_VERSION_RESPONSE_BYTES) {
+                throw new \RuntimeException('Upgrade API response exceeds the allowed size');
+            }
             $data = json_decode($response, true);
-            if (!is_array($data)) {
+            if (!is_array($data) || json_last_error() !== JSON_ERROR_NONE) {
                 if ($this->container->has(\Framework\Logger\LoggerInterface::class)) {
                     $this->container->get(\Framework\Logger\LoggerInterface::class)->warning(
                         'Upgrade API returned non-JSON response: ' . mb_substr((string)$response, 0, 200)
@@ -89,66 +101,145 @@ class UpgradeService
      */
     public function validateAndStoreVersion(array $response, array &$config): string
     {
+        $currentVersion = (string)($config['version'] ?? $this->appConfig['version'] ?? '');
+        if (!$this->isVersion($currentVersion)) {
+            throw new \App\Exception\UpgradeException('Current WellCMS version is invalid', 22);
+        }
+        $manifest = $this->normalizeVersionResponse($response, $currentVersion);
+
         /** @var \App\Services\System\CacheService $cache */
         $cache = $this->container->get(\App\Services\System\CacheService::class);
 
-        // 协议约定：响应有效载荷位于 data 字段
-        $data = $response['data'];
-
-        // 有效的 API 响应：始终更新冷却期，防止每页重试
-        // 注意：data 为空时（API 网络错误）不设冷却、不改状态，不兜底
-        $config['last_version'] = time() + 7200;
-
-        if (isset($data['upgrade'])) {
-            $config['upgrade'] = (int)$data['upgrade'];
-
-            // 无新版本时彻底清理残留升级元数据，防止过期数据被复用
-            if (empty($data['upgrade'])) {
-                unset($config['upgrade_url'], $config['upgrade_hash'], $config['upgrade_id']);
-                $config['upgrade_id'] = '';
-            } elseif (!empty($data['upgrade_id'])) {
-                // 仅在有新版本时才更新 upgrade_id，避免 upgrade=0 时残留
-                $config['upgrade_id'] = (string)$data['upgrade_id'];
-            }
+        // 只有完整响应快照通过后才构造下一状态，禁止新旧 URL/hash/id 混用。
+        $next = $config;
+        $next['last_version'] = time() + 7200;
+        $next['upgrade'] = $manifest['upgrade'];
+        if ($manifest['version'] !== '') {
+            $next['official_version'] = $manifest['version'];
         }
-
-        // 固化升级包资源（仅在 data 提供时才更新，防止清空）
-        if (!empty($data['url'])) {
-            $config['upgrade_url'] = (string)$data['url'];
+        if ($manifest['message'] !== '') {
+            $next['official_info'] = $manifest['message'];
         }
-        if (!empty($data['hash'])) {
-            $config['upgrade_hash'] = (string)$data['hash'];
-        }
-
-        // 对远程版本号做基础格式校验，防止异常数据污染本地配置
-        if (!empty($data['version']) && preg_match('#^\d+(\.\d+){1,3}$#', $data['version'])) {
-            $config['official_version'] = $data['version'];
-        }
-
-        // 持久化官方消息到配置，供 panel 和 checkUpgrade 页面展示
-        if (!empty($data['message'])) {
-            $config['official_info'] = $data['message'];
+        if ($manifest['upgrade'] === 1) {
+            $next['upgrade_url'] = $manifest['url'];
+            $next['upgrade_hash'] = $manifest['hash'];
+            $next['upgrade_id'] = $manifest['upgrade_id'];
+        } else {
+            unset($next['upgrade_url'], $next['upgrade_hash'], $next['upgrade_id']);
+            $next['upgrade_id'] = '';
         }
 
         // 持久化到数据库
-        if (!$this->kv->settingSet('config', $config)) {
+        if (!$this->kv->settingSet('config', $next)) {
             throw new \App\Exception\UpgradeException(
                 '版本配置持久化失败：无法获取分布式锁或写入被拒绝',
                 20
             );
         }
+        $config = $next;
 
         // 处理官方消息缓存（仅在 API 响应有效时）
         $message = '';
-        if (!empty($data['message'])) {
-            $cache->set('official-message', $data['message'], 7200);
-            $message = $data['message'];
-        } elseif (isset($data['upgrade']) && empty($data['upgrade'])) {
+        if ($manifest['message'] !== '') {
+            $cache->set('official-message', $manifest['message'], 7200);
+            $message = $manifest['message'];
+        } elseif ($manifest['upgrade'] === 0) {
             // 明确无新版本时清除旧消息，避免误导
             $cache->delete('official-message');
         }
 
         return $message;
+    }
+
+    /**
+     * 将远程响应规范化为同一受信升级快照。
+     */
+    private function normalizeVersionResponse(array $response, string $currentVersion): array
+    {
+        if (($response['status'] ?? '') !== 'success') {
+            throw new \App\Exception\UpgradeException(
+                (string)($response['message'] ?? 'Upgrade API rejected the request'),
+                24
+            );
+        }
+        $data = $response['data'] ?? null;
+        if (!is_array($data) || !array_key_exists('upgrade', $data)) {
+            throw new \App\Exception\UpgradeException('Upgrade API response data is incomplete', 24);
+        }
+        $rawUpgrade = $data['upgrade'];
+        if (!in_array($rawUpgrade, [0, 1, '0', '1', false, true], true)) {
+            throw new \App\Exception\UpgradeException('Upgrade API upgrade flag is invalid', 24);
+        }
+
+        $upgrade = (int)$rawUpgrade;
+        $version = isset($data['version']) && is_scalar($data['version'])
+            ? trim((string)$data['version']) : '';
+        if ($version !== '' && !$this->isVersion($version)) {
+            throw new \App\Exception\UpgradeException('Upgrade API version is invalid', 24);
+        }
+        $message = isset($data['message']) && is_scalar($data['message'])
+            ? (string)$data['message'] : '';
+        if (strlen($message) > 10000) {
+            throw new \App\Exception\UpgradeException('Upgrade API message exceeds the allowed size', 24);
+        }
+
+        $manifest = [
+            'upgrade' => $upgrade,
+            'version' => $version,
+            'message' => $message,
+            'url' => '',
+            'hash' => '',
+            'upgrade_id' => '',
+        ];
+        if ($upgrade === 0) {
+            return $manifest;
+        }
+
+        if ($version === '' || version_compare($version, $currentVersion, '<=')) {
+            throw new \App\Exception\UpgradeException(
+                'Upgrade target version must be newer than the current version',
+                24
+            );
+        }
+        $url = isset($data['url']) && is_scalar($data['url']) ? trim((string)$data['url']) : '';
+        $this->assertHttpsUrl($url, 'Upgrade package');
+        $hash = isset($data['hash']) && is_scalar($data['hash'])
+            ? strtolower(trim((string)$data['hash'])) : '';
+        if (!preg_match('/^[a-f0-9]{64}$/', $hash)) {
+            throw new \App\Exception\UpgradeException('Upgrade package SHA-256 is invalid', 24);
+        }
+        $upgradeId = isset($data['upgrade_id']) && is_scalar($data['upgrade_id'])
+            ? trim((string)$data['upgrade_id']) : '';
+        if ($upgradeId === '' || strlen($upgradeId) > 128
+            || preg_match('/[\x00-\x1F\x7F]/', $upgradeId)) {
+            throw new \App\Exception\UpgradeException('Upgrade package identity is invalid', 24);
+        }
+
+        $manifest['url'] = $url;
+        $manifest['hash'] = $hash;
+        $manifest['upgrade_id'] = $upgradeId;
+        return $manifest;
+    }
+
+    private function assertHttpsUrl(string $url, string $label): void
+    {
+        if ($url === '' || strlen($url) > 4096 || strpos($url, "\0") !== false
+            || preg_match('/[\r\n]/', $url) || !filter_var($url, FILTER_VALIDATE_URL)) {
+            throw new \App\Exception\UpgradeException($label . ' URL is invalid', 24);
+        }
+        $parts = parse_url($url);
+        if (!is_array($parts) || strtolower((string)($parts['scheme'] ?? '')) !== 'https'
+            || empty($parts['host']) || isset($parts['user']) || isset($parts['pass'])) {
+            throw new \App\Exception\UpgradeException(
+                $label . ' URL must be credential-free HTTPS',
+                24
+            );
+        }
+    }
+
+    private function isVersion(string $version): bool
+    {
+        return (bool)preg_match('/^\d+(?:\.\d+){1,3}$/', $version);
     }
 
     /**
@@ -194,48 +285,67 @@ class UpgradeService
         if (empty($upgradeUrl)) {
             throw new \RuntimeException('Invalid upgrade URL.');
         }
-
-        // 解除脚本执行时间限制，防止大文件下载过程中断
-        if (function_exists('set_time_limit')) {
-            @set_time_limit(0);
+        $lockKey = $this->upgradeLockKey();
+        if (!\Framework\Utils\FileHelper::lock($lockKey, 3600)) {
+            throw new \App\Exception\UpgradeException('Another core upgrade is already running', 25);
         }
 
-        $tmpDir = $this->appConfig['tmp_path'];
-        $zipPath = $tmpDir . 'upgrade_' . date('Ymd_His') . '.zip';
+        $zipPath = '';
+        $transaction = null;
+        $deployer = null;
+        $appConfigFile = APP_PATH . 'config/App.php';
+        $appConfigOriginal = null;
+        $appConfigChanged = false;
+        $originalConfig = [];
+        $reload = false;
 
-        // 1. 下载阶段
-        /** @var Downloader $downloader */
-        $downloader = $this->container->get(Downloader::class);
-        $downloader->download($upgradeUrl, $zipPath, $expectedHash);
+        try {
+            if (function_exists('set_time_limit')) {
+                @set_time_limit(0);
+            }
 
-        // 2. 部署阶段 (解压覆盖)
-        /** @var Deployer $deployer */
-        $deployer = $this->container->get(Deployer::class);
-        $deployer->extractAndOverwrite($zipPath, APP_PATH);
+            $originalConfig = (array)($this->kv->settingGet('config') ?? []);
+            $this->assertRunnableSnapshot($originalConfig, $upgradeUrl, $expectedHash);
 
-        // 3. 数据库迁移阶段（统一为 PHP 脚本，与插件/主题升级同源）
-        $scriptPath = APP_PATH . 'upgrade.php';
-        if (is_file($scriptPath)) {
-            /** @var ScriptRunner $scriptRunner */
-            $scriptRunner = $this->container->get(ScriptRunner::class);
-            $scriptRunner->run($scriptPath);
+            $tmpDir = rtrim((string)($this->appConfig['tmp_path'] ?? ''), '/\\') . DIRECTORY_SEPARATOR;
+            if ($tmpDir === DIRECTORY_SEPARATOR
+                || (!is_dir($tmpDir) && !\Framework\Utils\DirectoryHelper::mkdir($tmpDir))) {
+                throw new \App\Exception\UpgradeException('Upgrade temporary directory is unavailable', 1);
+            }
+            $zipPath = $tmpDir . 'upgrade_' . date('Ymd_His') . '_'
+                . bin2hex(random_bytes(8)) . '.zip';
 
-            // 执行完毕后清理脚本，防止泄露或重复执行
-            @unlink($scriptPath);
-        }
+            /** @var Downloader $downloader */
+            $downloader = $this->container->get(Downloader::class);
+            $downloader->download($upgradeUrl, $zipPath, $expectedHash);
 
-        // 4. 版本同步与持久化
-        // 从数据库实时读取官方版本号，避免依赖构造时传入的 $appConfig（可能未包含最新远程版本）
-        $config = (array)($this->kv->settingGet('config') ?? []);
-        $newVersion = !empty($config['official_version']) ? $config['official_version'] : $this->appConfig['version'];
-        $versionDate = time();
+            /** @var Deployer $deployer */
+            $deployer = $this->container->get(Deployer::class);
+            $transaction = $deployer->begin($zipPath, APP_PATH);
 
-        // A. 更新数据库 well_kv -> setting -> config
-        if (is_array($config)) {
+            $scriptPath = APP_PATH . 'upgrade.php';
+            if (is_file($scriptPath)) {
+                /** @var ScriptRunner $scriptRunner */
+                $scriptRunner = $this->container->get(ScriptRunner::class);
+                $scriptRunner->run($scriptPath);
+                if (!@unlink($scriptPath)) {
+                    throw new \RuntimeException('Unable to remove completed core upgrade script');
+                }
+            }
+
+            // 迁移脚本可能更新同一 config，结算时重读并保留其合法字段。
+            $config = (array)($this->kv->settingGet('config') ?? []);
+            $newVersion = (string)($config['official_version'] ?? $originalConfig['official_version'] ?? '');
+            if (!$this->isVersion($newVersion)) {
+                throw new \App\Exception\UpgradeException('Upgrade target version is invalid during settlement', 21);
+            }
+
+            $appConfigOriginal = $this->replaceAppConfigVersion($appConfigFile, $newVersion);
+            $appConfigChanged = true;
+
             $config['version'] = $newVersion;
-            $config['version_date'] = $versionDate;
+            $config['version_date'] = time();
             $config['upgrade'] = 0;
-            // 清理升级残留的元数据
             unset($config['upgrade_url'], $config['upgrade_hash'], $config['upgrade_id']);
             if (!$this->kv->settingSet('config', $config)) {
                 throw new \App\Exception\UpgradeException(
@@ -243,31 +353,136 @@ class UpgradeService
                     21
                 );
             }
+
+            $this->clearCoreRuntimeCache($tmpDir);
+            if (is_file($zipPath) && !@unlink($zipPath)) {
+                throw new \RuntimeException('Unable to remove verified core upgrade archive');
+            }
+            $zipPath = '';
+
+            $deployer->commit($transaction);
+            $transaction = null;
+
+            if (function_exists('opcache_reset')) {
+                opcache_reset();
+            }
+            $reload = true;
+        } catch (\Throwable $e) {
+            $compensationFailures = [];
+            if (is_array($transaction) && $deployer instanceof Deployer) {
+                try {
+                    $deployer->rollback($transaction);
+                } catch (\Throwable $rollbackError) {
+                    $compensationFailures[] = $rollbackError->getMessage();
+                }
+            }
+            if ($appConfigChanged && is_string($appConfigOriginal)) {
+                try {
+                    $this->atomicReplaceFile($appConfigFile, $appConfigOriginal);
+                } catch (\Throwable $restoreError) {
+                    $compensationFailures[] = $restoreError->getMessage();
+                }
+            }
+            try {
+                $currentConfig = (array)($this->kv->settingGet('config') ?? []);
+                if ($currentConfig !== $originalConfig
+                    && !$this->kv->settingSet('config', $originalConfig)) {
+                    throw new \RuntimeException('Unable to restore pre-upgrade version state');
+                }
+            } catch (\Throwable $restoreError) {
+                $compensationFailures[] = $restoreError->getMessage();
+            }
+            if ($compensationFailures) {
+                throw new \RuntimeException(
+                    'Core upgrade failed and compensation failed: ' . implode('; ', $compensationFailures),
+                    0,
+                    $e
+                );
+            }
+            throw $e;
+        } finally {
+            if ($zipPath !== '' && is_file($zipPath)) {
+                @unlink($zipPath);
+            }
+            \Framework\Utils\FileHelper::unlock($lockKey);
         }
 
-        // B. 更新物理配置文件 config/App.php (如果允许写入)
-        $appConfigFile = APP_PATH . 'config/App.php';
-        if (is_writable($appConfigFile)) {
-            $configContent = file_get_contents($appConfigFile);
-            $newConfigContent = preg_replace("/'version'\s*=>\s*'.*?'/", "'version' => '{$newVersion}'", $configContent);
-            file_put_contents($appConfigFile, $newConfigContent);
+        if ($reload) {
+            \Framework\Utils\Runtime::reload();
         }
-
-        // 5. 清理与结算
-        @unlink($zipPath);
-
-        // 如果开启了 OpCache，强制刷新
-        if (function_exists('opcache_reset')) {
-            opcache_reset();
-        }
-
-        // 彻底清理编译缓存与编译后的类映射
-        \Framework\Utils\DirectoryHelper::rmdirRecursive($tmpDir);
-        @mkdir($tmpDir, 0755, true);
-
-        // 如果是 Swoole 模式，触发热重启以更新 Worker 内存中的代码
-        \Framework\Utils\Runtime::reload();
-
         return true;
+    }
+
+    private function upgradeLockKey(): string
+    {
+        return 'wellcms-core-upgrade:' . hash('sha256', APP_PATH);
+    }
+
+    private function assertRunnableSnapshot(array $config, string $upgradeUrl, string $expectedHash): void
+    {
+        $storedUrl = (string)($config['upgrade_url'] ?? '');
+        $storedHash = strtolower((string)($config['upgrade_hash'] ?? ''));
+        $upgradeId = (string)($config['upgrade_id'] ?? '');
+        $expectedHash = strtolower($expectedHash);
+        if ((int)($config['upgrade'] ?? 0) !== 1
+            || $storedUrl === '' || !hash_equals($storedUrl, $upgradeUrl)
+            || !preg_match('/^[a-f0-9]{64}$/', $storedHash)
+            || !hash_equals($storedHash, $expectedHash)
+            || $upgradeId === '') {
+            throw new \App\Exception\UpgradeException('Core upgrade snapshot no longer matches the approved release', 24);
+        }
+    }
+
+    /** 更新物理版本并返回原内容，供全流程失败补偿。 */
+    private function replaceAppConfigVersion(string $path, string $version): string
+    {
+        if (!is_file($path) || !is_readable($path) || !is_writable($path)) {
+            throw new \RuntimeException('Physical application config is unavailable');
+        }
+        $original = \Framework\Utils\FileHelper::fileGetContentsTry($path);
+        if (!is_string($original)) {
+            throw new \RuntimeException('Unable to read physical application config');
+        }
+        $count = 0;
+        $updated = preg_replace(
+            "/'version'\s*=>\s*'[^']*'/",
+            "'version' => '{$version}'",
+            $original,
+            1,
+            $count
+        );
+        if (!is_string($updated) || $count !== 1) {
+            throw new \RuntimeException('Physical application version field is invalid');
+        }
+        $this->atomicReplaceFile($path, $updated);
+        return $original;
+    }
+
+    private function atomicReplaceFile(string $path, string $content): void
+    {
+        $temporary = $path . '.upgrade-' . bin2hex(random_bytes(8));
+        $written = \Framework\Utils\FileHelper::filePutContentsTry($temporary, $content);
+        if ($written !== strlen($content)) {
+            @unlink($temporary);
+            throw new \RuntimeException('Unable to write atomic application config');
+        }
+        $permissions = @fileperms($path);
+        if (is_int($permissions)) {
+            @chmod($temporary, $permissions & 0777);
+        }
+        if (!@rename($temporary, $path)) {
+            @unlink($temporary);
+            throw new \RuntimeException('Unable to atomically replace application config');
+        }
+    }
+
+    private function clearCoreRuntimeCache(string $tmpDir): void
+    {
+        \App\Core\Compile::flushCache();
+        foreach ([$tmpDir . 'container.php', $tmpDir . 'template_map.php'] as $cacheFile) {
+            if (is_file($cacheFile) && !@unlink($cacheFile)) {
+                throw new \RuntimeException('Unable to invalidate compiled runtime cache');
+            }
+        }
     }
 }

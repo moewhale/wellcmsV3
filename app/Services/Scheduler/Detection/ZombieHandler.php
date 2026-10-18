@@ -10,13 +10,8 @@ use Framework\Utils\UuidHelper;
 /**
  * 僵尸任务处理器
  *
- * v3.2 新增: 从 src/Scheduler/WorkerCoordinator.php 迁入的 SQL 逻辑。
- *             WorkerCoordinator 保留纯 Redis 心跳部分。
- *
- * v3.3 重构: 注入 SchedulerTaskModel 替代 ProxyDriver。
- *             消除裸 PDO 手写 SQL，通过 BaseModel 标准方法实现合规访问。
- *
- * PHP 7.2 兼容。
+ * 注入 SchedulerTaskModel 替代 ProxyDriver。
+ * 消除裸 PDO 手写 SQL，通过 BaseModel 标准方法实现合规访问。
  */
 class ZombieHandler implements ZombieDetectorInterface
 {

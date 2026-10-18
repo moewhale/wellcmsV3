@@ -56,7 +56,10 @@ class UriFactory implements \Framework\Http\Interfaces\UriFactoryInterface
             $ctx = call_user_func([$coroClass, 'getContext']);
             // 在 Swoole 下，优先从协程上下文中的 server 和 header 提取数据
             if (isset($ctx['server'])) {
-                $server = (array)$ctx['server'] + (array)($ctx['header'] ?? []);
+                $server = self::normalizeSwooleServer(
+                    (array)$ctx['server'],
+                    (array)($ctx['header'] ?? [])
+                );
             }
         }
         return self::buildUriFromServer($server);
@@ -69,7 +72,34 @@ class UriFactory implements \Framework\Http\Interfaces\UriFactoryInterface
     public function createFromRequest(object $req): UriInterface
     {
         /** @noinspection PhpUndefinedFieldInspection */
-        return self::buildUriFromServer($req->server + $req->header);
+        return self::buildUriFromServer(self::normalizeSwooleServer(
+            (array)$req->server,
+            (array)$req->header
+        ));
+    }
+
+    /**
+     * 将 Swoole 原生小写 server/header 转换为与 FPM $_SERVER 同构的键。
+     */
+    public static function normalizeSwooleServer(array $server, array $headers = []): array
+    {
+        $normalized = [];
+
+        foreach ($server as $name => $value) {
+            $key = strtoupper(strtr((string)$name, '-', '_'));
+            $normalized[$key] = $value;
+        }
+
+        foreach ($headers as $name => $value) {
+            $key = strtoupper(strtr((string)$name, '-', '_'));
+            if (!in_array($key, ['CONTENT_TYPE', 'CONTENT_LENGTH', 'CONTENT_MD5'], true)
+                && strpos($key, 'HTTP_') !== 0) {
+                $key = 'HTTP_' . $key;
+            }
+            $normalized[$key] = $value;
+        }
+
+        return $normalized;
     }
 
     /**
@@ -85,7 +115,8 @@ class UriFactory implements \Framework\Http\Interfaces\UriFactoryInterface
         // 协议
         $isHttps = (!empty($s['https']) && $s['https'] !== 'off')
             || (($s['server_port'] ?? $server['SERVER_PORT'] ?? null) == 443)
-            || (!empty($s['http_x_forwarded_proto']) && $s['http_x_forwarded_proto'] === 'https');
+            || (!empty($s['http_x_forwarded_proto']) && strtolower((string)$s['http_x_forwarded_proto']) === 'https')
+            || (!empty($s['request_scheme']) && strtolower((string)$s['request_scheme']) === 'https');
 
         $scheme = $isHttps ? 'https' : 'http';
 

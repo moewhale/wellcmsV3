@@ -122,7 +122,8 @@
 
 						<?php if (!empty($item['operation_links']['upgrade'])) { ?>
 						<a rel="nofollow" href="<?php echo $item['operation_links']['upgrade']['url'] ?? '#';?>"
-							class="ajax-get px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition-all text-[9px] font-black uppercase tracking-widest shadow-lg shadow-rose-500/20">
+							data-arg='<?php echo json_encode($item['operation_links']['upgrade']['arg'] ?? []); ?>'
+							class="ajax-post px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition-all text-[9px] font-black uppercase tracking-widest shadow-lg shadow-rose-500/20">
 							<?php echo $view->get('language.upgrade');?>
 						</a>
 						<?php } ?>
@@ -144,7 +145,8 @@
 						</a>
 						<?php } else { ?>
 						<a rel="nofollow" href="<?php echo $item['operation_links']['download']['url'] ?? '#';?>"
-							class="ajax-get px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-all text-[9px] font-black uppercase tracking-widest shadow-lg shadow-indigo-500/20">
+							data-arg='<?php echo json_encode($item['operation_links']['download']['arg'] ?? []); ?>'
+							class="ajax-post px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-all text-[9px] font-black uppercase tracking-widest shadow-lg shadow-indigo-500/20">
 							<?php echo $btnText;?>
 						</a>
 						<?php } ?>

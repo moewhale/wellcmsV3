@@ -34,7 +34,35 @@ class CookieHelper
         $httponly = !empty($config['httponly']);
         $samesite = $config['cookie_samesite'] ?? '';
 
-        // 3. 传统 FPM/CLI 环境下发 (兼容 PHP 各个版本)
+        // 3. Swoole 请求只能写入当前协程的 Response，禁止同时触碰进程级 Header。
+        if (extension_loaded('swoole')) {
+            $coroClass = "\\Swoole\\Coroutine";
+            $cid = (int)call_user_func([$coroClass, 'getCid']);
+            if ($cid > 0) {
+                $ctx = call_user_func([$coroClass, 'getContext']);
+                $swooleResponse = $ctx['swoole_response'] ?? null;
+                if (!$swooleResponse || !method_exists($swooleResponse, 'cookie')) {
+                    throw new \RuntimeException('Swoole response is unavailable for cookie transport.');
+                }
+
+                $result = $swooleResponse->cookie(
+                    $cookieName,
+                    $value,
+                    $expiry,
+                    $path,
+                    $domain,
+                    $secure,
+                    $httponly,
+                    $samesite
+                );
+                if ($result === false) {
+                    throw new \RuntimeException('Swoole response rejected cookie transport.');
+                }
+                return;
+            }
+        }
+
+        // 4. 传统 FPM/CLI 环境下发 (兼容 PHP 各个版本)
         if (PHP_VERSION_ID >= 70300) {
             $options = [
                 'expires' => $expiry,
@@ -46,25 +74,14 @@ class CookieHelper
             if ($samesite) {
                 $options['samesite'] = $samesite;
             }
-            setcookie($cookieName, $value, $options);
+            $result = setcookie($cookieName, $value, $options);
         } else {
             // PHP 7.2 不支持 $options 数组参数，亦不支持 SameSite
-            setcookie($cookieName, $value, $expiry, $path, $domain, $secure, $httponly);
+            $result = setcookie($cookieName, $value, $expiry, $path, $domain, $secure, $httponly);
         }
 
-        // 4. Swoole 环境动态穿透适配
-        // 使用动态检测与调用，确保在非 Swoole 环境下无报错，且能穿透协程上下文下发
-        if (extension_loaded('swoole') && function_exists('call_user_func')) {
-            $coroClass = "\\Swoole\\Coroutine";
-            $cid = (int)call_user_func([$coroClass, 'getCid']);
-            if ($cid > 0) {
-                $ctx = call_user_func([$coroClass, 'getContext']);
-                $swooleResponse = $ctx['swoole_response'] ?? null;
-                if ($swooleResponse && method_exists($swooleResponse, 'cookie')) {
-                    // Swoole 的 cookie 方法原生支持大部分常用参数，包括 samesite
-                    $swooleResponse->cookie($cookieName, $value, $expiry, $path, $domain, $secure, $httponly, $samesite);
-                }
-            }
+        if ($result === false) {
+            throw new \RuntimeException('Native cookie transport failed.');
         }
     }
 }

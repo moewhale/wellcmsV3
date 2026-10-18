@@ -15,7 +15,6 @@ use App\Traits\Admin\AdminTrait;
 
 /**
  * 用户管理控制器
- * 遵循 WellCMS 3.0 开发规范：被动视图、协同文本封装、构造函数注入
  */
 class UserController extends BaseController
 {

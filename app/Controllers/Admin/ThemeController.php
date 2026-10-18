@@ -84,7 +84,7 @@ class ThemeController extends BaseController
             $condition[$searchType] = $keywords;
         }
 
-        // --- 下游管理隔离：列表页实时扫描本地物理扩展，确保断网环境可用且响应迅速 ---
+        // 下游管理隔离：列表页实时扫描本地物理扩展，确保断网环境可用且响应迅速
         $this->localThemes = $this->extensionManager->getLocalList($this->currentType);
 
         $themeList = ArrayHelper::arrayListConditionOrderBy($this->localThemes, $condition, [], $page, $pageSize);
@@ -109,6 +109,7 @@ class ThemeController extends BaseController
                     $ops[$action]['arg'] = ['dir' => $item['dir'], '_csrf_token' => $csrfToken];
                 }
             }
+            $this->protectUpgradeLink($ops, $item, (int)($user['id'] ?? 0), $csrfToken);
             if (!empty($item['children'])) {
                 foreach ($themeList[$index]['children'] as $ci => $child) {
                     $cops = &$themeList[$index]['children'][$ci]['operation_links'];
@@ -117,6 +118,7 @@ class ThemeController extends BaseController
                             $cops[$action]['arg'] = ['dir' => $child['dir'] ?? $ci, '_csrf_token' => $csrfToken];
                         }
                     }
+                    $this->protectUpgradeLink($cops, $child, (int)($user['id'] ?? 0), $csrfToken);
                 }
             }
         }
@@ -200,11 +202,17 @@ class ThemeController extends BaseController
         }
 
         $read['operation_links'] = $this->extensionManager->buildOperationLinks($read);
-        foreach (['install', 'uninstall', 'upgrade'] as $action) {
+        foreach (['install', 'uninstall'] as $action) {
             if (!empty($read['operation_links'][$action])) {
                 $read['operation_links'][$action]['arg'] = ['dir' => $dir, '_csrf_token' => $csrfToken];
             }
         }
+        $this->protectUpgradeLink(
+            $read['operation_links'],
+            $read,
+            (int)($user['id'] ?? 0),
+            $csrfToken
+        );
 
         $menu = $this->getAdminMenu();
         $page_link_string = 'admin/theme/detail';
@@ -288,6 +296,26 @@ class ThemeController extends BaseController
         return $this->render($routeMeta['layout'], $data, true);
     }
 
+    private function protectUpgradeLink(array &$links, array $item, int $userId, string $csrfToken): void
+    {
+        if (empty($links['upgrade'])) return;
+        $dir = (string)($item['dir'] ?? '');
+        $storeId = (int)($item['storeid'] ?? 0);
+        if ($userId <= 0 || $dir === '' || $storeId <= 0) {
+            $links['upgrade'] = '';
+            return;
+        }
+
+        $operationTokens = $this->container->get(\App\Services\Extension\ExtensionOperationTokenService::class);
+        $links['upgrade']['url'] = $this->urlGenerator->url('admin/store/upgrade');
+        $links['upgrade']['arg'] = [
+            'dir' => $dir,
+            'storeid' => $storeId,
+            '_csrf_token' => $csrfToken,
+            '_operation_token' => $operationTokens->issue($userId, 'upgrade', $dir, $storeId),
+        ];
+    }
+
     public function install(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
         return $this->handleAction($request, 'install');
@@ -296,6 +324,48 @@ class ThemeController extends BaseController
     public function uninstall(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
         return $this->handleAction($request, 'uninstall');
+    }
+
+    /**
+     * 加载主题自己的设置入口，并把可见作用域限制为约定的四个变量。
+     */
+    public function setting(\Framework\Http\Interfaces\ServerRequestInterface $request, string $method = 'GET'): ResponseInterface
+    {
+        $dir = (string)SafeHelper::safeWord(RequestUtils::param('dir'));
+        $localThemes = $this->getLocalThemes();
+        if (!isset($localThemes[$dir])) {
+            return $this->errorMessage($this->language->get('theme_does_not_exist'), 4);
+        }
+
+        $settingFile = $this->extensionManager->getBasePath($this->currentType) . $dir . '/setting.php';
+        if (!file_exists($settingFile)) {
+            return $this->errorMessage($this->language->get('params_error'), 4);
+        }
+
+        $compiledFile = \App\Core\Compile::include($settingFile);
+        $response = (static function (
+            string $file,
+            Container $container,
+            ServerRequestInterface $request,
+            string $method
+        ) {
+            return include $file;
+        })($compiledFile, $this->container, $request, $method);
+
+        if (!$response instanceof ResponseInterface) {
+            $type = is_object($response) ? get_class($response) : gettype($response);
+            return $this->errorMessage(
+                $this->language->get('data_malformation') . ' (Invalid theme response type: ' . $type . ')',
+                500
+            );
+        }
+
+        return $response;
+    }
+
+    public function postSetting(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
+    {
+        return $this->setting($request, 'POST');
     }
 
     /**

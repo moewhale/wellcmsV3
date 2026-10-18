@@ -33,13 +33,21 @@ class ModelServiceProvider implements \Framework\Providers\ServiceProviderInterf
                 \App\Models\UploadLogModel::class
             ];
 
+            // 核心模型按需创建真实单例；插件仍可在统一列表内选择加入或取消标记。
+            $deferredModels = array_fill_keys($models, true);
             // hook app_Providers_ModelServiceProvider_register_models.php
 
             foreach ($models as $model) {
-                $container->bind($model, $model, true, false);
+                if (!isset($deferredModels[$model])) {
+                    $container->bind($model, $model, true, false);
+                    continue;
+                }
+                $container->bind($model, static function ($container, array $params) use ($model) {
+                    return $container->make($model, $params);
+                }, true, !defined('SWOOLE_MODE') || !\SWOOLE_MODE);
             }
 
-            // 基础核心服务 (Core Foundation Services) - 非延迟加载，确保架构支柱常驻
+            // 保留基础服务的统一列表，只对已核对初始化行为的外围服务启用按需创建。
             $coreServices = [
                 \App\Services\System\CacheService::class,
                 \App\Services\Auth\GroupService::class,
@@ -50,16 +58,35 @@ class ModelServiceProvider implements \Framework\Providers\ServiceProviderInterf
                 \App\Services\Auth\SessionService::class,
                 \App\Services\Auth\UserService::class,
                 \App\Services\Auth\TokenService::class,
+                \App\Services\Auth\EmailVerificationService::class,
                 \App\Services\Storage\FileStorageService::class,
                 \App\Services\Storage\AttachmentService::class,
+                \App\Services\Storage\DownloadService::class,
                 \App\Services\Content\TempContentService::class,
                 \App\Services\Content\NavigationService::class,
             ];
 
+            $deferredCoreServices = array_fill_keys([
+                \App\Services\System\CacheService::class,
+                \App\Services\Auth\SessionDataService::class,
+                \App\Services\System\LogService::class,
+                \App\Services\Auth\EmailVerificationService::class,
+                \App\Services\Storage\FileStorageService::class,
+                \App\Services\Storage\AttachmentService::class,
+                \App\Services\Storage\DownloadService::class,
+                \App\Services\Content\TempContentService::class,
+            ], true);
+
             // hook app_Providers_ModelServiceProvider_register_core_services.php
 
             foreach ($coreServices as $service) {
-                $container->bind($service, $service, true, false);
+                if (!isset($deferredCoreServices[$service])) {
+                    $container->bind($service, $service, true, false);
+                    continue;
+                }
+                $container->bind($service, static function ($container, array $params) use ($service) {
+                    return $container->make($service, $params);
+                }, true, !defined('SWOOLE_MODE') || !\SWOOLE_MODE);
             }
 
             $moduleServices = [
@@ -74,7 +101,7 @@ class ModelServiceProvider implements \Framework\Providers\ServiceProviderInterf
                 $container->bind($service, $service, true, true);
             }
 
-            // 模块服务（非懒加载）：含 getter 返回类型声明，需真实对象而非 LazyLoadingProxy
+            // 含具体类型约束的模块服务按需返回真实单例。
             $moduleServicesEager = [
                 \App\Services\ExternalLinkService::class,
                 \App\Services\LinkService::class,
@@ -83,7 +110,9 @@ class ModelServiceProvider implements \Framework\Providers\ServiceProviderInterf
             // hook app_Providers_ModelServiceProvider_register_module_services_eager.php
 
             foreach ($moduleServicesEager as $service) {
-                $container->bind($service, $service, true, false);
+                $container->bind($service, static function ($container, array $params) use ($service) {
+                    return $container->make($service, $params);
+                }, true, !defined('SWOOLE_MODE') || !\SWOOLE_MODE);
             }
 
             // 特殊构造服务
@@ -109,7 +138,7 @@ class ModelServiceProvider implements \Framework\Providers\ServiceProviderInterf
 
             // 有依赖渲染 (不延迟加载，避免 Proxy 导致构造函数类型校验失败)
             $container->bind(\Framework\Cache\Interfaces\CacheInterface::class, static function ($container) {
-                return new \App\Factory\CacheFactory($container->get(\App\Services\System\CacheService::class), $container->get('cacheConfig'));
+                return new \App\Factory\CacheFactory($container, $container->get('cacheConfig'));
             }, true, false);
 
             // hook app_Providers_ModelServiceProvider_register_end.php

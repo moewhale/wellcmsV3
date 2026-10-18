@@ -169,11 +169,7 @@ class ErrorHandlerMiddleware implements \Framework\Http\Interfaces\MiddlewareInt
                 ? 'warning'
                 : 'error';
 
-            $context = [
-                'file' => \App\Utils\PathHelper::relative($e->getFile()),
-                'line' => $e->getLine(),
-                'type' => \get_class($e),
-            ];
+            $context = \Framework\Logger\Formatter\JsonFormatter::exceptionContext($e);
 
             if (\defined('LOG_ABSOLUTE_PATH') && \LOG_ABSOLUTE_PATH) {
                 $context['absolute_file'] = $e->getFile();

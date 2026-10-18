@@ -11,17 +11,29 @@ class KeyValueService
 {
     use \Framework\Core\Traits\StatefulTrait;
 
+    /** @var \Framework\Core\Container */
+    protected $container;
     /** @var \App\Models\KeyValueModel */
     private $dbModel;
     /** @var \Framework\Cache\Interfaces\CacheInterface */
     private $cache;
 
     public function __construct(
-        \App\Models\KeyValueModel $dbModel,
+        \Framework\Core\Container $container,
         \Framework\Cache\Interfaces\CacheInterface $cache
     ) {
-        $this->dbModel = $dbModel;
+        $this->container = $container;
         $this->cache = $cache;
+    }
+
+    private function getModel()
+    {
+        if ($this->dbModel !== null) {
+            return $this->dbModel;
+        }
+        $resolved = $this->container->get(\App\Models\KeyValueModel::class);
+        // 首次获取可能让出协程；保留已经建立的模型引用。
+        return $this->dbModel = $this->dbModel ?? $resolved;
     }
 
     private function normalizeKey(string $key): string
@@ -37,7 +49,7 @@ class KeyValueService
         $key = $this->normalizeKey($key);
         $static = $this->getState('static', []);
         if (!isset($static[$key])) {
-            $result = $this->dbModel->read(['key' => $key]);
+            $result = $this->getModel()->read(['key' => $key]);
             if (empty($result)) return null;
             $static[$key] = json_decode($result['value'], true);
             $this->setState('static', $static);
@@ -63,13 +75,13 @@ class KeyValueService
                 'value' => json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
             ];
 
-            $result = $this->dbModel->read(['key' => $key]);
+            $result = $this->getModel()->read(['key' => $key]);
 
             if (empty($result)) {
-                return $this->dbModel->insert($data) > 0;
+                return $this->getModel()->insert($data) > 0;
             } else {
                 unset($data['key']);
-                return $this->dbModel->update(['key' => $key], $data) > 0;
+                return $this->getModel()->update(['key' => $key], $data) > 0;
             }
         } finally {
             $this->cache->unlock($lockKey, $token);
@@ -82,7 +94,7 @@ class KeyValueService
         $static = $this->getState('static', []);
         unset($static[$key]);
         $this->setState('static', $static);
-        return $this->dbModel->delete(['key' => $key]);
+        return $this->getModel()->delete(['key' => $key]);
     }
 
     // ---- kv + cache ----
@@ -138,6 +150,26 @@ class KeyValueService
         try {
             $setting = $this->cacheGet('setting') ?? [];
             $setting[$key] = $value;
+            $this->setState('setting', $setting);
+            return $this->cacheSet('setting', $setting);
+        } finally {
+            $this->cache->unlock($lockKey, $token);
+        }
+    }
+
+    /**
+     * 在全局 setting 锁内原子合并指定配置域。
+     */
+    public function settingMerge(string $key, array $changes): bool
+    {
+        $lockKey = 'lock:setting';
+        $token = $this->cache->lock($lockKey, 5) ?? null;
+        if (!$token) return false;
+
+        try {
+            $setting = $this->cacheGet('setting') ?? [];
+            $current = isset($setting[$key]) && is_array($setting[$key]) ? $setting[$key] : [];
+            $setting[$key] = array_merge($current, $changes);
             $this->setState('setting', $setting);
             return $this->cacheSet('setting', $setting);
         } finally {
