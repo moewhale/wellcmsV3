@@ -1,0 +1,4 @@
+interface:
+  display_name: "WellCMS Development"
+  short_description: "WellCMS 3.0 architecture and zero-redundancy rules"
+  default_prompt: "Use $wellcms-development to audit, implement, or review WellCMS 3.0 core, plugin, route, service, theme, compatibility, and performance changes."

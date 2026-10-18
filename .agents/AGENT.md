@@ -1,6 +1,6 @@
 # WellCMS 3.0 Agent 智理上下文 (Agent Context)
 
-本文档是 WellCMS 3.0 的核心设计意志快照，专为 AI Agent（如 Antigravity, Cursor, Windsurf）提供高精度的上下文记忆。它记录了项目的逻辑现状、关键历史决策以及未来维护时的红色警戒区。
+本文档是 WellCMS 3.0 的核心设计意志快照，专为 AI Agent（如 Codex, Antigravity, Cursor, Windsurf）提供高精度的上下文记忆。它记录了项目的逻辑现状、关键历史决策以及未来维护时的红色警戒区。
 
 ---
 
@@ -73,7 +73,7 @@
 
 ## 🚀 给"未来 Agent"的任务交接 (Agent Handover)
 
-1. **开发规范优先级**：`.agent/skills/wellcms_development/SKILL.md` 的优先级高于一切建议。
+1. **开发规范优先级**：`.agents/skills/wellcms-development/SKILL.md` 的优先级高于一切建议。
 2. **重构底线**：你可以优化性能，但严禁改动 `src/` 核心框架的接口签名，除非是为了修复高危 Bug。
 3. **插件审核**：辅助用户编写插件时，必须检查 `install.php` 是否具备平滑升级判定逻辑。
 
