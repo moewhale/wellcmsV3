@@ -36,6 +36,7 @@
 			<span class="text-[10px] font-black uppercase tracking-widest"><?php echo $view->get('language.logout');?></span>
 		</a>
 		<?php } ?> -->
+		<?php // 安装、卸载固定使用 POST；dir 和 CSRF 令牌通过 data-arg 提交。 ?>
 		<?php if (!empty($extension['operation_links']['install'])) { ?>
 		<a href="<?php echo $extension['operation_links']['install']['url'];?>"
 			data-confirm="<?php echo $view->get('language.plugin_install_confirm_tip');?>"

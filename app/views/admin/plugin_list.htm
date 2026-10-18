@@ -156,6 +156,7 @@
 				</a>
 				<?php } ?>
 
+				<?php // 安装、卸载固定使用 POST；dir 和 CSRF 令牌通过 data-arg 提交。 ?>
 				<?php if ($item['operation_links']['install']) { ?>
 				<a href="<?php echo $item['operation_links']['install']['url'];?>"
 					data-confirm="<?php echo $item['operation_links']['install']['confirm'];?>"
@@ -171,7 +172,8 @@
 					class="ajax-post px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-lg shadow-lg shadow-rose-500/30 transition-all transform active:scale-95">
 					<?php echo $item['operation_links']['uninstall']['label'];?>
 				</a>
-				<?php } ?>			</div>
+				<?php } ?>
+			</div>
 		</div>
 	</div>
 	<?php } ?>
