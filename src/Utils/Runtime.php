@@ -13,6 +13,17 @@ class Runtime
     private static $pidFile = '';
 
     /**
+     * 读取进程调试级别；专用变量未定义时兼容 DEBUG，仅接受 0、1、2。
+     */
+    public static function debugLevel(): int
+    {
+        $level = \getenv('WELLCMS_DEBUG');
+        $level = $level === false ? \getenv('DEBUG') : $level;
+
+        return \in_array($level, ['0', '1', '2'], true) ? (int)$level : 0;
+    }
+
+    /**
      * 获取 PID 文件路径
      */
     public static function getPidFile(): string

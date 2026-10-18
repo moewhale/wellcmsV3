@@ -11,6 +11,8 @@
 
 > 仓库默认 README 为英文，可点击 [简体中文](https://github.com/wellcms/wellcmsV3/blob/main/README.zh-CN.md) 查看中文版本。
 
+> 核心升级前请核对 [Runtime 补丁与协程池问题备忘](./docs/CORE_UPSTREAM_REPORT_AND_UPGRADE_NOTES_2026-10-18.txt)：`src/Utils/Runtime.php` 会被覆盖更新；2026-10-18 已按授权补齐 `debugLevel()`，升级时需保留解析行为并核对它与 `bin/well-server` 的版本一致性。报告提交状态及验证结果见备忘。
+
 ---
 
 ## 二、系统要求
