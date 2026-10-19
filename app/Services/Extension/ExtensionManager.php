@@ -102,6 +102,8 @@ class ExtensionManager
             if (!empty($fullItem)) {
                 // 保留官方数据中的 last_sync 等字段
                 $fullItem = array_merge($item, $fullItem);
+                // 显示名称以列表数据源为准，避免本地配置或目录名默认值覆盖商店名称。
+                $fullItem['name'] = $item['name'];
             } else {
                 $fullItem = $item;
             }
