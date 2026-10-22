@@ -141,6 +141,18 @@ class PgSqlGrammar implements GrammarInterface
         return $sql;
     }
 
+    public function compileUpsert(string $table, array $data, array $uniqueBy, array $updateColumns): string
+    {
+        $sets = [];
+        foreach ($updateColumns as $column) {
+            $wrapped = $this->wrap($column);
+            $sets[] = "{$wrapped} = ?";
+        }
+        $keys = array_map([$this, 'wrap'], $uniqueBy);
+        return $this->compileInsert($table, $data)
+            . ' ON CONFLICT (' . implode(',', $keys) . ') DO UPDATE SET ' . implode(', ', $sets);
+    }
+
     public function compileUpdate(string $table, array $data, array $wheres): string
     {
         $sets = [];
@@ -296,10 +308,19 @@ class PgSqlGrammar implements GrammarInterface
                 '/\bBIGINT\s*(\(\d+\))?\s+UNSIGNED\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i' => ' BIGSERIAL ',
                 '/\bBIGINT\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'                     => ' BIGSERIAL ',
                 '/\bINT\s*(\(\d+\))?\s+UNSIGNED\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'    => ' SERIAL ',
-                '/\bINT\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'                        => ' SERIAL ',
+                '/\b(?:INT|INTEGER)\s*(\(\d+\))?\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'                        => ' SERIAL ',
                 '/\bINTEGER\s*(\(\d+\))?\s+UNSIGNED\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i' => ' SERIAL ',
                 '/\bSMALLINT\s*(\(\d+\))?\s+UNSIGNED\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'  => ' SMALLSERIAL ',
                 '/\bSMALLINT\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'                       => ' SMALLSERIAL ',
+
+                // 非自增无符号列先映射为足够容量的 PG 类型，再清理剩余 MySQL 属性
+                // 确保替换结果前后有空格，防止与 NOT NULL 粘连
+                '/\bBIGINT\s*(\(\d+\))?\s+UNSIGNED\b/i'   => ' NUMERIC(20,0) ',
+                '/\bINT\s*(\(\d+\))?\s+UNSIGNED\b/i'      => ' BIGINT ',
+                '/\bINTEGER\s*(\(\d+\))?\s+UNSIGNED\b/i'  => ' BIGINT ',
+                '/\bMEDIUMINT\s*(\(\d+\))?\s+UNSIGNED\b/i' => ' INTEGER ',
+                '/\bSMALLINT\s*(\(\d+\))?\s+UNSIGNED\b/i'  => ' INTEGER ',
+                '/\bTINYINT\s*(\(\d+\))?\s+UNSIGNED\b/i'   => ' SMALLINT ',
 
                 // MySQL 特有属性清理
                 '/\bUNSIGNED\b/i'            => ' ',
@@ -314,15 +335,6 @@ class PgSqlGrammar implements GrammarInterface
                 '/\bCOMMENT\s*=\s*\'.*?\'/i'  => ' ',
                 '/\bCOMMENT\s+\'.*?\'/i'      => ' ',
                 '/ON\s+UPDATE\s+CURRENT_TIMESTAMP/i' => ' ', // PgSQL 不支持列级自动更新，需剔除
-
-                // 无符号整数溢出保护 (关键修复：MySQL INT UNSIGNED -> Postgres INTEGER)
-                // 确保替换结果前后有空格，防止与 NOT NULL 粘连
-                '/\bBIGINT\s*(\(\d+\))?\s+UNSIGNED\b/i'   => ' NUMERIC(20) ',
-                '/\bINT\s*(\(\d+\))?\s+UNSIGNED\b/i'      => ' INTEGER ',
-                '/\bINTEGER\s*(\(\d+\))?\s+UNSIGNED\b/i'  => ' INTEGER ',
-                '/\bMEDIUMINT\s*(\(\d+\))?\s+UNSIGNED\b/i' => ' INTEGER ',
-                '/\bSMALLINT\s*(\(\d+\))?\s+UNSIGNED\b/i'  => ' INTEGER ',
-                '/\bTINYINT\s*(\(\d+\))?\s+UNSIGNED\b/i'   => ' SMALLINT ',
 
                 // 精确基础类型转换
                 '/\bBIGINT\b(\s*\(\d+\))?/i'      => ' BIGINT ',
@@ -356,7 +368,7 @@ class PgSqlGrammar implements GrammarInterface
 
                 // INET 网络地址类型原生支持包含操作符 (<<) 范围搜索
                 '/DATETIME/i'                => ' TIMESTAMP ',
-                '/TIMESTAMP\b/i'             => ' TIMESTAMP ',
+                '/\bTIMESTAMP\b/i'             => ' TIMESTAMP ',
                 '/\bYEAR\b/i'                => ' SMALLINT ',
 
                 '/\bCHAR\s*\((\d+)\)/i'      => ' VARCHAR($1) ',
@@ -535,6 +547,11 @@ class PgSqlGrammar implements GrammarInterface
                         } else {
                             $finalQueries[] = trim($q, " ;") . ';'; // Fallback
                         }
+                    } elseif ($action === 'ADD' && preg_match('/^(UNIQUE\s+)?(?:INDEX|KEY)\s+["`]?(\w+)["`]?\s+\(([^()]+)\)\s*$/i', $body, $indexMatch)) {
+                        $unique = empty($indexMatch[1]) ? '' : 'UNIQUE ';
+                        $indexName = $indexMatch[2];
+                        $indexColumns = $indexMatch[3];
+                        $finalQueries[] = "CREATE {$unique}INDEX \"idx_{$tableName}_{$indexName}\" ON \"{$tableName}\" ({$indexColumns});";
                     } elseif ($action === 'ADD') {
                         // ADD COLUMN col type ... (保持原样，只换引号)
                         // MySQL: ADD COLUMN `col` INT DEFAULT 0
@@ -563,10 +580,7 @@ class PgSqlGrammar implements GrammarInterface
                     $finalQueries[] = $q . ';';
                 }
             } elseif (strpos($upperQ, 'INSERT INTO') !== false && strpos($upperQ, 'ON DUPLICATE KEY UPDATE') !== false) {
-                // 简单映射 ON DUPLICATE KEY UPDATE -> ON CONFLICT DO UPDATE
-                // 注意：由于无法在此可靠获取主键名，此块仅做基础替换，建议避免复杂用法
-                $q = str_ireplace('ON DUPLICATE KEY UPDATE', 'ON CONFLICT DO UPDATE SET', $q);
-                $finalQueries[] = $q . ';';
+                throw new \InvalidArgumentException('Use DatabaseInterface::upsert() with explicit uniqueBy and updateColumns');
             } else {
                 $finalQueries[] = preg_replace('/\s+/', ' ', trim($q, " ;")) . ';';
             }

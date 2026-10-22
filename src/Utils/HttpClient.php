@@ -61,6 +61,7 @@ class HttpClient
         if (empty($opt['url'])) throw new \InvalidArgumentException('URL is required');
 
         $url  = $this->sanitizeUrl($opt['url']);
+        if ((array_key_exists('minTlsVersion', $opt) || array_key_exists('crlFile', $opt)) && strtolower((string)parse_url($url, PHP_URL_SCHEME)) !== 'https') throw new \InvalidArgumentException('Explicit TLS requires HTTPS');
         $resp = $this->hasCurl() ? $this->executeCurlRequest($url, $opt) : $this->executeStreamRequest($url, $opt);
 
         if (!$resp->getStatusCode() && $opt['throwOnError']) throw new HttpClientNetworkException('Network error');
@@ -80,6 +81,9 @@ class HttpClient
      */
     public function multiGet(array $urls, array $options = []): array
     {
+        if (array_intersect(['maxResponseBytes', 'maxHeaderBytes', 'minTlsVersion', 'crlFile'], array_keys($options))) {
+            throw new \InvalidArgumentException('Explicit bounded/TLS requests require request()');
+        }
         if ($this->isSwooleCoroutine()) {
             $responses = [];
             foreach ($urls as $idx => $url) {
@@ -202,6 +206,30 @@ class HttpClient
         }
         if ($opt['caBundle'] !== null && !is_string($opt['caBundle'])) {
             throw new \InvalidArgumentException('caBundle must be string|null');
+        }
+        // 2026-10-21 Sinter 授权例外：仅显式调用启用，保持普通请求及上传相关默认行为。
+        $bounded = array_key_exists('maxResponseBytes', $opt) || array_key_exists('maxHeaderBytes', $opt);
+        if ($bounded) {
+            foreach (['maxResponseBytes', 'maxHeaderBytes'] as $name) {
+                if (!isset($opt[$name]) || !is_int($opt[$name]) || $opt[$name] < 1) throw new \InvalidArgumentException($name . ' must be a positive int');
+            }
+            if ((int)$opt['timeout'] < 1) throw new \InvalidArgumentException('Bounded requests require a finite timeout');
+        }
+        $tls = array_key_exists('minTlsVersion', $opt) || array_key_exists('crlFile', $opt);
+        if (($bounded || $tls) && !$this->hasCurl()) throw new HttpClientNetworkException('Explicit bounded/TLS requests require cURL');
+        if ($tls) {
+            if (is_string($opt['caBundle'])) clearstatcache(true, $opt['caBundle']);
+            if (($opt['minTlsVersion'] ?? null) !== '1.3' || $opt['verifySSL'] !== true || $opt['followRedirects'] !== false || !$opt['caBundle'] || $opt['caBundle'][0] !== '/' || !is_file($opt['caBundle']) || !is_readable($opt['caBundle']) || filesize($opt['caBundle']) < 1) throw new \InvalidArgumentException('Explicit TLS requires TLS 1.3, verification, no redirects and a readable absolute CA file');
+            if (!function_exists('openssl_x509_read')) throw new HttpClientNetworkException('Explicit CA validation requires OpenSSL');
+            $caBytes = file_get_contents($opt['caBundle'], false, null, 0, 1048577);
+            if ($caBytes === false || strlen($caBytes) > 1048576 || strpos($caBytes, 'PRIVATE KEY-----') !== false || !preg_match_all('~-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----~s', $caBytes, $certificates) || substr_count($caBytes, '-----BEGIN CERTIFICATE-----') !== count($certificates[0])) throw new \InvalidArgumentException('Explicit CA must be a parseable public certificate bundle');
+            foreach ($certificates[0] as $certificate) {
+                $x509 = @openssl_x509_read($certificate); $parsed = $x509 === false ? false : openssl_x509_parse($x509);
+                if ($parsed === false || isset($parsed['extensions']['basicConstraints']) && strpos($parsed['extensions']['basicConstraints'], 'CA:FALSE') !== false) throw new \InvalidArgumentException('Explicit CA cannot contain a site leaf certificate');
+            }
+            $curl = curl_version();
+            if (!defined('CURL_SSLVERSION_TLSv1_3') || !preg_match('~^OpenSSL/([0-9]+\.[0-9]+\.[0-9]+)~', $curl['ssl_version'], $backend) || version_compare($backend[1], '1.1.1', '<')) throw new HttpClientNetworkException('TLS 1.3/OpenSSL backend unavailable');
+            if (array_key_exists('crlFile', $opt) && (!is_string($opt['crlFile']) || $opt['crlFile'] === '' || $opt['crlFile'][0] !== '/' || !is_file($opt['crlFile']) || !is_readable($opt['crlFile']) || filesize($opt['crlFile']) < 1 || !defined('CURLOPT_CRLFILE'))) throw new \InvalidArgumentException('CRL requires a readable absolute file and backend support');
         }
     }
 
@@ -331,13 +359,18 @@ class HttpClient
     {
         $ch = $this->acquire();
         $headers = [];
+        $bounded = isset($opt['maxResponseBytes']); $headerBytes = 0; $bodyBytes = 0; $body = ''; $limitExceeded = false;
 
         try {
             curl_setopt($ch, CURLOPT_HEADER, true);
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 
-            curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($ch, string $header) use (&$headers) {
+            curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($ch, string $header) use (&$headers, $bounded, $opt, &$headerBytes, &$limitExceeded) {
                 $len = strlen($header);
+                if ($bounded) {
+                    if ($len > $opt['maxHeaderBytes'] - $headerBytes) { $limitExceeded = true; return 0; }
+                    $headerBytes += $len;
+                }
                 $header = trim($header);
                 if ($header === '' || strpos($header, ':') === false) return $len;
 
@@ -348,10 +381,26 @@ class HttpClient
             });
 
             $this->configureCurlHandle($ch, $url, $opt);
+            if ($bounded) {
+                // 有界路径沿原 cURL 执行链接收，禁止先 RETURNTRANSFER 全读后再检查。
+                curl_setopt($ch, CURLOPT_HEADER, false);
+                curl_setopt($ch, CURLOPT_WRITEFUNCTION, static function ($ch, string $chunk) use (&$body, &$bodyBytes, &$limitExceeded, $opt): int {
+                    $length = strlen($chunk);
+                    if ($length > $opt['maxResponseBytes'] - $bodyBytes) { $limitExceeded = true; return 0; }
+                    $bodyBytes += $length; $body .= $chunk;
+                    return $length;
+                });
+            }
 
             $response = curl_exec($ch);
             $err = curl_error($ch);
             $status = curl_getinfo($ch, CURLINFO_HTTP_CODE) ?: 0;
+            if ($bounded) {
+                if ($limitExceeded) throw new HttpClientNetworkException('Response byte limit exceeded');
+                if ($response === false || $err !== '') throw new HttpClientNetworkException($err ?: 'Incomplete bounded response');
+                // cURL 已处理 transfer framing/协商的内容解码；不对原字节重复解码。
+                return new Response($status, $headers, $this->createStream($body));
+            }
 
             if ($response === false) $response = '';
             if ($err && $opt['throwOnError']) throw new HttpClientNetworkException($err);
@@ -418,7 +467,18 @@ class HttpClient
             $cfg[CURLOPT_HTTPPROXYTUNNEL] = true;
         }
 
-        $ca = $this->detectCaBundle($opt['caBundle'], $opt['verifySSL']);
+        // Sinter 已授权的显式可信 TLS：从不探测系统 CA，换信任/CRL 后不复用旧 TLS 会话。
+        $explicitTls = isset($opt['minTlsVersion']) || isset($opt['crlFile']);
+        $ca = $explicitTls ? $opt['caBundle'] : $this->detectCaBundle($opt['caBundle'], $opt['verifySSL']);
+        if ($explicitTls) {
+            $cfg[CURLOPT_SSLVERSION] = CURL_SSLVERSION_TLSv1_3;
+            // PHP cURL 会把 CAPATH 的 NULL 转为空串，旧后端因此拒绝合法 CAINFO。
+            // 明确限定到部署 CA 文件所在目录，不使用编译时系统证书目录。
+            $cfg[CURLOPT_CAPATH] = dirname($ca);
+            $cfg[CURLOPT_FRESH_CONNECT] = true; $cfg[CURLOPT_FORBID_REUSE] = true; $cfg[CURLOPT_SSL_SESSIONID_CACHE] = false;
+            if (defined('CURLOPT_CA_CACHE_TIMEOUT')) $cfg[CURLOPT_CA_CACHE_TIMEOUT] = 0;
+            if (isset($opt['crlFile'])) $cfg[CURLOPT_CRLFILE] = $opt['crlFile'];
+        }
 
         if ($this->shouldVerifySSL($opt) && $ca) {
             $cfg[CURLOPT_CAINFO] = $ca;
@@ -441,7 +501,8 @@ class HttpClient
             return $v !== null && $v !== [];
         });
 
-        curl_setopt_array($ch, $cfg);
+        $configured = curl_setopt_array($ch, $cfg);
+        if (!$configured && ($explicitTls || isset($opt['maxResponseBytes']))) throw new HttpClientNetworkException('Explicit HTTP capabilities unavailable');
     }
 
     /** @param array<string,mixed> $opt */

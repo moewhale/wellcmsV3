@@ -687,7 +687,9 @@ class ExtensionManager
         $extensionPath = $this->getBasePath($type) . $dir . DIRECTORY_SEPARATOR;
         $configFile = $extensionPath . 'config.json';
         $config = SecurityHelper::jsonDecode((string)file_get_contents($configFile));
-        if (isset($config[$action])) {
+        // enable是数值状态字段；启用脚本沿既有enable.php协议查找。
+        $hasDeclaredScript = $action !== 'enable' && isset($config[$action]);
+        if ($hasDeclaredScript) {
             $relative = is_array($config[$action]) ? (string)($config[$action]['file'] ?? '') : '';
             if (!$this->isSafeLifecyclePath($relative)) {
                 throw new \RuntimeException('Invalid extension lifecycle script path: ' . $action);
@@ -699,7 +701,7 @@ class ExtensionManager
 
         $script = $extensionPath . str_replace('/', DIRECTORY_SEPARATOR, $relative);
         if (!is_file($script)) {
-            if (!isset($config[$action])) {
+            if (!$hasDeclaredScript) {
                 return;
             }
             throw new \RuntimeException('Extension lifecycle script is missing: ' . $action);

@@ -70,6 +70,17 @@ class MySqlGrammar implements GrammarInterface
         return $sql;
     }
 
+    public function compileUpsert(string $table, array $data, array $uniqueBy, array $updateColumns): string
+    {
+        $sets = [];
+        foreach ($updateColumns as $column) {
+            $wrapped = $this->wrap($column);
+            $sets[] = "{$wrapped} = ?";
+        }
+        // 更新值继续参数绑定，同时支持 MySQL 5.5.6 与高版本，不依赖 VALUES() 或新行别名。
+        return $this->compileInsert($table, $data) . ' ON DUPLICATE KEY UPDATE ' . implode(', ', $sets);
+    }
+
     public function compileUpdate(string $table, array $data, array $wheres): string
     {
         $sets = [];

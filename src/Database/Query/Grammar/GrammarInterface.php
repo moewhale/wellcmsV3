@@ -12,6 +12,7 @@ interface GrammarInterface
     public function wrap(string $identifier): string;
     public function compileSelect(array $columns, string $table, array $joins, array $wheres, array $orders, ?int $limit, ?int $offset): string;
     public function compileInsert(string $table, array $data, bool $batch = false): string;
+    public function compileUpsert(string $table, array $data, array $uniqueBy, array $updateColumns): string;
     public function compileUpdate(string $table, array $data, array $wheres): string;
     public function compileBulkUpdate(string $table, string $key, array $rows, array $wheres = []): string;
     public function compileDelete(string $table, array $wheres): string;

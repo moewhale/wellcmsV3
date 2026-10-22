@@ -82,6 +82,11 @@ class OracleGrammar implements GrammarInterface
         return strtr($sqlServer->compileInsert($table, $data, $batch), ['@param' => ':param']);
     }
 
+    public function compileUpsert(string $table, array $data, array $uniqueBy, array $updateColumns): string
+    {
+        throw new \LogicException('upsert is supported only for MySQL, PostgreSQL and SQLite');
+    }
+
     public function compileUpdate(string $table, array $data, array $wheres): string
     {
         $sqlServer = new SqlServerGrammar();

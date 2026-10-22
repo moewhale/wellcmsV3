@@ -9,6 +9,7 @@ namespace Framework\Database\Query\Grammar;
 
 use Framework\Database\Query\Grammar\GrammarInterface;
 
+/** SQLite 整数按原生有符号 64 位范围存储；不承诺 MySQL BIGINT UNSIGNED 的完整值域。 */
 class SQLiteGrammar implements GrammarInterface
 {
     // 移除所有缓存逻辑以防止内存溢出和泄露。
@@ -50,6 +51,16 @@ class SQLiteGrammar implements GrammarInterface
             $sql = sprintf('INSERT INTO %s (%s) VALUES %s', $this->wrap($table), implode(',', $wrapped), $place);
         }
         return $sql;
+    }
+
+    public function compileUpsert(string $table, array $data, array $uniqueBy, array $updateColumns): string
+    {
+        $sets = [];
+        foreach ($updateColumns as $column) {
+            $sets[] = $this->wrap($column) . ' = ?';
+        }
+        return $this->compileInsert($table, $data)
+            . ' ON CONFLICT (' . implode(',', array_map([$this, 'wrap'], $uniqueBy)) . ') DO UPDATE SET ' . implode(', ', $sets);
     }
 
     public function compileUpdate(string $table, array $data, array $wheres): string
@@ -149,10 +160,10 @@ class SQLiteGrammar implements GrammarInterface
         // 2. 数据类型与属性映射转换
         $mappings = [
             // 整数映射 (SQLite 核心类型，必须先处理自增)
-            '/\bBIGINT\s*(\(\d+\))?\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i' => ' INTEGER PRIMARY KEY AUTOINCREMENT ',
-            '/\bINT\s*(\(\d+\))?\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'    => ' INTEGER PRIMARY KEY AUTOINCREMENT ',
-            '/\bINTEGER\s*(\(\d+\))?\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i' => ' INTEGER PRIMARY KEY AUTOINCREMENT ',
-            '/\bSMALLINT\s*(\(\d+\))?\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'  => ' INTEGER PRIMARY KEY AUTOINCREMENT ',
+            '/\bBIGINT\s*(\(\d+\))?\s+(?:UNSIGNED\s+)?NOT\s+NULL\s+AUTO_INCREMENT\b/i' => ' INTEGER PRIMARY KEY AUTOINCREMENT ',
+            '/\bINT\s*(\(\d+\))?\s+(?:UNSIGNED\s+)?NOT\s+NULL\s+AUTO_INCREMENT\b/i'    => ' INTEGER PRIMARY KEY AUTOINCREMENT ',
+            '/\bINTEGER\s*(\(\d+\))?\s+(?:UNSIGNED\s+)?NOT\s+NULL\s+AUTO_INCREMENT\b/i' => ' INTEGER PRIMARY KEY AUTOINCREMENT ',
+            '/\bSMALLINT\s*(\(\d+\))?\s+(?:UNSIGNED\s+)?NOT\s+NULL\s+AUTO_INCREMENT\b/i'  => ' INTEGER PRIMARY KEY AUTOINCREMENT ',
 
             // MySQL 特有属性清理
             '/\bUNSIGNED\b/i'            => ' ',
@@ -198,7 +209,7 @@ class SQLiteGrammar implements GrammarInterface
 
             // 日期时间
             '/DATETIME/i'                => ' TEXT ',
-            '/TIMESTAMP\b/i'             => ' TEXT ',
+            '/\bTIMESTAMP\b/i'             => ' TEXT ',
             '/\bYEAR\b/i'                => ' INTEGER ',
 
             '/\bCHAR\s*\((\d+)\)/i'      => ' VARCHAR($1) ',
@@ -222,15 +233,17 @@ class SQLiteGrammar implements GrammarInterface
                     $tableName = $tnMatch[1];
 
                     // --- 1. 提取索引 (SQLite 核心兼容) ---
-                    preg_match_all('/(?:UNIQUE\s+)?KEY\s+["`]?(\w+)["`]?\s+\((.*?)\)/i', $q, $idxMatches, PREG_SET_ORDER);
+                    preg_match_all('/(?:UNIQUE\s+)?(?:KEY|INDEX)\s+["`]?(\w+)["`]?\s+\((.*?)\)/i', $q, $idxMatches, PREG_SET_ORDER);
 
                     // 移除原有的 KEY 定义
-                    $q = preg_replace('/,?(?:\s+)?(?:UNIQUE\s+)?KEY\s+["`]?(\w+)["`]?\s+\(.*?\)/i', '', $q);
+                    $q = preg_replace('/,?(?:\s+)?(?:UNIQUE\s+)?(?:KEY|INDEX)\s+["`]?(\w+)["`]?\s+\(.*?\)/i', '', $q);
 
                     // --- 2. 处理自增主键冲突 ---
                     // 如果已经注入了 INTEGER PRIMARY KEY AUTOINCREMENT，则移除表尾的重复 PRIMARY KEY 定义
                     if (stripos($q, 'AUTOINCREMENT') !== false) {
-                        $q = preg_replace('/,?\s+PRIMARY\s+KEY\s+\("?\w+"?\)/i', '', $q);
+                        // SQLite 无分区，自增 id 使用原生单列 rowid 主键；不能并存表级联合主键。
+                        $q = preg_replace('/,\s*PRIMARY\s+KEY\s+\([^()]+\)/i', '', $q);
+                        $q = preg_replace('/(INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT)\s+PRIMARY\s+KEY\b/i', '$1', $q);
                     }
 
                     // --- 3. 移除分区定义 (SQLite 不支持，直接扁平化) ---
@@ -255,8 +268,12 @@ class SQLiteGrammar implements GrammarInterface
                     $finalQueries[] = trim($q, " ;") . ';';
                 }
             } elseif (strpos($upperQ, 'ALTER TABLE') !== false) {
-                // SQLite ALTER TABLE 支持极有限 (仅 ADD COLUMN, RENAME TO)
-                // 暂时忽略 MODIFY, CHANGE 等
+                if (preg_match('/^ALTER\s+TABLE\s+"?(\w+)"?\s+ADD\s+(UNIQUE\s+)?(?:INDEX|KEY)\s+"?(\w+)"?\s+\(([^()]+)\)\s*$/i', $q, $index)) {
+                    $unique = empty($index[2]) ? '' : 'UNIQUE ';
+                    $finalQueries[] = "CREATE {$unique}INDEX \"idx_{$index[1]}_{$index[3]}\" ON \"{$index[1]}\" ({$index[4]});";
+                    continue;
+                }
+                // 本轮不扩展 SQLite 原有 MODIFY/CHANGE 能力。
                 if (preg_match('/(MODIFY|CHANGE)/i', $q)) {
                     continue;
                 }

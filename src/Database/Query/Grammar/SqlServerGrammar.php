@@ -108,6 +108,11 @@ class SqlServerGrammar implements GrammarInterface
         return $sql;
     }
 
+    public function compileUpsert(string $table, array $data, array $uniqueBy, array $updateColumns): string
+    {
+        throw new \LogicException('upsert is supported only for MySQL, PostgreSQL and SQLite');
+    }
+
     public function compileUpdate(string $table, array $data, array $wheres): string
     {
         $sets = [];

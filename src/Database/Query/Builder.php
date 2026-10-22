@@ -38,6 +38,8 @@ class Builder
         'offset'    => null,     // OFFSET
         'insert'    => [],       // INSERT 数据
         'update'    => [],       // UPDATE 数据
+        'uniqueBy'  => [],       // UPSERT 冲突键
+        'updateColumns' => [],   // UPSERT 更新列
     ];
 
     /** @var array 合法操作符白名单 */
@@ -201,6 +203,41 @@ class Builder
     }
 
     /**
+     * 单行 UPSERT；只接受列名和值，拒绝 SQL 表达式及不完整的调用参数。
+     */
+    public function upsert(array $data, array $uniqueBy, array $updateColumns): self
+    {
+        if (!$data || !$uniqueBy || !$updateColumns) {
+            throw new QueryException('upsert requires data, uniqueBy and updateColumns');
+        }
+        foreach ($data as $column => $value) {
+            if (!is_string($column) || !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/D', $column)) {
+                throw new QueryException('Invalid upsert data column');
+            }
+            if (!is_scalar($value) && $value !== null) {
+                throw new QueryException('upsert values must be scalar or null');
+            }
+        }
+        foreach ([$uniqueBy, $updateColumns] as $columns) {
+            $seen = [];
+            foreach ($columns as $column) {
+                if (!is_string($column) || !array_key_exists($column, $data) || isset($seen[$column])) {
+                    throw new QueryException('upsert key/update columns must be distinct columns present in data');
+                }
+                $seen[$column] = true;
+            }
+        }
+        $this->insert($data);
+        $this->components['type'] = 'upsert';
+        $this->components['uniqueBy'] = $uniqueBy;
+        $this->components['updateColumns'] = $updateColumns;
+        foreach ($updateColumns as $column) {
+            $this->bindings[] = $this->paramsValueEscape($data[$column]);
+        }
+        return $this;
+    }
+
+    /**
      * BULK INSERT 多行
      */
     public function bulkInsert(array $rows): self
@@ -318,6 +355,14 @@ class Builder
                     $this->components['insert']
                 );
                 break;
+            case 'upsert':
+                $sql = $this->grammar->compileUpsert(
+                    $this->components['table'],
+                    $this->components['insert'],
+                    $this->components['uniqueBy'],
+                    $this->components['updateColumns']
+                );
+                break;
             case 'bulkInsert':
                 $sql = $this->grammar->compileInsert(
                     $this->components['table'],
@@ -397,6 +442,8 @@ class Builder
             'offset'    => null,
             'insert'    => [],
             'update'    => [],
+            'uniqueBy'  => [],
+            'updateColumns' => [],
         ];
         $this->bindings = [];
         $this->isolationLevel = null;

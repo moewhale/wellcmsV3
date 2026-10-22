@@ -522,7 +522,8 @@ $content = "<?php\n/** WellCMS Compiled Language Cache - O(1) Performance **/\n"
 
         $recycled = self::recycleArtifacts(true);
         if ($recycled['errors'] > 0) {
-            throw new \RuntimeException('Unable to clear all application compile cache files');
+            throw new \RuntimeException('Unable to clear all application compile cache files: '
+                . implode('; ', $recycled['error_messages']));
         }
 
         // 固定缓存清理成功后再完整发布 epoch，避免失败清理被报告为成功换代。
@@ -862,7 +863,14 @@ $content = "<?php\n/** WellCMS Compiled Language Cache - O(1) Performance **/\n"
             if ($ext === 'php') {
                 // PHP文件压缩去空格
                 $tmpDir = sys_get_temp_dir();
-                $tmpFile = tempnam($tmpDir, 'wellcms-php-');
+                try {
+                    $tmpFile = tempnam($tmpDir, 'wellcms-php-');
+                } catch (\ErrorException $e) {
+                    throw new \ErrorException(
+                        $e->getMessage() . " (PHP compile source: {$srcFile}; temporary directory: {$tmpDir})",
+                        $e->getCode(), $e->getSeverity(), $e->getFile(), $e->getLine(), $e
+                    );
+                }
                 if ($tmpFile === false || realpath(dirname($tmpFile)) !== realpath($tmpDir)) {
                     if (is_string($tmpFile) && is_file($tmpFile)) {
                         @unlink($tmpFile);
@@ -1273,7 +1281,14 @@ $content = preg_replace([
             throw new \RuntimeException("Unable to create compile cache directory: {$dir}");
         }
 
-        $temporary = tempnam($dir, '.wellcms-compile-');
+        try {
+            $temporary = tempnam($dir, '.wellcms-compile-');
+        } catch (\ErrorException $e) {
+            throw new \ErrorException(
+                $e->getMessage() . " (compile target: {$path}; temporary directory: {$dir})",
+                $e->getCode(), $e->getSeverity(), $e->getFile(), $e->getLine(), $e
+            );
+        }
         if ($temporary === false || realpath(dirname($temporary)) !== realpath($dir)) {
             if (is_string($temporary) && is_file($temporary)) {
                 @unlink($temporary);

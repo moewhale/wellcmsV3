@@ -41,6 +41,17 @@ interface DatabaseInterface
     public function insert(string $table, array $data);
     public function bulkInsert(string $table, array $rows): int;
 
+    /**
+     * 原子插入单行；冲突时仅将 updateColumns 指定列写成 data 中的值。
+     * uniqueBy 必须是实际主键/唯一键的完整列；MySQL 使用表内所有唯一键判断冲突，
+     * PostgreSQL/SQLite 仅使用指定键。调用方必须保证其他唯一键不会指向另一条记录。
+     * 支持 MySQL 5.5.6+、PostgreSQL、SQLite 3.24+；SQLite 整数遵循原生有符号 64 位范围。
+     * 不支持的方言在执行前抛异常。
+     * 返回原生 PDO 受影响行数，不返回 ID；具体数值取决于数据库版本和
+     * CLIENT_FOUND_ROWS 等连接设置，不能据此统一判断插入/更新/未变化。失败抛异常。
+     */
+    public function upsert(string $table, array $data, array $uniqueBy, array $updateColumns): int;
+
     public function queryOne(string $table, array $where = [], array $orderBy = [], array $fields = ['*']): array;
     public function query(string $table, array $where = [], array $orderBy = [], int $page = 1, int $pageSize = 20, string $key = '', array $fields = ['*']): array;
     /**

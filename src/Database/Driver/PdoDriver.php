@@ -542,6 +542,27 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
     }
 
     /**
+     * 单行原子插入/冲突更新；返回原生受影响行数，沿用主库、分片、事务和绑定链。
+     */
+    public function upsert(string $table, array $data, array $uniqueBy, array $updateColumns): int
+    {
+        $shard = $this->resolveShard($table, $data);
+        $this->resetBuilder();
+        [$sql, $params] = $this->builder->from($this->prefix . $table)
+            ->upsert($data, $uniqueBy, $updateColumns)->toSqlWithBindings();
+        $pdo = $this->connect('master', $shard);
+        try {
+            $stmt = $this->logAndExec($pdo, $sql, $params);
+            $result = (int)$stmt->rowCount();
+            $stmt = null;
+            $this->maybeCollectGarbage();
+            return $result;
+        } finally {
+            $this->release($pdo);
+        }
+    }
+
+    /**
      * 查询单行
      */
     public function queryOne(string $table, array $where = [], array $orderBy = [], array $fields = ['*']): array
@@ -1025,8 +1046,8 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
 
                 if (strcasecmp($key, $index) === 0) return true;
 
-                // PostgreSQL 专用：适配方言层自动添加的 idx_{table}_ 前缀
-                if ($this->dbConfig['driver'] === 'pgsql') {
+                // PostgreSQL/SQLite：适配方言层自动添加的 idx_{table}_ 前缀
+                if (in_array($this->dbConfig['driver'], ['pgsql', 'sqlite'], true)) {
                     if (strcasecmp($key, "idx_{$fullTable}_{$index}") === 0) return true;
                 }
             }

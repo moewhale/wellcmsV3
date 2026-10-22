@@ -175,7 +175,7 @@ CREATE TABLE `well_kv` (
   # `expiry` int(11) UNSIGNED NOT NULL default '0',		-- 过期时间
   PRIMARY KEY(`key`)
 ) ENGINE=InnoDB DEFAULT charSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-INSERT INTO `well_kv` (`key`, `value`) VALUES ('setting', '{"config":{"name":"WellCMS","version":"3.0.1","official_version":"3.0.1","last_version":"0","version_date":"0","upgrade":"0","installed":0},"picture_size":{"width":400,"height":280},"setting":{"review_threads":0,"review_comments":0,"thumbnail_on":1,"save_image_on":1},"shield":[],"pinned_home":[],"pinned_global":[],"themes":{"theme":"","children":[]}}');
+INSERT INTO `well_kv` (`key`, `value`) VALUES ('setting', '{"config":{"name":"WellCMS","version":"3.0.2","official_version":"3.0.2","last_version":"0","version_date":"0","upgrade":"0","installed":0},"picture_size":{"width":400,"height":280},"setting":{"review_threads":0,"review_comments":0,"thumbnail_on":1,"save_image_on":1},"shield":[],"pinned_home":[],"pinned_global":[],"themes":{"theme":"","children":[]}}');
 
 -- 缓存表 用来保存临时数据
 DROP TABLE IF EXISTS `well_cache`;

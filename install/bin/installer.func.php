@@ -259,8 +259,17 @@ function execute_install($data): array
                 '/\bBIGINT\s*(\(\d+\))?\s+UNSIGNED\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i' => ' BIGSERIAL ',
                 '/\bBIGINT\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'                     => ' BIGSERIAL ',
                 '/\bINT\s*(\(\d+\))?\s+UNSIGNED\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'    => ' SERIAL ',
-                '/\bINT\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'                        => ' SERIAL ',
+                '/\b(?:INT|INTEGER)\s*(\(\d+\))?\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i'                        => ' SERIAL ',
                 '/\bINTEGER\s*(\(\d+\))?\s+UNSIGNED\s+NOT\s+NULL\s+AUTO_INCREMENT\b/i' => ' SERIAL ',
+
+                // 非自增无符号列先映射为足够容量的 PG 类型，再清理剩余 MySQL 属性
+                // 确保替换结果前后有空格，防止与 NOT NULL 粘连
+                '/\bBIGINT\s*(\(\d+\))?\s+UNSIGNED\b/i'   => ' NUMERIC(20,0) ',
+                '/\bINT\s*(\(\d+\))?\s+UNSIGNED\b/i'      => ' BIGINT ',
+                '/\bINTEGER\s*(\(\d+\))?\s+UNSIGNED\b/i'  => ' BIGINT ',
+                '/\bMEDIUMINT\s*(\(\d+\))?\s+UNSIGNED\b/i' => ' INTEGER ',
+                '/\bSMALLINT\s*(\(\d+\))?\s+UNSIGNED\b/i'  => ' INTEGER ',
+                '/\bTINYINT\s*(\(\d+\))?\s+UNSIGNED\b/i'   => ' SMALLINT ',
 
                 // MySQL 特有属性清理
                 '/\bUNSIGNED\b/i'            => ' ',
@@ -275,15 +284,6 @@ function execute_install($data): array
                 '/\bCOMMENT\s*=\s*\'.*?\'/i'  => ' ',
                 '/\bCOMMENT\s+\'.*?\'/i'      => ' ',
                 '/ON\s+UPDATE\s+CURRENT_TIMESTAMP/i' => ' ', // PgSQL 不支持列级自动更新，需剔除
-
-                // 无符号整数溢出保护 (关键修复：MySQL INT UNSIGNED -> Postgres INTEGER)
-                // 确保替换结果前后有空格，防止与 NOT NULL 粘连
-                '/\bBIGINT\s*(\(\d+\))?\s+UNSIGNED\b/i'   => ' NUMERIC(20) ',
-                '/\bINT\s*(\(\d+\))?\s+UNSIGNED\b/i'      => ' INTEGER ',
-                '/\bINTEGER\s*(\(\d+\))?\s+UNSIGNED\b/i'  => ' INTEGER ',
-                '/\bMEDIUMINT\s*(\(\d+\))?\s+UNSIGNED\b/i' => ' INTEGER ',
-                '/\bSMALLINT\s*(\(\d+\))?\s+UNSIGNED\b/i'  => ' INTEGER ',
-                '/\bTINYINT\s*(\(\d+\))?\s+UNSIGNED\b/i'   => ' SMALLINT ',
 
                 // 精确基础类型转换
                 '/\bBIGINT\b(\s*\(\d+\))?/i'      => ' BIGINT ',
@@ -317,7 +317,7 @@ function execute_install($data): array
 
                 // INET 网络地址类型原生支持包含操作符 (<<) 范围搜索
                 '/DATETIME/i'                => ' TIMESTAMP ',
-                '/TIMESTAMP\b/i'             => ' TIMESTAMP ',
+                '/\bTIMESTAMP\b/i'             => ' TIMESTAMP ',
                 '/\bYEAR\b/i'                => ' SMALLINT ',
 
                 '/\bCHAR\s*\((\d+)\)/i'      => ' VARCHAR($1) ',

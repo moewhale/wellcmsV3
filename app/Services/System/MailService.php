@@ -33,11 +33,19 @@ class MailService
      *                        - 'cc': 抄送地址 (数组或逗号分隔字符串)
      *                        - 'reply_to': 回复地址
      *                        - 'plain_text': 纯文本正文 (如果不提供则根据 body 自动提取)
+     *                        - 'message_id': 本次耐久邮件的固定 Message-ID
+     *                        - 'timeout_seconds': 显式单次 SMTP 操作超时，1..60；不传保持原 15 秒
+     *                        - 'redact_recipients': 不把收件地址写入错误诊断
      * @return array{status: string, message: string, detail: array}
      */
     public function send($to, string $subject, string $body, array $options = ['batch_mode' => 'separate']): array
     {
+        $recipientSecrets = [];
         try {
+            if (isset($options['message_id']) && (!is_string($options['message_id']) || !preg_match('/\A<[A-Za-z0-9._-]{1,128}@[A-Za-z0-9.-]{1,253}>\z/D', $options['message_id']))
+                || isset($options['timeout_seconds']) && (!is_int($options['timeout_seconds']) || $options['timeout_seconds'] < 1 || $options['timeout_seconds'] > 60)) {
+                return ['status' => 'error', 'message' => 'configuration_error', 'detail' => []];
+            }
             // 1. 加载 SMTP 配置
             $smtplist = include \App\Core\Compile::include(APP_PATH . 'config/Smtp.php');
             if (empty($smtplist)) {
@@ -47,6 +55,7 @@ class MailService
                 return ['status' => 'error', 'message' => 'configuration_error', 'detail' => []];
             }
             $recipients = $this->parseRecipients($to);
+            if (($options['redact_recipients'] ?? false) === true) $recipientSecrets = array_keys($recipients);
             if (empty($recipients)) {
                 return ['status' => 'error', 'message' => 'empty_recipients', 'detail' => []];
             }
@@ -77,6 +86,11 @@ class MailService
                         throw new \InvalidArgumentException('Invalid SMTP configuration');
                     }
                     $candidateMail = $this->initMailer($candidate);
+                    if (isset($options['message_id'])) $candidateMail->MessageID = $options['message_id'];
+                    if (isset($options['timeout_seconds'])) {
+                        $candidateMail->Timeout = $options['timeout_seconds'];
+                        $candidateMail->getSMTPInstance()->Timelimit = $options['timeout_seconds'];
+                    }
                     $candidateMail->Subject = $subject;
                     $candidateMail->Body = $body;
                     $candidateMail->AltBody = $options['plain_text'] ?? strip_tags(str_replace(['<br>', '<br/>', '</p>'], ["\n", "\n", "\n\n"], $body));
@@ -97,7 +111,7 @@ class MailService
                     $serverId = $candidateId;
                     break;
                 } catch (\Throwable $e) {
-                    $candidateMessage = $this->recordFailure($candidateMail, is_array($candidate) ? $candidate : [], $candidateId, $stage, $e);
+                    $candidateMessage = $this->recordFailure($candidateMail, is_array($candidate) ? $candidate : [], $candidateId, $stage, $e, $recipientSecrets);
                     if ($stage !== 'configuration' || $failureMessage === 'configuration_error') {
                         $failureMessage = $candidateMessage;
                     }
@@ -126,7 +140,7 @@ class MailService
                         $results['all'] = true;
                         $successCount = 1;
                     } catch (\Throwable $e) {
-                        $failureMessage = $this->recordFailure($mail, $smtp, $serverId, 'send', $e);
+                        $failureMessage = $this->recordFailure($mail, $smtp, $serverId, 'send', $e, $recipientSecrets);
                         $results['all'] = $failureMessage;
                         $mail->getSMTPInstance()->close();
                     }
@@ -148,7 +162,7 @@ class MailService
                             $successCount++;
                             $results[$email] = true;
                         } catch (\Throwable $e) {
-                            $failureMessage = $this->recordFailure($mail, $smtp, $serverId, 'send', $e);
+                            $failureMessage = $this->recordFailure($mail, $smtp, $serverId, 'send', $e, $recipientSecrets);
                             $results[$email] = $failureMessage;
                             // 下一位收件人由 PHPMailer 完整重连、协商和认证，不重投本次失败邮件。
                             $mail->getSMTPInstance()->close();
@@ -159,7 +173,7 @@ class MailService
                 try {
                     $mail->smtpClose();
                 } catch (\Throwable $e) {
-                    $this->recordFailure($mail, $smtp, $serverId, 'close', $e);
+                    $this->recordFailure($mail, $smtp, $serverId, 'close', $e, $recipientSecrets);
                     $mail->getSMTPInstance()->close();
                 }
             }
@@ -170,7 +184,7 @@ class MailService
                 'detail' => $results,
             ];
         } catch (\Throwable $e) {
-            $this->recordFailure(null, [], null, 'load', $e);
+            $this->recordFailure(null, [], null, 'load', $e, $recipientSecrets);
             return ['status' => 'error', 'message' => 'mail_send_failed', 'detail' => []];
         }
     }
@@ -210,7 +224,7 @@ class MailService
         return $mail;
     }
 
-    private function recordFailure(?\App\PHPMailer\PHPMailer $mail, array $smtp, $serverId, string $stage, \Throwable $e): string
+    private function recordFailure(?\App\PHPMailer\PHPMailer $mail, array $smtp, $serverId, string $stage, \Throwable $e, array $recipientSecrets): string
     {
         $transport = $mail !== null ? $mail->getSMTPInstance() : null;
         $diagnostics = [
@@ -228,7 +242,7 @@ class MailService
             $message = $authenticationFailed ? 'mail_authentication_failed' : 'mail_connection_failed';
         }
         // 仅记录错误快照；不记录正文，并遮蔽凭据及 AUTH 常用编码。
-        $secrets = [];
+        $secrets = $recipientSecrets;
         foreach (['username', 'password', 'dkim_passphrase'] as $key) {
             if (isset($smtp[$key]) && $smtp[$key] !== '') {
                 $secrets[] = (string)$smtp[$key];
