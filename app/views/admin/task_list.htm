@@ -100,6 +100,7 @@
 					</td>
 					<td class="px-6 py-4 text-gray-500 dark:text-gray-400 text-xs whitespace-nowrap">
 						<?php echo $item['retry_progress']; ?>
+						<?php if (!empty($item['owner_recovery_required'])) { ?><small>Owner recovery</small><?php } ?>
 					</td>
 					<td class="px-6 py-4 text-gray-500 dark:text-gray-400 text-xs whitespace-nowrap">
 						<?php echo $item['formatted_created_at']; ?>

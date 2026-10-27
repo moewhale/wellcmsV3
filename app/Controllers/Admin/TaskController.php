@@ -159,7 +159,7 @@ class TaskController extends BaseController
                 'pending' => $this->language->get('task_status_pending'),
                 'running' => $this->language->get('task_status_running'),
                 'success' => $this->language->get('task_status_success'),
-                'failed' => $this->language->get('task_status_failed'),
+                'failed' => $this->language->get('task_status_failed') . ' (Redis)',
                 'badge_waitlist' => $this->language->get('badge_waitlist'),
                 'badge_running' => $this->language->get('badge_running'),
                 'badge_healthy' => $this->language->get('badge_healthy'),
@@ -592,7 +592,8 @@ class TaskController extends BaseController
 
         if ($result['status'] === 'success') {
             return $this->successMessage(
-                $this->language->get('task_requeue_success', array('count' => $result['count'])),
+                $this->language->get('task_requeue_success', array('count' => $result['count']))
+                    . (!empty($result['blocked']) ? ' — ' . $result['msg'] : ''),
                 0
             );
         }
@@ -640,6 +641,10 @@ class TaskController extends BaseController
 
         // 1. Status Label & Class
         $task['status_label'] = $this->language->get(self::STATUS_LABEL_KEY_MAP[$status] ?? 'task_status_pending');
+        $task['owner_recovery_required'] = ($task['args']['retainFailed'] ?? false) === true;
+        if ($task['owner_recovery_required'] && $status === \Framework\Scheduler\Task::STATUS_FAILED) {
+            $task['status_label'] .= ' — restore in owning application';
+        }
         $task['status_class'] = self::STATUS_CLASS_MAP[$status] ?? 'bg-gray-100 text-gray-600 dark:bg-gray-900/30 dark:text-gray-400';
 
         // 2. Date Formatting
@@ -707,7 +712,7 @@ class TaskController extends BaseController
         }
 
         // 3. 重试按钮（失败）
-        if ((int)($task['status'] ?? -1) === \Framework\Scheduler\Task::STATUS_FAILED) {
+        if ((int)($task['status'] ?? -1) === \Framework\Scheduler\Task::STATUS_FAILED && empty($task['owner_recovery_required'])) {
             $baseClass = ($context === 'details')
                 ? 'ajax-post flex-1 sm:flex-none px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl shadow-lg shadow-blue-500/30 transition-all font-bold text-center'
                 : 'ajax-post text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 font-bold transition-colors';

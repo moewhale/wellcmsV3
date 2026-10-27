@@ -36,6 +36,15 @@ class Router
         self::addRoute('POST', $path, $handler, $meta, $middleware);
     }
 
+    /** 用户于2026-10-23授权补充原生方法；复用原注册链，不改变现有上传协议。 */
+    public static function put(string $path, $handler, array $meta = [], array $middleware = []): void{
+        self::addRoute('PUT', $path, $handler, $meta, $middleware);
+    }
+
+    public static function delete(string $path, $handler, array $meta = [], array $middleware = []): void{
+        self::addRoute('DELETE', $path, $handler, $meta, $middleware);
+    }
+
     /**
      * 路由分组
      * @param array $attributes ['prefix' => '/admin', 'middleware' => [], 'meta' => []]

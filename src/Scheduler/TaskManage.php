@@ -142,8 +142,8 @@ class TaskManage
                     }
                     // —— 检测结束 ——
 
-                    $this->cancelTask($taskId);
-                    $cancelled++;
+                    $result = $this->cancelTask($taskId);
+                    if ($result['status'] === 'success') $cancelled++;
                 }
                 if ($count > 0) {
                     // 本页最后一条的 BINARY(16) id 转 UUID 串，作为下一页游标
@@ -543,6 +543,8 @@ class TaskManage
     /** 取消任务（从主队列删除） */
     public function cancelTask(string $taskId): array
     {
+        $current = $this->retainedTask($taskId);
+        if ($current !== null && $current->status === Task::STATUS_FAILED) return $this->ownerRecoveryRequired();
         $this->queue->remove($taskId);
         return ['status' => 'success', 'taskId' => $taskId];
     }
@@ -550,6 +552,8 @@ class TaskManage
     /** 查询任务详情（HASH中或失败队列） */
     public function showTask(string $taskId): array
     {
+        $current = $this->retainedTask($taskId);
+        if ($current !== null) return ['status' => 'success', 'task' => $current->toArray()];
         // First try: task may be in active queue
         $raw = $this->redis->hGet('scheduler:queue:hash', $taskId);
         if ($raw) {
@@ -570,6 +574,7 @@ class TaskManage
     {
         if ($this->taskStorage !== null && method_exists($this->taskStorage, 'readStoredTask')) {
             $stored = $this->taskStorage->readStoredTask($taskId);
+            if ($stored !== null && $stored->retainsFailure()) return $this->ownerRecoveryRequired();
             if ($stored !== null && $stored->status === Task::STATUS_FAILED && !empty($stored->args['storageLifecycle'])) {
                 $stored->retryCount = 0;
                 $stored->status = Task::STATUS_PENDING;
@@ -583,6 +588,7 @@ class TaskManage
         $raw = $this->redis->hGet('scheduler:queue:hash', $taskId);
         if ($raw) {
             $task = Task::fromArray(json_decode($raw, true), false);
+            if ($task->retainsFailure()) return $this->ownerRecoveryRequired();
             $task->maxRetries = max($task->maxRetries, $task->retryCount + 1);
             $this->queue->requeue($task);
             return ['status' => 'success', 'taskId' => $taskId];
@@ -593,6 +599,7 @@ class TaskManage
         $failedData = $this->findInFailed($taskId);
         if ($failedData) {
             $task = Task::fromArray($failedData, false);
+            if ($task->retainsFailure()) return $this->ownerRecoveryRequired();
             $task->retryCount = 0;
             $task->status = Task::STATUS_PENDING;
             $task->scheduledAt = time();
@@ -602,6 +609,41 @@ class TaskManage
         }
 
         return ['status' => 'not_found'];
+    }
+
+    private function retainedTask(string $id): ?Task
+    {
+        if ($this->taskStorage === null || !method_exists($this->taskStorage, 'readStoredTask')) return null;
+        $task = $this->taskStorage->readStoredTask($id);
+        return $task !== null && $task->retainsFailure() ? $task : null;
+    }
+
+    private function ownerRecoveryRequired(): array
+    {
+        return ['status' => 'error', 'code' => 'TASK_OWNER_RECOVERY_REQUIRED', 'msg' => 'Restore retained tasks through their owning application with an audit.'];
+    }
+
+    /** 所属业务调用此入口，并在同一数据库事务写审计；失败预算及原 task ID 不变。 */
+    public function restoreRetainedTaskInTransaction(string $id, string $reference, int $retryCount): Task
+    {
+        if (!$this->isV2DualWriteActive() || $this->taskStorage === null
+            || !method_exists($this->taskStorage, 'restoreRetainedTaskInTransaction')) {
+            throw new \LogicException('Persistent owner recovery is unavailable');
+        }
+        $lockKey = self::TASK_LOCK_PREFIX . $id;
+        $token = $this->redis->lock($lockKey, 60);
+        if (!$token) throw new \RuntimeException('Task is still executing or recovering');
+        $release = function () use ($lockKey, $token): void { $this->redis->unlock($lockKey, $token); };
+        try {
+            return $this->taskStorage->restoreRetainedTaskInTransaction($id, $reference, $retryCount,
+                function (Task $task) use ($lockKey, $token): void {
+                    if (!$this->redis->renewLock($lockKey, $token, 60)) throw new \RuntimeException('Task recovery publication is unconfirmed');
+                    // 原恢复传输只发布，Pending 的权威记录已由所属审计事务提交。
+                    $this->redisQueue->restore($task);
+                    $this->redis->zRem('scheduler:dlq:max_retry', $task->id);
+                    $this->redis->zRem('scheduler:dlq:other', $task->id);
+                }, $release);
+        } catch (\Throwable $e) { $release(); throw $e; }
     }
 
     /** 死信列表（前 100 条） */
@@ -645,6 +687,11 @@ class TaskManage
             foreach ($this->taskStorage->retainedFailedTasks() as $item) $byId[$item['id']] = $item;
             $items = array_slice(array_values($byId), 0, 100);
         }
+        $items = array_values(array_filter($items, function ($item): bool {
+            if (($item['args']['retainFailed'] ?? false) !== true) return true;
+            $current = $this->retainedTask($item['id']);
+            return $current !== null && $current->status === Task::STATUS_FAILED;
+        }));
         return ['status' => 'success', 'items' => $items];
     }
 
@@ -652,15 +699,23 @@ class TaskManage
     public function requeueFailed(array $taskIds): array
     {
         $ok = 0;
+        $blocked = 0;
         foreach ($taskIds as $id) {
+            if ($this->retainedTask($id) !== null) { ++$blocked; continue; }
             $hit = $this->findInFailed($id);
             if (!$hit) continue;
             $task = Task::fromArray($hit, false);
+            if ($task->retainsFailure()) { ++$blocked; continue; }
             $task->retryCount = 0;
             $task->status = Task::STATUS_PENDING;
             $task->scheduledAt = time();
             $this->queue->push($task);
             $ok++;
+        }
+        if ($blocked > 0) {
+            $result = $this->ownerRecoveryRequired() + ['count' => $ok, 'blocked' => $blocked];
+            if ($ok > 0) $result['status'] = 'success';
+            return $result;
         }
         return ['status' => 'success', 'count' => $ok];
     }
@@ -811,10 +866,20 @@ class TaskManage
             }
         }
 
+        if (($status === 'failed' || $status === '') && $this->isV2DualWriteActive()
+            && $this->taskStorage !== null && method_exists($this->taskStorage, 'retainedFailedTasks')) {
+            $allTasks = array_merge($allTasks, $this->taskStorage->retainedFailedTasks());
+        }
+
         // 5. 按 ID 去重（同一条任务可能出现在多个队列中，保留第一个出现）
         $seen = [];
         $deduped = [];
         foreach ($allTasks as $task) {
+            if (($task['args']['retainFailed'] ?? false) === true) {
+                $current = $this->retainedTask($task['id']);
+                if ($current === null) continue;
+                $task = $current->toArray();
+            }
             $tid = $task['id'] ?? '';
             if ($tid === '' || isset($seen[$tid])) continue;
             $seen[$tid] = true;
@@ -1194,6 +1259,12 @@ class TaskManage
         $p['className'] = \Framework\Scheduler\Task::sanitizeClassName($p['className']);
 
         $args = isset($p['args']) ? (array)$p['args'] : [];
+        if (($args['retainFailed'] ?? false) === true) {
+            if (!$this->isV2DualWriteActive() || $this->taskStorage === null
+                || !method_exists($this->taskStorage, 'restoreRetainedTaskInTransaction')
+                || !method_exists($this->queue, 'isCurrentRetainedTask')) throw new \LogicException('Retained tasks require persistent scheduling');
+            $args['_recovery_ref'] = UuidHelper::generate(false);
+        }
         $p['args'] = \Framework\Scheduler\Task::sanitizeArgs($args);
 
         // 默认值（使用 Task 的 sanitize 方法保证一致性）

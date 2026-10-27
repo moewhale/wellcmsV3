@@ -137,7 +137,10 @@ class AuthController extends \App\Controllers\Base\BaseController
 
         $result = $this->userService->readByUsername($username);
         if ($signInByUsername) {
-            if (!empty($result)) return $this->errorMessage($this->language->get('username_is_in_use'), 'username');
+            if (!empty($result)) {
+                // hook app_Controllers_Frontend_AuthController_postSignUp_conflict.php
+                return $this->errorMessage($this->language->get('username_is_in_use'), 'username');
+            }
         } else {
             if ($result) $username = $username . date('ymdHis') . random_int(1000, 9999);
             $result = $this->userService->readByUsername($username);
@@ -147,26 +150,36 @@ class AuthController extends \App\Controllers\Base\BaseController
         }
 
         $result = $this->userService->readByEmail($email);
-        if (!empty($result)) return $this->errorMessage($this->language->get('email_is_in_use'), 'email');
+        if (!empty($result)) {
+            // hook app_Controllers_Frontend_AuthController_postSignUp_conflict.php
+            return $this->errorMessage($this->language->get('email_is_in_use'), 'email');
+        }
 
         // 邮件验证
         if ($this->appConfig['verify_email_on']) {
             $postCode = RequestUtils::param('code', '');
-            if (!$postCode) return $this->errorMessage($this->language->get('verification_code_is_empty'), 'code');
+            if (!$postCode) {
+                // hook app_Controllers_Frontend_AuthController_postSignUp_verification_failed.php
+                return $this->errorMessage($this->language->get('verification_code_is_empty'), 'code');
+            }
 
             $verificationService = $this->emailVerificationService();
             if (!$verificationService->verify($this->userSession, 'verifyEmail', $email, $postCode)) {
+                // hook app_Controllers_Frontend_AuthController_postSignUp_verification_failed.php
                 return $this->errorMessage($this->language->get('comparison_data_error'), 8);
             }
         }
 
         // hook app_Controllers_Frontend_AuthController_postSignUp_middle.php
 
+        $passwordHash = null;
+        // hook app_Controllers_Frontend_AuthController_postSignUp_password_hash.php
+        if ($passwordHash === null) $passwordHash = password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]);
         $time = time();
         $userData = [
             'username' => $username,
             'email' => $email,
-            'password' => password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]),
+            'password' => $passwordHash,
             'salt' => SafeHelper::randomStr(16),
             'group_id' => 101,
             'create_ip' => $this->ip,
@@ -306,7 +319,10 @@ class AuthController extends \App\Controllers\Base\BaseController
             }
 
             $user = $this->userService->readByEmail($email);
-            if (empty($user)) return $this->errorMessage($this->language->get('email_not_exists'), 'email');
+            if (empty($user)) {
+                // hook app_Controllers_Frontend_AuthController_postSignIn_failure.php
+                return $this->errorMessage($this->language->get('email_not_exists'), 'email');
+            }
 
         }
 
@@ -330,7 +346,10 @@ class AuthController extends \App\Controllers\Base\BaseController
                 // hook app_Controllers_Frontend_AuthController_postSignIn_username_before.php
 
                 $user = $this->userService->readByUsername($username);
-                if (empty($user)) return $this->errorMessage($this->language->get('username_not_exists'), 'username');
+                if (empty($user)) {
+                    // hook app_Controllers_Frontend_AuthController_postSignIn_failure.php
+                    return $this->errorMessage($this->language->get('username_not_exists'), 'username');
+                }
 
                 // hook app_Controllers_Frontend_AuthController_postSignIn_username_after.php
             } else {
@@ -343,7 +362,10 @@ class AuthController extends \App\Controllers\Base\BaseController
                 // hook app_Controllers_Frontend_AuthController_postSignIn_email_before.php
 
                 $user = $this->userService->readByEmail($username);
-                if (empty($user)) return $this->errorMessage($this->language->get('email_not_exists'), 'username');
+                if (empty($user)) {
+                    // hook app_Controllers_Frontend_AuthController_postSignIn_failure.php
+                    return $this->errorMessage($this->language->get('email_not_exists'), 'username');
+                }
 
                 // hook app_Controllers_Frontend_AuthController_postSignIn_email_after.php
             }
@@ -355,7 +377,10 @@ class AuthController extends \App\Controllers\Base\BaseController
 
             // hook app_Controllers_Frontend_AuthController_postSignIn_username_center.php
 
-            if (false === password_verify($password, $user['password'])) return $this->errorMessage($this->language->get('incorrect_password'), 'password');
+            if (false === password_verify($password, $user['password'])) {
+                // hook app_Controllers_Frontend_AuthController_postSignIn_failure.php
+                return $this->errorMessage($this->language->get('incorrect_password'), 'password');
+            }
         }
 
         $this->userSession->delete('user_token');
@@ -419,7 +444,10 @@ class AuthController extends \App\Controllers\Base\BaseController
         // 注册账号，发送验证码需要检查邮箱是否被使用
         if ('verifyEmail' === $key) {
             $result = $this->userService->readByEmail($email);
-            if (!empty($result)) return $this->errorMessage($this->language->get('email_is_in_use'), 'email');
+            if (!empty($result)) {
+                // hook app_Controllers_Frontend_AuthController_postVerifyCode_ineligible.php
+                return $this->errorMessage($this->language->get('email_is_in_use'), 'email');
+            }
         }
 
         // 验证原始邮箱
@@ -439,13 +467,19 @@ class AuthController extends \App\Controllers\Base\BaseController
             if (empty($user['id'])) return $this->errorMessage($this->language->get('please_sign_in'), 8, $this->urlGenerator->url('auth/signIn'));
 
             $result = $this->userService->readByEmail($email);
-            if (!empty($result)) return $this->errorMessage($this->language->get('email_is_in_use'), 'email');
+            if (!empty($result)) {
+                // hook app_Controllers_Frontend_AuthController_postVerifyCode_ineligible.php
+                return $this->errorMessage($this->language->get('email_is_in_use'), 'email');
+            }
         }
 
         // 找回密码或验证码登录，发送验证码需要检查邮箱是否存在
         if (in_array($key, ['resetPassword', 'codeSignIn'])) {
             $result = $this->userService->readByEmail($email);
-            if (empty($result)) return $this->errorMessage($this->language->get('email_not_exists'), 'email');
+            if (empty($result)) {
+                // hook app_Controllers_Frontend_AuthController_postVerifyCode_ineligible.php
+                return $this->errorMessage($this->language->get('email_not_exists'), 'email');
+            }
         }
 
         // hook app_Controllers_Frontend_AuthController_postVerifyCode_before.php
@@ -465,10 +499,11 @@ class AuthController extends \App\Controllers\Base\BaseController
         $subject = $this->language->get('email_verification_code', ['name' => $this->appConfig['sitename']]);
         $body = $this->language->get('verification_code_body', ['website' => $this->appConfig['sitename'], 'code' => $code]);
 
+        $verificationMailOptions = [];
         // hook app_Controllers_Frontend_AuthController_postVerifyCode_end.php
 
         $mailService = $this->container->get(\App\Services\System\MailService::class);
-        $result = $mailService->send($email, $subject, $body);
+        $result = $mailService->send($email, $subject, $body, $verificationMailOptions);
 
         if (($result['status'] ?? '') !== 'success') {
             $mailMessage = (string)($result['message'] ?? 'configuration_error');
@@ -479,6 +514,7 @@ class AuthController extends \App\Controllers\Base\BaseController
 
         $verificationService->store($this->userSession, $key, $email, $code);
 
+        // hook app_Controllers_Frontend_AuthController_postVerifyCode_success.php
         return $this->successMessage($this->language->get('send_success'), 0);
     }
 
@@ -541,6 +577,7 @@ class AuthController extends \App\Controllers\Base\BaseController
             ],
         ];
 
+        // hook app_Controllers_Frontend_AuthController_resetPassword_end.php
         $routeMeta = $request->getAttributes()['_route_meta'] ?? ['layout' => 'reset_password'];
         return $this->render($routeMeta['layout'], $data, false);
     }
@@ -548,6 +585,7 @@ class AuthController extends \App\Controllers\Base\BaseController
     // 重置密码 - 步骤1：身份验证
     public function postResetVerify(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
+        // hook app_Controllers_Frontend_AuthController_postResetVerify_start.php
         if (!$this->isPasswordResetEnabled()) return $this->errorMessage($this->language->get('not_enabled'), 9, '/');
 
         $email = RequestUtils::param('email', '');
@@ -557,14 +595,21 @@ class AuthController extends \App\Controllers\Base\BaseController
         if (!$code) return $this->errorMessage($this->language->get('verification_code_is_empty'), 'code');
 
         $user = $this->userService->readByEmail($email);
-        if (empty($user)) return $this->errorMessage($this->language->get('email_not_exists'), 'email');
+        if (empty($user)) {
+            // hook app_Controllers_Frontend_AuthController_postResetVerify_failure.php
+            return $this->errorMessage($this->language->get('email_not_exists'), 'email');
+        }
 
         // 禁止封禁用户找回密码
-        if (6 == $user['group_id']) return $this->errorMessage($this->language->get('user_is_banned'), 6);
+        if (6 == $user['group_id']) {
+            // hook app_Controllers_Frontend_AuthController_postResetVerify_failure.php
+            return $this->errorMessage($this->language->get('user_is_banned'), 6);
+        }
 
         // 验证验证码
         $verificationService = $this->emailVerificationService();
         if (!$verificationService->verify($this->userSession, 'resetPassword', $email, $code)) {
+            // hook app_Controllers_Frontend_AuthController_postResetVerify_failure.php
             return $this->errorMessage($this->language->get('comparison_data_error'), 8);
         }
 
@@ -578,6 +623,7 @@ class AuthController extends \App\Controllers\Base\BaseController
     // 重置密码 - 步骤2：设置新密码
     public function postResetPassword(\Framework\Http\Interfaces\ServerRequestInterface $request): ResponseInterface
     {
+        // hook app_Controllers_Frontend_AuthController_postResetPassword_start.php
         if (!$this->isPasswordResetEnabled()) return $this->errorMessage($this->language->get('not_enabled'), 9, '/');
 
         $verificationService = $this->emailVerificationService();
@@ -599,13 +645,17 @@ class AuthController extends \App\Controllers\Base\BaseController
         }
 
         // 更新密码并增加登录版本（全端退出现有 Token）
+        $passwordHash = null;
+        // hook app_Controllers_Frontend_AuthController_postResetPassword_password_hash.php
+        if ($passwordHash === null) $passwordHash = password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]);
         $updateData = [
-            'password' => password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]),
+            'password' => $passwordHash,
             'login_version+' => 1,
             'salt' => SafeHelper::randomStr(16),
         ];
 
         if ($this->userService->update($userId, $updateData)) {
+            // hook app_Controllers_Frontend_AuthController_postResetPassword_committed.php
             $verificationService->clearResetAuthorization($this->userSession);
             return $this->successMessage($this->language->get('save_success'), 0, $this->urlGenerator->url('auth/signIn'));
         }

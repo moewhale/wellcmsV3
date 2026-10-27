@@ -9,6 +9,7 @@ class CacheModel extends BaseModel
 
     public function flushAll()
     {
-        return $this->db->truncate('cache');
+        $this->db->truncate('cache');
+        return true;
     }
 }

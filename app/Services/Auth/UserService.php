@@ -351,7 +351,11 @@ class UserService
                 $update['login_ip'] = $ip2bin;
             }
 
-            $result = $this->getModel()->update(['id' => $userId], $update);
+            // 2026-10-23 授权的持久化扩展点；未接管时保持原写入与缓存顺序。
+            // 上传/附件依赖不得在此改写；bulkUpdate、头像与存储链保持原实现。
+            $result = null;
+            // hook app_Services_UserService_update_persist.php
+            if ($result === null) $result = $this->getModel()->update(['id' => $userId], $update);
             if ($result === 0) throw new BusinessException('UserService -> update(): update failed');
 
             // 强一致性要求：更新 DB 后必须删除缓存

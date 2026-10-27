@@ -326,6 +326,18 @@ class Task
             return [];
         }
 
+        // 显式选用的失败留存元数据；不改变既有 storageLifecycle 合同。
+        if (array_key_exists('retainFailed', $args) && !is_bool($args['retainFailed'])) {
+            throw new \InvalidArgumentException('retainFailed must be boolean');
+        }
+        if (($args['retainFailed'] ?? false) === true) {
+            if (!empty($args['storageLifecycle']) || !is_string($args['_recovery_ref'] ?? null)
+                || !preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/D', $args['_recovery_ref'])
+                || json_encode($args, JSON_UNESCAPED_UNICODE) === false) {
+                throw new \InvalidArgumentException('Invalid retained task identity');
+            }
+        }
+
         // 限制参数大小
         $jsonSize = strlen(json_encode($args, JSON_UNESCAPED_UNICODE));
         if ($jsonSize > 4096) { // 4KB限制
@@ -333,6 +345,11 @@ class Task
         }
 
         return $args;
+    }
+
+    public function retainsFailure(): bool
+    {
+        return ($this->args['retainFailed'] ?? false) === true;
     }
 
     public static function sanitizePriority(int $priority): int

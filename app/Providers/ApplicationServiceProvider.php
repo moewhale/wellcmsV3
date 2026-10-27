@@ -226,17 +226,53 @@ class ApplicationServiceProvider implements \Framework\Providers\ServiceProvider
             true
         );
 
-        // PartitionRegistry
+        // PartitionRegistry：仅冷发现读取被动结构声明，不加载插件代码或按启用状态过滤。
         $container->bind(
             \Framework\Database\Partition\PartitionRegistry::class,
             function ($c) {
                 $dialect = $c->get(
                     \Framework\Database\Partition\PartitionDialectInterface::class
                 );
+                $declaredConfigProvider = static function (): array {
+                    $files = glob(APP_PATH . 'plugins/*/config.json');
+                    if ($files === false) throw new \RuntimeException('Partition manifest discovery failed');
+                    $declared = [];
+                    foreach ($files as $file) {
+                        $json = file_get_contents($file);
+                        if ($json === false || trim($json) === '') {
+                            throw new \RuntimeException('Partition manifest is unreadable: ' . $file);
+                        }
+                        $manifest = \Framework\Utils\SecurityHelper::jsonDecode($json);
+                        if (json_last_error() !== JSON_ERROR_NONE) {
+                            throw new \RuntimeException('Partition manifest JSON is invalid: ' . $file);
+                        }
+                        if (!array_key_exists('partitions', $manifest)) continue;
+                        if (!is_array($manifest['partitions'])) {
+                            throw new \RuntimeException('Partition declarations must be a table map: ' . $file);
+                        }
+                        foreach ($manifest['partitions'] as $table => $args) {
+                            if (!is_string($table) || $table === '' || isset($declared[$table])
+                                || !is_array($args) || array_keys($args) !== [0, 1, 2, 3, 4, 5]) {
+                                throw new \RuntimeException('Invalid or duplicate partition declaration: ' . $file);
+                            }
+                            $config = new \Framework\Database\Partition\PartitionConfig($table, ...$args);
+                            if ($config->partitionColumn === ''
+                                || !in_array($config->period, ['quarter', 'month'], true)
+                                || $config->advanceCount < 1 || $config->retention < 0 || $config->subPartitions < 0
+                                || $config->subPartitionColumn === ''
+                                || (($config->subPartitionColumn === null) !== ($config->subPartitions === 0))) {
+                                throw new \RuntimeException('Invalid partition policy: ' . $table . ' in ' . $file);
+                            }
+                            $declared[$table] = $config;
+                        }
+                    }
+                    return $declared;
+                };
                 return new \Framework\Database\Partition\PartitionRegistry(
                     $c->get(\Framework\Cache\Interfaces\CacheInterface::class),
                     $c->get(\Framework\Database\Interfaces\DatabaseInterface::class),
-                    $dialect
+                    $dialect,
+                    $declaredConfigProvider
                 );
             },
             false,

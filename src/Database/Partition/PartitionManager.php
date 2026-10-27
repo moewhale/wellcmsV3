@@ -260,6 +260,13 @@ class PartitionManager
 
         $startTime = microtime(true);
         $lockToken = $this->cache->lock(self::LOCK_KEY, 300);
+        if (!$lockToken) {
+            $result->errors = 1;
+            $result->errorDetails[] = array('table' => $table, 'error' => 'Partition maintenance lock not acquired');
+            $result->executionMs = (microtime(true) - $startTime) * 1000;
+            $this->logger->warning('PartitionMaintainOne skipped: lock not acquired', array('table' => $table));
+            return $result;
+        }
 
         $pdo = null;
         try {

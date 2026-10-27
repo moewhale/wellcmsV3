@@ -370,7 +370,10 @@ class MyController extends \App\Controllers\Base\BaseController
 
         // hook app_Controllers_Frontend_MyController_postPassword_before.php
 
-        $password = password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]);
+        $passwordHash = null;
+        // hook app_Controllers_Frontend_MyController_postPassword_password_hash.php
+        if ($passwordHash === null) $passwordHash = password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]);
+        $password = $passwordHash;
 
         $result = $this->userService->update((int)$user['id'], ['password' => $password, 'login_version' => (int)$user['login_version'] + 1]);
         if ($result === 0) return $this->errorMessage($this->language->get('modify_failed'), -1);
@@ -496,6 +499,7 @@ class MyController extends \App\Controllers\Base\BaseController
         $code = RequestUtils::param('code', '');
         if (!$code) return $this->errorMessage($this->language->get('verification_code_is_empty'), 'code');
 
+        // hook app_Controllers_Frontend_MyController_postVerifyOriginalEmail_before.php
         $sessionData = $this->userSession->get('originalEmail', []);
         $sess_email = $sessionData['email'] ?? '';
         $sess_email && $sess_email = strtolower($sess_email);

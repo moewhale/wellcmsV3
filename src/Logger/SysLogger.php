@@ -21,9 +21,9 @@ class SysLogger implements \Framework\Logger\LoggerInterface
 
     public function __construct(array $loggerConfig)
     {
-        $syslog = $loggerConfig['syslog'] ?? [];
-        $this->ident    = $syslog['ident'] ?? 'wellcms';
-        $this->facility = $syslog['facility'] ?? LOG_USER;
+        // Provider 已选取 syslog 通道配置，与 FileLogger 一样直接接收该子配置。
+        $this->ident    = $loggerConfig['ident'] ?? 'wellcms';
+        $this->facility = $loggerConfig['facility'] ?? LOG_USER;
         openlog($this->ident, LOG_ODELAY | LOG_PID, $this->facility);
     }
 

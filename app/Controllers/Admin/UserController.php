@@ -412,7 +412,10 @@ class UserController extends BaseController
             if (strlen($passwordPlain) < 6) return $this->errorMessage($this->language->get('password_length_error'), 'password');
 
             if (!password_verify($passwordPlain, $user['password'])) {
-                $update['password'] = password_hash($passwordPlain, \PASSWORD_BCRYPT, ['cost' => 12]);
+                $passwordHash = null;
+                // hook app_Controllers_Admin_UserController_postUpdate_password_hash.php
+                if ($passwordHash === null) $passwordHash = password_hash($passwordPlain, \PASSWORD_BCRYPT, ['cost' => 12]);
+                $update['password'] = $passwordHash;
                 $update['login_version'] = (int)($user['login_version'] ?? 0) + 1;
             }
         }

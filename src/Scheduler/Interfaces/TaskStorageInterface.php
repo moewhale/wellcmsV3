@@ -68,8 +68,9 @@ interface TaskStorageInterface
     /**
      * 删除任务（终态清理）
      *
-     * 任务到达终态（success/failed/cancelled）后从 MySQL 删除，
-     * 保持表内仅存待执行行，对齐权威副本设计意图。
+     * 默认在 success/failed/cancelled 后从 MySQL 删除。
+     * 显式 retainFailed 及既有 storageLifecycle 的 Failed 由其原恢复合同保留，
+     * 不能通过默认终态清理擦除；选用能力的存储提供相应的原子恢复方法。
      *
      * @param string $taskId
      */

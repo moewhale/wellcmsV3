@@ -273,6 +273,11 @@ class SQLiteGrammar implements GrammarInterface
                     $finalQueries[] = "CREATE {$unique}INDEX \"idx_{$index[1]}_{$index[3]}\" ON \"{$index[1]}\" ({$index[4]});";
                     continue;
                 }
+                // ALTER 使用逻辑索引名，与 CREATE/ADD 和 findIndex 的物理名称保持一致。
+                if (preg_match('/^ALTER\s+TABLE\s+"?(\w+)"?\s+DROP\s+(?:INDEX|KEY)\s+"?(\w+)"?\s*$/i', $q, $index)) {
+                    $finalQueries[] = "DROP INDEX \"idx_{$index[1]}_{$index[2]}\";";
+                    continue;
+                }
                 // 本轮不扩展 SQLite 原有 MODIFY/CHANGE 能力。
                 if (preg_match('/(MODIFY|CHANGE)/i', $q)) {
                     continue;

@@ -116,6 +116,11 @@ class CircuitBreakerQueue implements TaskQueueInterface
     // ── 以下方法直接透传 ──
 
     public function pop(): ?Task { return $this->inner->pop(); }
+    public function isCurrentRetainedTask(Task $task): bool
+    {
+        if (!method_exists($this->inner, 'isCurrentRetainedTask')) throw new \LogicException('Retained task persistence is unavailable');
+        return $this->inner->isCurrentRetainedTask($task);
+    }
     public function requeue(Task $task): void { $this->inner->requeue($task); }
     public function reschedule(Task $task): void { $this->inner->reschedule($task); }
     public function remove(string $taskId): void { $this->inner->remove($taskId); }

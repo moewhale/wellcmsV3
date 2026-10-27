@@ -5,8 +5,8 @@
 return [
     // 应用标识与版本
     'name' => 'WellCMS',
-    'version' => '3.0',
-    'static_version' => '?3.0',
+    'version' => '3.0.01',
+    'static_version' => '?3.0.01',
     'logo_mobile_url' => 'img/logo.png', // 手机 LOGO URL
     'logo_pc_url' => 'img/logo.png', // PC  LOGO URL
     'logo_water_url' => 'img/water-small.png', // 水印 LOGO URL

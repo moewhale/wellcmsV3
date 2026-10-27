@@ -10,7 +10,7 @@ namespace Framework\Logger;
 use Framework\Logger\LogLevel;
 
 /**
- * 异步文件日志（批量写入至内存缓冲，脚本末尾统一落盘）
+ * 文件日志：FPM 在请求结束时批量写出，CLI/Swoole 沿原 flush 及时写出。
  */
 class FileLogger implements \Framework\Logger\LoggerInterface
 {
@@ -40,6 +40,8 @@ class FileLogger implements \Framework\Logger\LoggerInterface
     public function log(string $level, string $message, array $context = []): void
     {
         $this->buffer[] = $this->formatter->format($level, $message, $context);
+        // 常驻 CLI/Swoole 不以单次请求结束退出进程，不能一直等待 shutdown。
+        if (PHP_SAPI === 'cli') $this->flush();
     }
 
     public function emergency(string $message, array $context = []): void
@@ -82,15 +84,18 @@ class FileLogger implements \Framework\Logger\LoggerInterface
     {
         if (empty($this->buffer)) return;
 
-        $logDir = dirname($this->logFile);
-        if (!is_dir($logDir)) {
-            @mkdir($logDir, 0755, true);
-        }
+        // 文件 I/O 可能让出协程；先移出本批，不能清掉期间其他请求新增的记录。
+        $buffer = $this->buffer;
+        $this->buffer = [];
 
         try {
+            $logDir = dirname($this->logFile);
+            if (!is_dir($logDir)) {
+                @mkdir($logDir, 0755, true);
+            }
             file_put_contents(
                 $this->logFile,
-                implode('', $this->buffer),
+                implode('', $buffer),
                 FILE_APPEND | LOCK_EX
             );
         } catch (\Throwable $e) {
@@ -99,10 +104,9 @@ class FileLogger implements \Framework\Logger\LoggerInterface
                 $this->logFile,
                 $e->getMessage()
             ));
-            foreach ($this->buffer as $line) {
+            foreach ($buffer as $line) {
                 error_log(trim($line));
             }
         }
-        $this->buffer = [];
     }
 }

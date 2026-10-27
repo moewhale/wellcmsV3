@@ -78,7 +78,17 @@ class RecoveryEngine
         $count = 0;
 
         foreach ($tasks as $task) {
+            $taskId = $task->id;
+            $lock = null;
             try {
+                if ($task->retainsFailure()) {
+                    // 与执行/人工恢复共用原 task ID 锁，锁内重读当前代，不能重发先前扫描到的旧消息。
+                    $lock = $this->redis->lock('scheduler:lock:task:' . $task->id, 60);
+                    if (!$lock) continue;
+                    if (!method_exists($this->storage, 'readStoredTask')) throw new \LogicException('Retained task storage is unavailable');
+                    $task = $this->storage->readStoredTask($task->id);
+                    if ($task === null || !$task->retainsFailure() || !in_array($task->status, [Task::STATUS_PENDING, Task::STATUS_RETRYING], true)) continue;
+                }
                 if (!$this->claimTask($task)) {
                     continue;
                 }
@@ -86,8 +96,10 @@ class RecoveryEngine
                 $count++;
             } catch (\Throwable $e) {
                 $this->logger->log('recoverAll: failed to restore task '
-                    . $task->id . ': ' . $e->getMessage(), 'ERROR');
+                    . $taskId . ': ' . $e->getMessage(), 'ERROR');
                 continue;
+            } finally {
+                if ($lock) $this->redis->unlock('scheduler:lock:task:' . $taskId, $lock);
             }
         }
 

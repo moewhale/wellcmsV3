@@ -99,6 +99,14 @@ class UriFactory implements \Framework\Http\Interfaces\UriFactoryInterface
             $normalized[$key] = $value;
         }
 
+        // 用户于2026-10-23授权修复原请求工厂：Swoole 将原始 path/query 分开保存。
+        // 只补齐 REQUEST_URI，复用后续原解析；不解码/重编码查询，不修改上传处理链。
+        $requestUri = $normalized['REQUEST_URI'] ?? '/';
+        $query = $normalized['QUERY_STRING'] ?? '';
+        if ($query !== '' && strpos($requestUri, '?') === false) {
+            $normalized['REQUEST_URI'] = $requestUri . '?' . $query;
+        }
+
         return $normalized;
     }
 

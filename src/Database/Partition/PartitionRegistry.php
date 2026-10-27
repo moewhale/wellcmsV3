@@ -21,7 +21,8 @@ use Framework\Cache\Interfaces\CacheInterface;
  * 设计原理：
  * - 不新增数据库表来存储注册信息（避免"DDL 管理 DDL"的递归）
  * - 注册信息本质上是编译时声明，非运行时数据
- * - 缓存丢失时通过 discoverExisting() 从 information_schema 自动恢复
+ * - 缓存丢失时通过 discoverExisting() 发现物理表，优先使用宿主提供的准确声明
+ * - 未提供声明的表保留原推断；物理目录本身无法恢复保留期限等政策
  *
  * PHP 7.2 兼容：不使用 typed properties / union types / named arguments。
  *
@@ -70,19 +71,25 @@ class PartitionRegistry
     /** @var PartitionDialectInterface */
     private $dialect;
 
+    /** @var callable|null 冷发现时返回 array<string, PartitionConfig>；不在构造/普通读取执行 */
+    private $declaredConfigProvider;
+
     /**
      * @param CacheInterface                 $cache
      * @param DatabaseInterface              $db
      * @param PartitionDialectInterface|null $dialect 分区方言（null 时自动检测）
+     * @param callable|null                 $declaredConfigProvider 宿主的被动声明来源
      */
     public function __construct(
         CacheInterface $cache,
         DatabaseInterface $db,
-        ?PartitionDialectInterface $dialect = null
+        ?PartitionDialectInterface $dialect = null,
+        ?callable $declaredConfigProvider = null
     ) {
         $this->cache = $cache;
         $this->db = $db;
         $this->dialect = $dialect ?? PartitionDialectFactory::createFromConnection($db);
+        $this->declaredConfigProvider = $declaredConfigProvider;
     }
 
     /**
@@ -142,7 +149,7 @@ class PartitionRegistry
 
     /**
      * 扫描 information_schema 发现存量 RANGE 分区表，
-     * 自动为其创建默认配置。
+     * 对尚未注册的真实表优先使用宿主声明，无声明时沿原默认推断。
      * 首次部署 PartitionManager 时用于接管现有分区表。
      *
      * @param string $prefix 表前缀（如 'well_'），用于 information_schema 匹配
@@ -208,6 +215,8 @@ class PartitionRegistry
 
         $count = 0;
         $all = $this->loadAll();
+        $provider = $this->declaredConfigProvider;
+        $declared = $provider === null || !$rows ? array() : $provider();
 
         // PDO 强制列名小写（PDO::CASE_LOWER），所有键名必须用小写
         $colTable = 'table_name';
@@ -228,6 +237,12 @@ class PartitionRegistry
 
             // 跳过已注册的表
             if (isset($all[$tableName])) {
+                continue;
+            }
+
+            if (isset($declared[$tableName])) {
+                $all[$tableName] = $declared[$tableName];
+                $count++;
                 continue;
             }
 

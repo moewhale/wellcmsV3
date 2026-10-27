@@ -153,6 +153,8 @@ class PluginController extends BaseController
                 'none' => $this->language->get('none'),
                 'search' => $this->language->get('search'),
                 'enter_keywords' => $this->language->get('enter_keywords'),
+                'previous' => $this->language->get('previous'),
+                'next' => $this->language->get('next'),
                 'plugin_enable_confirm_tip' => $this->language->get('plugin_enable_confirm_tip'),
                 'plugin_disable_confirm_tip' => $this->language->get('plugin_disable_confirm_tip'),
                 'plugin_install_confirm_tip' => $this->language->get('plugin_install_confirm_tip'),

@@ -169,93 +169,108 @@ class TaskExecutor
             return;
         }
 
-        // 标记任务进入运行状态（用于精确统计运行中任务）
-        $this->redis->zAdd('scheduler:running:zset', [time() => $task->id]);
-        // 记录 PID 与 token，用于孤儿锁清理；显式以 {pid}:{token} 格式存储，确保 cleanupOrphanLocks 能正确解析
-        $this->redis->hSet('scheduler:executor:pids', $task->id, posix_getpid() . ':' . $lockToken);
-
-        $startTime = microtime(true);
-        $success = false;
-        $errorMsg = '';
-
-        $this->log("Task {$task->id} starts executing, P={$task->priority}, R={$task->retryCount}");
-
-        // 在调用任务前仅释放属于当前 taskId 的 claim，确保自调度可安全续链。
-        if (!empty($task->dedupeKey)) {
-            $this->releaseDedupeClaim($task);
-        }
-
+        $retained = $task->retainsFailure();
         try {
-            // 判断是否需要子进程超时保护
-            $useTimeout = $task->timeout > 0 && php_sapi_name() === 'cli' && function_exists('pcntl_fork');
-            if ($useTimeout) {
-                $exitCode = $this->runWithTimeout($task, $lockKey, $lockToken);
-                if ($exitCode === 0) {
-                    $success = true;
-                } else {
-                    $errorMsg = $exitCode === 124 ? 'Task timeout' : "Process exit code: {$exitCode}";
-                    $task->error = $errorMsg;
-                }
-            } else {
-                $jobResult = $this->invokeCallback($task);
-                $success = $this->isSuccessfulJobResult($jobResult);
-                if (!$success) {
-                    $errorMsg = 'Job reported dispatch failure';
-                    $task->error = $errorMsg;
-                }
-            }
-        } catch (\Throwable $ex) {
-            $errorMsg = $ex->getMessage();
-            $task->error = $errorMsg;
+            // 失败恢复可复用 task ID；在释放 claim 和业务回调前排除旧恢复代/旧重试消息。
+            if ($retained && (!method_exists($this->queue, 'isCurrentRetainedTask') || !$this->queue->isCurrentRetainedTask($task))) return;
+
+            // 标记任务进入运行状态（用于精确统计运行中任务）
+            $this->redis->zAdd('scheduler:running:zset', [time() => $task->id]);
+            // 记录 PID 与 token，用于孤儿锁清理；显式以 {pid}:{token} 格式存储，确保 cleanupOrphanLocks 能正确解析
+            $this->redis->hSet('scheduler:executor:pids', $task->id, posix_getpid() . ':' . $lockToken);
+
+            $startTime = microtime(true);
             $success = false;
-        }
+            $errorMsg = '';
 
-        $elapsed = round(microtime(true) - $startTime, 3);
+            $this->log("Task {$task->id} starts executing, P={$task->priority}, R={$task->retryCount}");
 
-        // 无论成功失败，都必须触发回调，且参数必须正确
-        if ($success) {
-            $this->log("Task {$task->id} succeeded, {$elapsed}s");
-            $task->status = \Framework\Scheduler\Task::STATUS_SUCCESS;
-            $task->updatedAt = time();
+            // 在调用任务前仅释放属于当前 taskId 的 claim，确保自调度可安全续链。
+            if (!empty($task->dedupeKey)) {
+                $this->releaseDedupeClaim($task);
+            }
 
-            $this->queue->moveToSuccessQueue($task);
-            // 记录执行时间到Hash，用于统计平均执行时间
-            $this->redis->hSet('scheduler:execution_times', $task->id, (string)$elapsed);
-            // 设置TTL避免无限增长
-            $this->redis->expire('scheduler:execution_times', 259200); // 3 天
+            try {
+                // 判断是否需要子进程超时保护
+                $useTimeout = $task->timeout > 0 && php_sapi_name() === 'cli' && function_exists('pcntl_fork');
+                if ($useTimeout) {
+                    $exitCode = $this->runWithTimeout($task, $lockKey, $lockToken);
+                    if ($exitCode === 0) {
+                        $success = true;
+                    } else {
+                        $errorMsg = $exitCode === 124 ? 'Task timeout' : "Process exit code: {$exitCode}";
+                        $task->error = $errorMsg;
+                    }
+                } else {
+                    $jobResult = $this->invokeCallback($task);
+                    $success = $this->isSuccessfulJobResult($jobResult);
+                    if (!$success) {
+                        $errorMsg = 'Job reported dispatch failure';
+                        $task->error = $errorMsg;
+                    }
+                }
+            } catch (\Throwable $ex) {
+                $errorMsg = $ex->getMessage();
+                $task->error = $errorMsg;
+                $success = false;
+            }
 
-            // 成功：传递 true
-            $this->triggerCallback($task, true, $elapsed, '');
-        } else {
-            $this->log("Task {$task->id} failed, {$elapsed}s, {$errorMsg}", 'WARNING');
-            // 失败：传递 false
-            $this->triggerCallback($task, false, $elapsed, $errorMsg);
+            $elapsed = round(microtime(true) - $startTime, 3);
 
-            // 失败重试逻辑
-            if ($task->retryCount < $task->maxRetries) {
-                $task->status = \Framework\Scheduler\Task::STATUS_RETRYING;
-                // 指数退避
-                $base = max(1, $task->retryDelay ?: 1);
-                $cap  = 3600;
-                $exp  = min($cap, $base * (1 << min($task->retryCount, 10)));
-                $jitter = random_int(0, (int)($exp * 0.25));
-                $task->scheduledAt = time() + $exp + $jitter;
-                $this->queue->requeue($task);
+            // 无论成功失败，都必须触发回调，且参数必须正确
+            if ($success) {
+                $this->log("Task {$task->id} succeeded, {$elapsed}s");
+                $task->status = \Framework\Scheduler\Task::STATUS_SUCCESS;
+                $task->updatedAt = time();
+
+                $this->queue->moveToSuccessQueue($task);
+                // 记录执行时间到Hash，用于统计平均执行时间
+                $this->redis->hSet('scheduler:execution_times', $task->id, (string)$elapsed);
+                // 设置TTL避免无限增长
+                $this->redis->expire('scheduler:execution_times', 259200); // 3 天
+
+                // 成功：传递 true
+                $this->triggerCallback($task, true, $elapsed, '');
             } else {
-                $task->status = \Framework\Scheduler\Task::STATUS_FAILED;
-                $this->log("Task {$task->id} has reached the maximum number of retries and is moved to the failed queue.", 'WARNING');
-                $this->queue->moveToFailedQueue($task);
+                $this->log("Task {$task->id} failed, {$elapsed}s, {$errorMsg}", 'WARNING');
+                // 失败：传递 false
+                $this->triggerCallback($task, false, $elapsed, $errorMsg);
+
+                // 失败重试逻辑
+                if ($task->retryCount < $task->maxRetries) {
+                    $task->status = \Framework\Scheduler\Task::STATUS_RETRYING;
+                    // 指数退避
+                    $base = max(1, $task->retryDelay ?: 1);
+                    $cap  = 3600;
+                    $exp  = min($cap, $base * (1 << min($task->retryCount, 10)));
+                    $jitter = random_int(0, (int)($exp * 0.25));
+                    $task->scheduledAt = time() + $exp + $jitter;
+                    $this->queue->requeue($task);
+                } else {
+                    $task->status = \Framework\Scheduler\Task::STATUS_FAILED;
+                    $this->log("Task {$task->id} has reached the maximum number of retries and is moved to the failed queue.", 'WARNING');
+                    $this->queue->moveToFailedQueue($task);
+                }
+            }
+
+            if (!$retained) {
+                // 原子释放锁
+                $this->redis->unlock($lockKey, $lockToken);
+
+                // 清理运行状态标记
+                $this->redis->zRem('scheduler:running:zset', $task->id);
+                $this->redis->hDel('scheduler:executor:pids', $task->id);
+            }
+
+            // 幂等锁已在 invokeCallback 前释放，此处不再重复删除
+        } finally {
+            if ($retained) {
+                try {
+                    $this->redis->zRem('scheduler:running:zset', $task->id);
+                    $this->redis->hDel('scheduler:executor:pids', $task->id);
+                } finally { $this->redis->unlock($lockKey, $lockToken); }
             }
         }
-
-        // 原子释放锁
-        $this->redis->unlock($lockKey, $lockToken);
-
-        // 清理运行状态标记
-        $this->redis->zRem('scheduler:running:zset', $task->id);
-        $this->redis->hDel('scheduler:executor:pids', $task->id);
-
-        // 幂等锁已在 invokeCallback 前释放，此处不再重复删除
     }
 
     private function releaseDedupeClaim(\Framework\Scheduler\Task $task): void
@@ -342,6 +357,14 @@ class TaskExecutor
             // 降级直跑（无超时保护）
             $this->invokeCallback($task);
             return 0;
+        }
+
+        // 上传保护：仅隔离原任务fork边界连接，不改变上传、附件或清理合同。
+        // 仅在原fork边界释放已创建的阻塞PDO池，父子进程随后沿原池独立建连。
+        $database = $this->container->getInstances()[\Framework\Database\Interfaces\DatabaseInterface::class] ?? null;
+        if ($database instanceof \Framework\Database\ProxyDriver
+            && $database->pool instanceof \Framework\Database\Pool\FpmConnectionPool) {
+            $database->pool->closeAll();
         }
 
         $pid = pcntl_fork();
@@ -478,10 +501,12 @@ class TaskExecutor
 
             $parameters = $reflectionMethod->getParameters();
             $validArgs  = [];
+            $callbackArgs = $task->args;
+            if ($task->retainsFailure()) unset($callbackArgs['retainFailed'], $callbackArgs['_recovery_ref']);
 
             // 检查是否为关联数组 (WellCMS 推荐标准)
             $isAssoc = false;
-            foreach ($task->args as $k => $v) {
+            foreach ($callbackArgs as $k => $v) {
                 if (is_string($k)) {
                     $isAssoc = true;
                     break;
@@ -496,7 +521,7 @@ class TaskExecutor
                     $paramNames[$p->getName()] = true;
                 }
 
-                foreach ($task->args as $key => $value) {
+                foreach ($callbackArgs as $key => $value) {
                     if (is_int($key) || isset($paramNames[$key])) {
                         $validArgs[$key] = $value;
                     }
@@ -506,13 +531,13 @@ class TaskExecutor
                 // 必须根据方法签名构造索引数组（位置参数）。
                 if (!$isAssoc) {
                     // 纯索引数组，直接透传
-                    $validArgs = array_values($task->args);
+                    $validArgs = array_values($callbackArgs);
                 } else {
                     // 关联数组，根据反射定义的顺序重新排序
                     foreach ($parameters as $p) {
                         $name = $p->getName();
-                        if (array_key_exists($name, $task->args)) {
-                            $validArgs[] = $task->args[$name];
+                        if (array_key_exists($name, $callbackArgs)) {
+                            $validArgs[] = $callbackArgs[$name];
                         } elseif ($p->isDefaultValueAvailable()) {
                             $validArgs[] = $p->getDefaultValue();
                         }

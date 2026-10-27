@@ -557,6 +557,9 @@ class PgSqlGrammar implements GrammarInterface
                         // MySQL: ADD COLUMN `col` INT DEFAULT 0
                         // PgSQL: ADD COLUMN "col" INT DEFAULT 0
                         $finalQueries[] = str_replace('`', '"', trim($q, " ;")) . ';';
+                    } elseif ($action === 'DROP' && preg_match('/^(?:INDEX|KEY)\s+["`]?(\w+)["`]?\s*$/i', $body, $indexMatch)) {
+                        // 沿 CREATE/ADD 和 findIndex 的同一物理索引命名转换。
+                        $finalQueries[] = "DROP INDEX \"idx_{$tableName}_{$indexMatch[1]}\";";
                     } elseif ($action === 'DROP') {
                         // DROP COLUMN col
                         // MySQL: DROP COLUMN `col`

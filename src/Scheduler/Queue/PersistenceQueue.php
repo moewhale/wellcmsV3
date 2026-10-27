@@ -73,6 +73,13 @@ class PersistenceQueue implements TaskQueueInterface
         return method_exists($this->storage, 'isSupersededTask') && $this->storage->isSupersededTask($task);
     }
 
+    /** 执行器在原任务锁内调用；装饰器保留这一持久身份核验能力。 */
+    public function isCurrentRetainedTask(Task $task): bool
+    {
+        if (!method_exists($this->storage, 'isCurrentRetainedTask')) throw new \LogicException('Retained task storage is unavailable');
+        return $this->storage->isCurrentRetainedTask($task);
+    }
+
     private function publishRegistered(Task $task): void
     {
         $this->inner->push($task);
@@ -122,6 +129,18 @@ class PersistenceQueue implements TaskQueueInterface
      */
     public function requeue(Task $task): void
     {
+        if ($task->retainsFailure()) {
+            $count = $task->retryCount + 1;
+            if (!$this->storage->updateRetainedTask($task, ['status' => Task::STATUS_RETRYING, 'retry_count' => $count,
+                'scheduled_at' => $task->scheduledAt, 'updated_at' => time(), 'error' => ''])) return;
+            $task->retryCount = $count; $task->status = Task::STATUS_RETRYING; $task->updatedAt = time(); $task->error = '';
+            // RedisTaskQueue::requeue 本身递增计数；沿原只发布能力避免同一重试计数两次。
+            $this->inner->restore($task);
+            if ($this->eventBus !== null) $this->eventBus->emit('task.retried', [
+                'id' => $task->id, 'class_name' => $task->className, 'retry_count' => $count, 'delay_s' => $task->retryDelay,
+            ]);
+            return;
+        }
         if ($this->isSuperseded($task)) {
             $this->inner->remove($task->id);
             return;
@@ -157,6 +176,11 @@ class PersistenceQueue implements TaskQueueInterface
      */
     public function reschedule(Task $task): void
     {
+        if ($task->retainsFailure()) {
+            if (!$this->storage->updateRetainedTask($task, ['status' => $task->status, 'scheduled_at' => $task->scheduledAt, 'updated_at' => time()])) return;
+            $this->inner->reschedule($task);
+            return;
+        }
         if ($this->isSuperseded($task)) {
             $this->inner->remove($task->id);
             return;
@@ -177,6 +201,15 @@ class PersistenceQueue implements TaskQueueInterface
      */
     public function remove(string $taskId): void
     {
+        if (method_exists($this->storage, 'readStoredTask')) {
+            $task = $this->storage->readStoredTask($taskId);
+            if ($task !== null && $task->retainsFailure()) {
+                if ($task->status === Task::STATUS_FAILED) throw new \LogicException('Retained failure requires owner recovery');
+                if (!$this->storage->updateRetainedTask($task, [], true)) throw new \RuntimeException('Retained task changed during cancellation');
+                $this->inner->remove($taskId);
+                return;
+            }
+        }
         // 先删 Redis（ZSET + HASH），再删 MySQL。
         // 不写 CANCELLED 状态：MySQL 只储存 pending 任务，终态任务不保留。
         // OS crash 在 Redis 删除后、MySQL 删除前 → MySQL 残留 pending 行，
@@ -202,14 +235,15 @@ class PersistenceQueue implements TaskQueueInterface
         $task->completedAt = time();
         $task->updatedAt = time();
 
-        if (!$this->isSuperseded($task)) {
-            $this->storage->updateTaskStatus($task->id, [
+        $data = [
                 'status' => \Framework\Scheduler\Task::STATUS_FAILED,
                 'error' => $task->error,
                 'completed_at' => $task->completedAt,
                 'updated_at' => $task->updatedAt,
-            ]);
-        }
+            ];
+        if ($task->retainsFailure()) {
+            if (!$this->storage->updateRetainedTask($task, $data)) return;
+        } elseif (!$this->isSuperseded($task)) $this->storage->updateTaskStatus($task->id, $data);
 
         // 直接操作 Redis 索引（不调用 inner，防止 remove → hDel）
         $this->redis->zRem('scheduler:running:zset', $task->id);
@@ -232,7 +266,7 @@ class PersistenceQueue implements TaskQueueInterface
             ]);
         }
 
-        if (empty($task->args['storageLifecycle'])) $this->storage->deleteTask($task->id);
+        if (!$task->retainsFailure() && empty($task->args['storageLifecycle'])) $this->storage->deleteTask($task->id);
     }
 
     /**
@@ -247,7 +281,10 @@ class PersistenceQueue implements TaskQueueInterface
         $task->completedAt = time();
         $task->updatedAt = time();
 
-        if (!$this->isSuperseded($task)) {
+        if ($task->retainsFailure()) {
+            // 已由正常周期承接的新 ID 仍记录本轮成功；同 ID 的旧恢复代不能清理或覆盖。
+            if (!$this->storage->updateRetainedTask($task, [], true) && !$this->isSuperseded($task)) return;
+        } elseif (!$this->isSuperseded($task)) {
             $this->storage->updateTaskStatus($task->id, [
                 'status' => \Framework\Scheduler\Task::STATUS_SUCCESS,
                 'error' => '',
@@ -277,6 +314,6 @@ class PersistenceQueue implements TaskQueueInterface
             ]);
         }
 
-        $this->storage->deleteTask($task->id);
+        if (!$task->retainsFailure()) $this->storage->deleteTask($task->id);
     }
 }

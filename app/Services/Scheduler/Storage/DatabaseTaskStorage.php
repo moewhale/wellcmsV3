@@ -52,11 +52,23 @@ class DatabaseTaskStorage implements TaskStorageInterface
             $encodedArgs = json_encode($task->args, JSON_UNESCAPED_UNICODE);
             if (!empty($task->args['storageLifecycle']) && $encodedArgs === false) throw new \InvalidArgumentException('Invalid storage task argument encoding');
             $persist = function () use ($task, $encodedArgs) {
+                if ($task->retainsFailure()) {
+                    Task::sanitizeArgs($task->args);
+                    // 同 ID 不能通过重新 INSERT 覆盖失败或已恢复的原任务。
+                    if ($this->model->readOnMaster(UuidHelper::toBinary($task->id))) {
+                        throw new \Framework\Scheduler\Exception\TaskDispatchException(
+                            \Framework\Scheduler\TaskDispatchResult::OUTCOME_NOT_SUBMITTED, new \RuntimeException('Retained task already exists'));
+                    }
+                }
                 if ($task->dedupeKey !== '') {
                     $old = $this->model->readFromMaster(['dedupe_key' => $task->dedupeKey]);
                     if ($old) {
                         $sameTask = hash_equals($old['id'], UuidHelper::toBinary($task->id));
                         $oldArgs = json_decode((string)($old['args'] ?? '[]'), true);
+                        if (($oldArgs['retainFailed'] ?? false) === true && ((int)$old['status'] === Task::STATUS_FAILED || $sameTask)) {
+                            throw new \Framework\Scheduler\Exception\TaskDispatchException(
+                                \Framework\Scheduler\TaskDispatchResult::OUTCOME_NOT_SUBMITTED, new \RuntimeException('Retained failure requires owner recovery'));
+                        }
                         $protectedStorageTask = !empty($task->args['storageLifecycle']) || !empty($oldArgs['storageLifecycle']);
                         if ($protectedStorageTask && !$sameTask && (int)$old['status'] <= Task::STATUS_RUNNING) {
                             throw new \RuntimeException('Cannot replace an active scheduler task');
@@ -71,7 +83,15 @@ class DatabaseTaskStorage implements TaskStorageInterface
                             }
                             return true;
                         }
-                        $this->model->delete(['id' => $old['id'], 'status' => (int)$old['status']]);
+                        $condition = ['id' => $old['id'], 'status' => (int)$old['status']];
+                        if (($oldArgs['retainFailed'] ?? false) === true) {
+                            $condition['args'] = $old['args'];
+                            $condition['retry_count'] = $old['retry_count'];
+                            if ($this->model->delete($condition) !== 1) throw new \Framework\Scheduler\Exception\TaskDispatchException(
+                                \Framework\Scheduler\TaskDispatchResult::OUTCOME_NOT_SUBMITTED, new \RuntimeException('Retained task changed during registration'));
+                        } else {
+                            $this->model->delete($condition);
+                        }
                     }
                 }
                 $inserted = $this->model->insert([
@@ -102,6 +122,8 @@ class DatabaseTaskStorage implements TaskStorageInterface
         } catch (\Throwable $e) {
             $this->logger->log('insertTask failed: ' . $e->getMessage()
                 . ' task_id=' . $task->id, 'ERROR');
+            // 只有上述未改写任何行的留存拒绝可确定未提交，沿原投递协议释放本次新 claim。
+            if ($e instanceof \Framework\Scheduler\Exception\TaskDispatchException) throw $e;
             throw new \RuntimeException(
                 'Failed to persist scheduler task',
                 (int)$e->getCode(),
@@ -150,9 +172,74 @@ class DatabaseTaskStorage implements TaskStorageInterface
         $tasks = [];
         foreach ($rows as $row) {
             $task = $this->rowToTask($row);
-            if (!empty($task->args['storageLifecycle'])) $tasks[] = $task->toArray();
+            if (!empty($task->args['storageLifecycle']) || $task->retainsFailure()) $tasks[] = $task->toArray();
         }
         return $tasks;
+    }
+
+    /** 只用于显式留存任务；原执行锁内核对原身份、恢复代和重试位置，不改普通执行语义。 */
+    public function isCurrentRetainedTask(Task $task): bool
+    {
+        return $this->retainedRow($task) !== null;
+    }
+
+    private function retainedRow(Task $task): ?array
+    {
+        if (!$task->retainsFailure()) throw new \LogicException('Retained task required');
+        Task::sanitizeArgs($task->args);
+        $row = $this->model->readOnMaster(UuidHelper::toBinary($task->id));
+        if (!$row || (int)$row['status'] > Task::STATUS_RUNNING || (int)$row['retry_count'] !== $task->retryCount
+            || (int)$row['max_retries'] !== $task->maxRetries || $row['class_name'] !== $task->className
+            || $row['method_name'] !== $task->methodName || (string)($row['dedupe_key'] ?? '') !== $task->dedupeKey
+            || json_decode($row['args'], true) !== $task->args) return null;
+        return $row;
+    }
+
+    /** 同一恢复代的原子状态更新/终态删除；旧消息不改写新代，也不删除下一周期。 */
+    public function updateRetainedTask(Task $task, array $data, bool $delete = false): bool
+    {
+        $apply = function () use ($task, $data, $delete): bool {
+            $row = $this->retainedRow($task);
+            if ($row === null) return false;
+            $condition = ['id' => $row['id'], 'status' => $row['status'], 'retry_count' => $row['retry_count'], 'args' => $row['args']];
+            if ($delete) return $this->model->delete($condition) === 1;
+            $data['heartbeat_at'] = time();
+            $updated = $this->model->update($condition, $data);
+            if ($updated === 1) return true;
+            // MySQL 同值 UPDATE 可返回0；必须在同一主库证实本代及全部目标值。
+            $current = $this->model->readOnMaster($row['id']);
+            if (!$current || $current['args'] !== $row['args']) return false;
+            foreach ($data as $field => $value) if (!array_key_exists($field, $current) || (string)$current[$field] !== (string)$value) return false;
+            return true;
+        };
+        return $this->database->inTransaction() ? $apply() : $this->database->transaction($apply, 1, '');
+    }
+
+    /** 所属业务的审计事务恢复原 Failed；提交后只发布，禁止重新插库或清零预算。 */
+    public function restoreRetainedTaskInTransaction(string $id, string $reference, int $retryCount, callable $publish, callable $release): Task
+    {
+        $shard = $this->database->resolveShard('scheduler_tasks');
+        if ($shard !== '' || !$this->database->inTransaction($shard)
+            || !method_exists($this->database, 'afterCommit') || !method_exists($this->database, 'afterRollback')) {
+            throw new \LogicException('Owner recovery requires the active audit transaction');
+        }
+        $row = $this->model->readOnMaster(UuidHelper::toBinary($id));
+        $task = $row ? $this->rowToTask($row) : null;
+        if ($task === null || !$task->retainsFailure() || $task->status !== Task::STATUS_FAILED
+            || $task->retryCount !== $retryCount || $task->args['_recovery_ref'] !== $reference) {
+            throw new \RuntimeException('Retained failure changed');
+        }
+        $task->args['_recovery_ref'] = UuidHelper::generate(false);
+        $task->status = Task::STATUS_PENDING; $task->scheduledAt = time(); $task->updatedAt = time(); $task->error = '';
+        if ($this->model->update(['id' => $row['id'], 'status' => Task::STATUS_FAILED, 'retry_count' => $retryCount, 'args' => $row['args']], [
+            'status' => Task::STATUS_PENDING, 'args' => json_encode($task->args, JSON_UNESCAPED_UNICODE),
+            'scheduled_at' => $task->scheduledAt, 'updated_at' => $task->updatedAt, 'error' => '', 'completed_at' => 0, 'heartbeat_at' => time(),
+        ]) !== 1) throw new \RuntimeException('Retained failure recovery conflict');
+        $this->database->afterRollback($release);
+        $this->database->afterCommit(function () use ($task, $publish, $release): void {
+            try { $publish($task); } finally { $release(); }
+        });
+        return $task;
     }
 
     /**
