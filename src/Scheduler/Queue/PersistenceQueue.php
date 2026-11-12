@@ -146,6 +146,7 @@ class PersistenceQueue implements TaskQueueInterface
             return;
         }
         $task->retryCount++;
+        $task->status = Task::STATUS_RETRYING;
         $task->updatedAt = time();
         $task->error = '';
 
@@ -157,7 +158,8 @@ class PersistenceQueue implements TaskQueueInterface
             'error' => '',
         ]);
 
-        $this->inner->requeue($task);
+        // 上传保护：本次授权仅修复 Scheduler 重试一致性；保留执行器给定时间，禁止内层再次递增或退避。
+        $this->inner->reschedule($task);
 
         if ($this->eventBus !== null) {
             $this->eventBus->emit('task.retried', [
@@ -246,6 +248,7 @@ class PersistenceQueue implements TaskQueueInterface
         } elseif (!$this->isSuperseded($task)) $this->storage->updateTaskStatus($task->id, $data);
 
         // 直接操作 Redis 索引（不调用 inner，防止 remove → hDel）
+        $this->redis->zRem('scheduler:queue:zset', $task->id);
         $this->redis->zRem('scheduler:running:zset', $task->id);
         $this->redis->hSet('scheduler:queue:hash', $task->id, json_encode($task->toArray()));
 
@@ -296,6 +299,7 @@ class PersistenceQueue implements TaskQueueInterface
         $ttl = 3 * 24 * 3600; // 3 天 
 
         // 直接操作 Redis 索引（不调用 inner，防止 remove → hDel）
+        $this->redis->zRem('scheduler:queue:zset', $task->id);
         $this->redis->zAdd('scheduler:stats:success', [$task->completedAt => $task->id]);
         $this->redis->expire('scheduler:stats:success', $ttl);
         $this->redis->zRem('scheduler:running:zset', $task->id);

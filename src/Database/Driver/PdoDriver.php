@@ -193,7 +193,8 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
         return key($shards);
     }
 
-    protected function createGrammar(string $driver): \Framework\Database\Query\Grammar\GrammarInterface
+    // 三数据库主库读取修复：共用已有方言工厂，批量精确读取不复制驱动选择或改动构造器。
+    public static function createGrammar(string $driver): \Framework\Database\Query\Grammar\GrammarInterface
     {
         switch ($driver) {
             case 'mysql':
@@ -576,7 +577,8 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
             $result = $stmt->fetch();
             $stmt = null;
             $this->maybeCollectGarbage();
-            return $result !== false ? $result : [];
+            // 上传保护：2026-11-06 三数据库修复；单行与批读共用原 BYTEA 还原，MySQL/SQLite 标量不变。
+            return $result !== false ? self::normalizeFetchResult([$result])[0] : [];
         } finally {
             $this->release($pdo);
             unset($where, $orderBy, $fields, $sql, $params);
@@ -592,7 +594,8 @@ class PdoDriver implements \Framework\Database\Interfaces\DatabaseInterface, \Fr
     /**
      * 将 PDO fetchAll 结果中的流资源（如 pgsql BYTEA）转换为字符串
      */
-    protected function normalizeFetchResult(array $rows): array
+    // 上传保护：2026-11-06 业主批准兼容修复；批量主库读取复用同一 BYTEA 还原，不改变原转换规则。
+    public static function normalizeFetchResult(array $rows): array
     {
         foreach ($rows as $i => $row) {
             foreach ($row as $k => $v) {

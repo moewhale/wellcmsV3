@@ -82,17 +82,23 @@ class SQLiteGrammar implements GrammarInterface
 
     public function compileBulkUpdate(string $table, string $key, array $rows, array $wheres = []): string
     {
-        // SQLite 批量更新通常通过 CASE 实现，与 MySQL 类似
-        $cases = [];
-        foreach ($rows as $row) {
-            foreach ($row as $col => $val) {
-                if ($col === $key) continue;
-                $cases[$col][] = "WHEN {$this->wrap($key)} = ? THEN ?";
+        // 2026-11-06 用户明确授权：批量增减后缀与 MySQL/PostgreSQL 保持同一转换。
+        $columns = [];
+        if (!empty($rows)) {
+            foreach ($rows[0] as $col => $val) {
+                if ($col !== $key) $columns[] = $col;
             }
         }
         $sets = [];
-        foreach ($cases as $col => $whens) {
-            $sets[] = "{$this->wrap($col)} = CASE " . implode(' ', $whens) . " END";
+        foreach ($columns as $col) {
+            $operator = substr($col, -1);
+            $isRelative = $operator === '+' || $operator === '-';
+            $realCol = $isRelative ? substr($col, 0, -1) : $col;
+            $whens = [];
+            foreach ($rows as $_) {
+                $whens[] = "WHEN {$this->wrap($key)} = ? THEN " . ($isRelative ? $this->wrap($realCol) . " {$operator} ?" : '?');
+            }
+            $sets[] = "{$this->wrap($realCol)} = CASE " . implode(' ', $whens) . " END";
         }
         $ids = array_fill(0, count($rows), '?');
         $sql = "UPDATE {$this->wrap($table)} SET " . implode(', ', $sets) . " WHERE {$this->wrap($key)} IN (" . implode(',', $ids) . ')';

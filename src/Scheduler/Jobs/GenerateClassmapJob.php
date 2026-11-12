@@ -138,7 +138,7 @@ class GenerateClassmapJob implements \Framework\Scheduler\Interfaces\JobInterfac
     }
 
     /**
-     * 扫描所有 PSR 目录；测试、私有 vendor 与运行夹具不进入生产 classmap。
+     * 扫描所有 PSR 目录；测试、文档、备份、私有 vendor 与夹具不进入生产 classmap。
      */
     private function scanClasses(string $basePath): array
     {
@@ -148,7 +148,7 @@ class GenerateClassmapJob implements \Framework\Scheduler\Interfaces\JobInterfac
             $basePath . 'src',
             $basePath . 'plugins'
         ];
-        $excludedDirectories = ['Tests', 'tests', 'vendor', '.runtime-test'];
+        $excludedDirectories = ['tests', 'docs', 'backups', 'fixtures', 'vendor', '.runtime-test'];
 
         foreach ($scanConfig as $directoryPath) {
             $scanRoot = realpath($directoryPath);
@@ -163,7 +163,7 @@ class GenerateClassmapJob implements \Framework\Scheduler\Interfaces\JobInterfac
                 $directory,
                 function (\SplFileInfo $entry) use ($excludedDirectories): bool {
                     return !$entry->isDir()
-                        || !in_array($entry->getFilename(), $excludedDirectories, true);
+                        || !in_array(strtolower($entry->getFilename()), $excludedDirectories, true);
                 }
             );
             $iterator = new \RecursiveIteratorIterator(
@@ -186,7 +186,7 @@ class GenerateClassmapJob implements \Framework\Scheduler\Interfaces\JobInterfac
         foreach ($files as $fullPath) {
             foreach ($this->declaredClasses($fullPath) as $className) {
                 if (isset($classmap[$className]) && $classmap[$className] !== $fullPath) {
-                    throw new \RuntimeException("Duplicate classmap declaration: {$className}");
+                    throw new \RuntimeException("Duplicate classmap declaration: {$className} in {$classmap[$className]} and {$fullPath}");
                 }
                 $classmap[$className] = $fullPath;
             }

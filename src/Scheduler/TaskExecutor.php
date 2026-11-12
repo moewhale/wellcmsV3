@@ -143,6 +143,9 @@ class TaskExecutor
 
     protected function executeTask(\Framework\Scheduler\Task $task): void
     {
+        // 上传保护：仅丢弃历史队列中的终态消息，不重新调用 Job 或改写其业务记录。
+        if (!in_array($task->status, [Task::STATUS_PENDING, Task::STATUS_RETRYING, Task::STATUS_RUNNING], true)) return;
+
         // C-3 修复: 在加锁前发送事件
         if ($this->eventBus !== null) {
             $this->eventBus->emit('task.started', [
@@ -253,23 +256,13 @@ class TaskExecutor
                 }
             }
 
-            if (!$retained) {
-                // 原子释放锁
-                $this->redis->unlock($lockKey, $lockToken);
-
-                // 清理运行状态标记
-                $this->redis->zRem('scheduler:running:zset', $task->id);
-                $this->redis->hDel('scheduler:executor:pids', $task->id);
-            }
-
             // 幂等锁已在 invokeCallback 前释放，此处不再重复删除
         } finally {
-            if ($retained) {
-                try {
-                    $this->redis->zRem('scheduler:running:zset', $task->id);
-                    $this->redis->hDel('scheduler:executor:pids', $task->id);
-                } finally { $this->redis->unlock($lockKey, $lockToken); }
-            }
+            // 上传保护：本次授权仅补齐 Scheduler 异常收尾；普通任务与留存任务均在持锁期间清理运行标记。
+            try {
+                $this->redis->zRem('scheduler:running:zset', $task->id);
+                $this->redis->hDel('scheduler:executor:pids', $task->id);
+            } finally { $this->redis->unlock($lockKey, $lockToken); }
         }
     }
 

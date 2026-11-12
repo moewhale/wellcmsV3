@@ -247,7 +247,7 @@ class PgSqlGrammar implements GrammarInterface
     public function compileTableExists(string $table): string
     {
         $safe = str_replace("'", "''", $table);
-        return "SELECT tablename FROM pg_catalog.pg_tables WHERE tablename = '{$safe}'";
+        return "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = CURRENT_SCHEMA() AND tablename = '{$safe}'";
     }
 
     public function compileSetCharset(string $charset, string $collation): string
